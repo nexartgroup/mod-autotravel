@@ -53,9 +53,14 @@ public:
     }
 
     // Syntax (wird ausschliesslich vom Addon erzeugt):
-    //   .at start   <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <Zielname...>
-    //   .at tp      <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <Zielname...>
-    //   .at resolve <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny>
+    //   .at start   <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny> <Name...>
+    //   .at tp      <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny> <Name...>
+    //   .at resolve <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny>
+    //
+    // curMap/cnx/cny sind die Karten-ID und die normalisierte Position der
+    // Zone, in der der Spieler GERADE steht. Damit kann der Server die
+    // Zuordnung Client-ID -> WorldMapArea-ID auch dann pruefen, wenn das Ziel
+    // in einer anderen Zone liegt.
     //   .at stop
     //   .at repath
     //   .at status
@@ -89,7 +94,15 @@ public:
             bool   hasCalib = atoi(a[4].c_str()) != 0;
             float  pnx      = float(atof(a[5].c_str()));
             float  pny      = float(atof(a[6].c_str()));
-            std::string name = JoinFrom(a, 7);
+            if (a.size() >= 10)
+            {
+                uint32 curMap = uint32(atoi(a[7].c_str()));
+                float  cnx    = float(atof(a[8].c_str()));
+                float  cny    = float(atof(a[9].c_str()));
+                sAutoTravel->LearnMapId(player, curMap, cnx, cny);
+            }
+
+            std::string name = JoinFrom(a, 10);
 
             if (cmd == "start")
                 sAutoTravel->Start(player, uiMapId, nx, ny, hasCalib, pnx, pny, name);

@@ -94,6 +94,10 @@ public:
                   bool hasCalib, float pnx, float pny, std::string const& name);
     void Resolve(Player* player, uint32 uiMapId, float nx, float ny,
                  bool hasCalib, float pnx, float pny);
+
+    // Lernt die Zuordnung Client-Karten-ID -> WorldMapArea-ID anhand der
+    // eigenen Position. Funktioniert auch, wenn das Ziel woanders liegt.
+    void LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny);
     void Stop(Player* player, std::string const& reason, bool silent = false);
     void Repath(Player* player);
     void PrintStatus(Player* player);

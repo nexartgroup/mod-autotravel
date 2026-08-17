@@ -250,6 +250,77 @@ void AutoTravelMgr::LoadMapAreas()
 // ---------------------------------------------------------------------------
 // Kartenkoordinaten -> Weltkoordinaten
 // ---------------------------------------------------------------------------
+// Die vom Client gelieferte Karten-ID (GetCurrentMapAreaID) ist NICHT
+// zwangslaeufig die ID aus WorldMapArea.dbc. Statt eine Konvention zu
+// unterstellen, wird sie ueberprueft und noetigenfalls korrigiert:
+//
+// Schickt das Addon zusaetzlich die eigene normalisierte Position mit
+// (hasCalib), dann kennt der Server fuer denselben Punkt beide Darstellungen.
+// Er probiert alle Kartenausschnitte der aktuellen Map durch und nimmt den,
+// der die bekannte echte Position reproduziert. Das ist eindeutig: nur der
+// richtige Ausschnitt trifft auf wenige Yards genau.
+//
+// Die so gefundene Zuordnung Client-ID -> DBC-ID wird gemerkt und spaeter
+// auch dann benutzt, wenn keine Gegenprobe moeglich ist (Ziel in einer
+// anderen Zone als der Spieler).
+
+namespace
+{
+    std::unordered_map<uint32, uint32> sATIdFix;      // Client-ID -> DBC-ID
+    int32 sATIdDelta = 0;
+    bool  sATIdDeltaKnown = false;
+
+    void ApplyArea(ATMapArea const& e, bool swapped, float mx, float my, float& wx, float& wy)
+    {
+        if (!swapped)
+        {
+            // waagerechte Kartenachse -> Welt-Y, senkrechte -> Welt-X
+            wy = e.left + mx * (e.right - e.left);
+            wx = e.top  + my * (e.bottom - e.top);
+        }
+        else
+        {
+            wx = e.left + mx * (e.right - e.left);
+            wy = e.top  + my * (e.bottom - e.top);
+        }
+    }
+}
+
+void AutoTravelMgr::LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny)
+{
+    if (!sATMapAreasLoaded || !clientMapId || pnx <= 0.0f || pny <= 0.0f)
+        return;
+    if (sATIdFix.find(clientMapId) != sATIdFix.end())
+        return;                                   // schon bekannt
+
+    float bestErr = 1.0e9f;
+    uint32 bestId = 0;
+
+    for (auto const& kv : sATMapAreas)
+    {
+        if (kv.second.mapId != player->GetMapId())
+            continue;
+        for (int sw = 0; sw < 2; ++sw)
+        {
+            float wx, wy;
+            ApplyArea(kv.second, sw != 0, pnx, pny, wx, wy);
+            float e2 = std::sqrt(std::pow(wx - player->GetPositionX(), 2) +
+                                 std::pow(wy - player->GetPositionY(), 2));
+            if (e2 < bestErr) { bestErr = e2; bestId = kv.first; }
+        }
+    }
+
+    if (bestId && bestErr <= 250.0f)
+    {
+        sATIdFix[clientMapId] = bestId;
+        sATIdDelta = int32(bestId) - int32(clientMapId);
+        sATIdDeltaKnown = true;
+        if (bestId != clientMapId)
+            LOG_INFO("module", "mod-autotravel: Karten-ID {} des Clients entspricht "
+                               "WorldMapArea {} (Abweichung {:.1f} yd).",
+                     clientMapId, bestId, bestErr);
+    }
+}
 
 bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                bool hasCalib, float pnx, float pny,
@@ -261,64 +332,95 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
         return false;
     }
 
-    auto it = sATMapAreas.find(uiMapId);
-    if (it == sATMapAreas.end())
-    {
-        err = "Unbekannte Karten-ID " + std::to_string(uiMapId) + ".";
-        return false;
-    }
-    ATMapArea const& e = it->second;
+    uint32 chosen = 0;
+    bool   swapped = false;
 
-    if (e.mapId != player->GetMapId())
-    {
-        err = "Das Ziel liegt auf einer anderen Karte (Map " + std::to_string(e.mapId) +
-              "). Kontinentwechsel wird beim Laufen nicht unterstuetzt.";
-        return false;
-    }
-
-    // Waagerechte Kartenachse -> Welt-Y (left..right),
-    // senkrechte Kartenachse  -> Welt-X (top..bottom).
-    auto variantA = [&](float mx, float my, float& wx, float& wy)
-    {
-        wy = e.left + mx * (e.right - e.left);
-        wx = e.top  + my * (e.bottom - e.top);
-    };
-    // Fallback, falls ein Extractor die Feldpaare vertauscht ablegt.
-    auto variantB = [&](float mx, float my, float& wx, float& wy)
-    {
-        wx = e.left + mx * (e.right - e.left);
-        wy = e.top  + my * (e.bottom - e.top);
-    };
-
+    // --- Fall 1: Gegenprobe moeglich -> richtigen Ausschnitt suchen ---------
     if (hasCalib && pnx > 0.0f && pny > 0.0f)
     {
-        float ax, ay, bx, by;
-        variantA(pnx, pny, ax, ay);
-        variantB(pnx, pny, bx, by);
+        float bestErr = 1.0e9f;
+        uint32 bestId = 0;
+        bool   bestSwapped = false;
 
-        float ea = std::sqrt(std::pow(ax - player->GetPositionX(), 2) +
-                             std::pow(ay - player->GetPositionY(), 2));
-        float eb = std::sqrt(std::pow(bx - player->GetPositionX(), 2) +
-                             std::pow(by - player->GetPositionY(), 2));
+        for (auto const& kv : sATMapAreas)
+        {
+            if (kv.second.mapId != player->GetMapId())
+                continue;
 
-        if (ea > 400.0f && eb > 400.0f)
+            for (int sw = 0; sw < 2; ++sw)
+            {
+                float wx, wy;
+                ApplyArea(kv.second, sw != 0, pnx, pny, wx, wy);
+                float e2 = std::sqrt(std::pow(wx - player->GetPositionX(), 2) +
+                                     std::pow(wy - player->GetPositionY(), 2));
+                if (e2 < bestErr)
+                {
+                    bestErr = e2;
+                    bestId = kv.first;
+                    bestSwapped = (sw != 0);
+                }
+            }
+        }
+
+        if (!bestId || bestErr > 250.0f)
         {
             char b[256];
             std::snprintf(b, sizeof(b),
-                "Koordinaten-Gegenprobe fehlgeschlagen (Abweichung %.0f/%.0f yd). "
-                "Vermutlich die falsche Karten-ID - /at target zeigt die benutzte.", ea, eb);
+                "Kein passender Kartenausschnitt gefunden (bester Treffer ID %u, %.0f yd daneben). "
+                "Ziel wird nicht angefahren. Pruefe die erkannte Zone mit 'at target'.", bestId, bestErr);
             err = b;
             return false;
         }
 
-        if (eb < ea)
-            variantB(nx, ny, outX, outY);
+        if (bestId != uiMapId)
+        {
+            if (sATIdFix.find(uiMapId) == sATIdFix.end())
+                LOG_INFO("module", "mod-autotravel: Karten-ID {} des Clients entspricht "
+                                   "WorldMapArea {} (Abweichung {:.1f} yd).",
+                         uiMapId, bestId, bestErr);
+            sATIdFix[uiMapId] = bestId;
+            sATIdDelta = int32(bestId) - int32(uiMapId);
+            sATIdDeltaKnown = true;
+        }
         else
-            variantA(nx, ny, outX, outY);
-        return true;
+            sATIdFix[uiMapId] = bestId;
+
+        chosen = bestId;
+        swapped = bestSwapped;
+    }
+    // --- Fall 2: keine Gegenprobe -> gelernte Zuordnung benutzen ------------
+    else
+    {
+        uint32 tryId = uiMapId;
+
+        auto fix = sATIdFix.find(uiMapId);
+        if (fix != sATIdFix.end())
+            tryId = fix->second;
+        else if (sATIdDeltaKnown)
+        {
+            uint32 shifted = uint32(int32(uiMapId) + sATIdDelta);
+            if (sATMapAreas.find(shifted) != sATMapAreas.end())
+                tryId = shifted;
+        }
+
+        auto it = sATMapAreas.find(tryId);
+        if (it == sATMapAreas.end())
+        {
+            err = "Unbekannte Karten-ID " + std::to_string(uiMapId) + ".";
+            return false;
+        }
+        if (it->second.mapId != player->GetMapId())
+        {
+            err = "Das Ziel liegt auf einer anderen Karte (Map " +
+                  std::to_string(it->second.mapId) +
+                  "). Kontinentwechsel wird beim Laufen nicht unterstuetzt.";
+            return false;
+        }
+        chosen = tryId;
     }
 
-    variantA(nx, ny, outX, outY);
+    ATMapArea const& e = sATMapAreas.find(chosen)->second;
+    ApplyArea(e, swapped, nx, ny, outX, outY);
     return true;
 }
 
