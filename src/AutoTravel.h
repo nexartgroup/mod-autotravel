@@ -7,6 +7,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class Player;
 
@@ -17,8 +18,29 @@ enum ATState : uint8
     AT_TRAVELING,
     AT_COMBAT_PAUSED,
     AT_MOUNTING,
+    AT_WAIT_FLIGHT,
     AT_ARRIVED,
     AT_FAILED
+};
+
+enum ATLegFlags : uint8
+{
+    AT_LEG_NORMAL = 0,
+    AT_LEG_FLIGHT = 1,     // Carbonite-Abschnitt "F": Flugmeister
+};
+
+// Ein Stuetzpunkt der Carbonite-Route. Zwischen zwei Stuetzpunkten sucht das
+// NavMesh den tatsaechlichen Weg -- Carbonite gibt nur die grobe Abfolge vor
+// (Zonenuebergang, Torbogen, Bruecke, Flugpunkt, Ziel).
+struct ATLeg
+{
+    uint32 uiMapId = 0;
+    float  nx = 0.0f, ny = 0.0f;
+    uint8  flags = AT_LEG_NORMAL;
+
+    float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
+    bool   resolved = false;
+    std::string name;
 };
 
 char const* ATStateName(ATState s);
@@ -27,6 +49,7 @@ struct ATConfig
 {
     bool  enable            = true;
     float arrivalDistance   = 8.0f;
+    float legDistance       = 15.0f;   // Radius fuer Zwischenstuetzpunkte
     bool  autoMount         = true;
     float mountMinDistance  = 150.0f;
     bool  pauseInCombat     = true;
@@ -52,10 +75,14 @@ struct ATSession
     ATState state       = AT_IDLE;
 
     uint32  mapId       = 0;
-    float   destX       = 0.0f;
+    float   destX       = 0.0f;    // aktuelles Etappenziel
     float   destY       = 0.0f;
     float   destZ       = 0.0f;
     std::string destName;
+
+    std::vector<ATLeg> route;
+    size_t  legIdx      = 0;
+    bool    wasInFlight = false;
 
     Movement::PointsArray path;
     size_t  idx         = 0;
@@ -91,6 +118,10 @@ public:
 
     bool Start(Player* player, uint32 uiMapId, float nx, float ny,
                bool hasCalib, float pnx, float pny, std::string const& name);
+
+    // Routenaufbau: erst RouteAdd (ggf. mehrfach), dann RouteStart.
+    void RouteAdd(Player* player, bool clearFirst, std::string const& packed);
+    bool RouteStart(Player* player, std::string const& name);
     void Teleport(Player* player, uint32 uiMapId, float nx, float ny,
                   bool hasCalib, float pnx, float pny, std::string const& name);
     void Resolve(Player* player, uint32 uiMapId, float nx, float ny,
@@ -115,6 +146,9 @@ private:
     void UpdateSession(Player* player, ATSession& s, uint32 diff);
 
     bool CalculatePath(Player* player, ATSession& s);
+    bool BeginTravel(Player* player, ATSession& s);
+    bool SetLegTarget(Player* player, ATSession& s);
+    bool AdvanceLeg(Player* player, ATSession& s);
     bool TryPath(Player* player, float x, float y, float z, bool straight,
                  Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const;
 
@@ -148,6 +182,7 @@ private:
 
     std::unordered_map<ObjectGuid, ATSession> _sessions;
     std::unordered_map<ObjectGuid, uint32> _tpCooldown;   // Unix-Zeit
+    std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
     uint32 _tick = 0;
 };
 

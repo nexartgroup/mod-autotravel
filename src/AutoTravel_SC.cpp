@@ -115,6 +115,29 @@ public:
             return true;
         }
 
+        if (cmd == "route")
+        {
+            // .at route <0=neu|1=anhaengen> <map:nx:ny:flags> ...
+            if (a.size() < 3) return true;
+            bool clearFirst = (atoi(a[1].c_str()) == 0);
+            sAutoTravel->RouteAdd(player, clearFirst, JoinFrom(a, 2));
+            return true;
+        }
+
+        if (cmd == "rstart")
+        {
+            // .at rstart <curMap> <cnx> <cny> <Name...>
+            if (a.size() >= 4)
+            {
+                uint32 curMap = uint32(atoi(a[1].c_str()));
+                float  cnx    = float(atof(a[2].c_str()));
+                float  cny    = float(atof(a[3].c_str()));
+                sAutoTravel->LearnMapId(player, curMap, cnx, cny);
+                sAutoTravel->RouteStart(player, JoinFrom(a, 4));
+            }
+            return true;
+        }
+
         if (cmd == "stop")
         {
             sAutoTravel->Stop(player, "Reise gestoppt.");

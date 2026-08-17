@@ -15,6 +15,13 @@ AutoTravel.Enable = 1
 #        Default: 8
 AutoTravel.ArrivalDistance = 8
 
+#    AutoTravel.LegDistance
+#        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
+#        erreicht gilt. Grosszuegiger als der Zielradius, weil es dort nicht
+#        auf Genauigkeit ankommt.
+#        Default: 15
+AutoTravel.LegDistance = 15
+
 #    AutoTravel.AutoMount
 #        Automatisch ein Bodenmount benutzen, wenn erlaubt.
 #        Default: 1

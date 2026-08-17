@@ -22,6 +22,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <sstream>
 #include <vector>
 
 ATConfig ATConf;
@@ -35,6 +36,7 @@ char const* ATStateName(ATState s)
         case AT_TRAVELING:      return "TRAVELING";
         case AT_COMBAT_PAUSED:  return "PAUSED - COMBAT";
         case AT_MOUNTING:       return "MOUNTING";
+        case AT_WAIT_FLIGHT:    return "WARTE AUF FLUG";
         case AT_ARRIVED:        return "ARRIVED";
         case AT_FAILED:         return "FAILED";
     }
@@ -71,6 +73,7 @@ void AutoTravelMgr::LoadConfig()
 {
     ATConf.enable            = sConfigMgr->GetOption<bool>  ("AutoTravel.Enable", true);
     ATConf.arrivalDistance   = sConfigMgr->GetOption<float> ("AutoTravel.ArrivalDistance", 8.0f);
+    ATConf.legDistance       = sConfigMgr->GetOption<float> ("AutoTravel.LegDistance", 15.0f);
     ATConf.autoMount         = sConfigMgr->GetOption<bool>  ("AutoTravel.AutoMount", true);
     ATConf.mountMinDistance  = sConfigMgr->GetOption<float> ("AutoTravel.MountMinDistance", 150.0f);
     ATConf.pauseInCombat     = sConfigMgr->GetOption<bool>  ("AutoTravel.PauseInCombat", true);
@@ -437,6 +440,46 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 
     ATMapArea const& e = sATMapAreas.find(chosen)->second;
     ApplyArea(e, swapped, nx, ny, outX, outY);
+
+    // Gegenprobe ueber die Zone: der aufgeloeste Punkt muss in der Zone
+    // liegen, die zu diesem Kartenausschnitt gehoert. Damit faellt eine um
+    // eins verschobene Karten-ID auch dann auf, wenn der Spieler ganz woanders
+    // steht -- genau der Fall bei Zwischenstuetzpunkten der Route.
+    if (!hasCalib && e.areaId)
+    {
+        float probeZ = BestGroundZ(player, outX, outY);
+        if (probeZ > INVALID_HEIGHT)
+        {
+            uint32 zoneAt = player->GetMap()->GetZoneId(player->GetPhaseMask(), outX, outY, probeZ);
+            if (zoneAt && zoneAt != e.areaId)
+            {
+                // Nachbar-IDs probieren
+                for (int32 d = -1; d <= 1; d += 2)
+                {
+                    auto alt = sATMapAreas.find(uint32(int32(chosen) + d));
+                    if (alt == sATMapAreas.end() || alt->second.mapId != player->GetMapId())
+                        continue;
+                    float ax, ay;
+                    ApplyArea(alt->second, swapped, nx, ny, ax, ay);
+                    float az = BestGroundZ(player, ax, ay);
+                    if (az <= INVALID_HEIGHT)
+                        continue;
+                    if (player->GetMap()->GetZoneId(player->GetPhaseMask(), ax, ay, az) == alt->second.areaId)
+                    {
+                        sATIdFix[uiMapId] = alt->first;
+                        sATIdDelta = int32(alt->first) - int32(uiMapId);
+                        sATIdDeltaKnown = true;
+                        LOG_INFO("module", "mod-autotravel: Karten-ID {} ueber Zonenpruefung "
+                                           "auf WorldMapArea {} korrigiert.", uiMapId, alt->first);
+                        outX = ax;
+                        outY = ay;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     return true;
 }
 
@@ -699,6 +742,163 @@ void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
     Msg(player, buf);
 }
 
+
+// ---------------------------------------------------------------------------
+// Route
+// ---------------------------------------------------------------------------
+// Carbonite kennt die groben Stuetzpunkte einer Reise: Zonenuebergaenge,
+// Torbogen, Bruecken, Flugpunkte, das Ziel. Genau die fehlen dem NavMesh als
+// Zwischenziele -- deshalb scheiterte "in einem Rutsch nach Sturmwind".
+//
+// AutoTravel laeuft die Stuetzpunkte der Reihe nach an und laesst zwischen je
+// zwei Punkten den PathGenerator den echten Weg suchen. Carbonite gibt also
+// die Abfolge vor, das NavMesh den Weg.
+//
+// Format eines Stuetzpunkts:  <kartenId>:<nx>:<ny>:<flags>
+
+void AutoTravelMgr::RouteAdd(Player* player, bool clearFirst, std::string const& packed)
+{
+    std::vector<ATLeg>& r = _pendingRoutes[player->GetGUID()];
+    if (clearFirst)
+        r.clear();
+
+    std::istringstream iss(packed);
+    std::string tok;
+    while (iss >> tok)
+    {
+        ATLeg leg;
+        size_t a = tok.find(':');
+        size_t b = (a == std::string::npos) ? a : tok.find(':', a + 1);
+        size_t c = (b == std::string::npos) ? b : tok.find(':', b + 1);
+        if (a == std::string::npos || b == std::string::npos || c == std::string::npos)
+            continue;
+
+        leg.uiMapId = uint32(atoi(tok.substr(0, a).c_str()));
+        leg.nx      = float(atof(tok.substr(a + 1, b - a - 1).c_str()));
+        leg.ny      = float(atof(tok.substr(b + 1, c - b - 1).c_str()));
+        leg.flags   = uint8(atoi(tok.substr(c + 1).c_str()));
+
+        if (!leg.uiMapId || leg.nx < 0.0f || leg.nx > 1.0f || leg.ny < 0.0f || leg.ny > 1.0f)
+            continue;
+        if (r.size() >= 32)
+            break;
+        r.push_back(leg);
+    }
+}
+
+bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
+{
+    auto it = _pendingRoutes.find(player->GetGUID());
+    if (it == _pendingRoutes.end() || it->second.empty())
+    {
+        Msg(player, "Keine Route empfangen.");
+        return false;
+    }
+
+    if (!ATConf.enable)                       { Msg(player, "AutoTravel ist deaktiviert."); return false; }
+    if (!sWorld->getBoolConfig(CONFIG_ENABLE_MMAPS))
+    {
+        Msg(player, "Serverseitiges Pathfinding (mmaps) ist deaktiviert.");
+        return false;
+    }
+    if (!player->IsAlive())                   { Msg(player, "Du bist tot."); return false; }
+    if (player->IsInFlight() || player->GetVehicle() || player->IsBeingTeleported())
+    {
+        Msg(player, "Jetzt gerade nicht moeglich (Flug/Fahrzeug/Teleport).");
+        return false;
+    }
+
+    ATSession& s = _sessions[player->GetGUID()];
+    bool wasDebug = s.debug;
+    s = ATSession();
+    s.debug    = wasDebug;
+    s.mapId    = player->GetMapId();
+    s.destName = name.empty() ? "Ziel" : name;
+    s.route    = it->second;
+    s.legIdx   = 0;
+
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "Route mit %u Stuetzpunkten uebernommen.", uint32(s.route.size()));
+    Dbg(player, s, buf);
+
+    return BeginTravel(player, s);
+}
+
+// Aktuellen Stuetzpunkt in Weltkoordinaten aufloesen.
+bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
+{
+    while (s.legIdx < s.route.size())
+    {
+        ATLeg& leg = s.route[s.legIdx];
+
+        if (!leg.resolved)
+        {
+            uint32 mapId = 0;
+            std::string err;
+            if (!ResolveWorld(player, leg.uiMapId, leg.nx, leg.ny, false, 0.0f, 0.0f,
+                              leg.wx, leg.wy, leg.wz, mapId, err))
+            {
+                char b[224];
+                std::snprintf(b, sizeof(b), "Stuetzpunkt %u uebersprungen: %s",
+                              uint32(s.legIdx + 1), err.c_str());
+                Dbg(player, s, b);
+                ++s.legIdx;
+                continue;
+            }
+            leg.resolved = true;
+        }
+
+        s.destX = leg.wx;
+        s.destY = leg.wy;
+        s.destZ = leg.wz;
+        return true;
+    }
+    return false;
+}
+
+bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
+{
+    if (!SetLegTarget(player, s))
+    {
+        Msg(player, "Kein brauchbarer Stuetzpunkt in der Route.");
+        _sessions.erase(player->GetGUID());
+        return false;
+    }
+
+    s.state = AT_CALCULATE_PATH;
+    s.lastX = player->GetPositionX();
+    s.lastY = player->GetPositionY();
+    s.lastZ = player->GetPositionZ();
+
+    Msg(player, "Reise gestartet: " + s.destName);
+    PushStatus(player, s);
+    return true;
+}
+
+// Naechsten Stuetzpunkt aktivieren. false = Ziel erreicht.
+bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
+{
+    ++s.legIdx;
+    s.repathAttempts = 0;
+    s.mountTried = false;
+    s.path.clear();
+    s.idx = 0;
+
+    if (s.legIdx >= s.route.size())
+        return false;
+
+    if (!SetLegTarget(player, s))
+        return false;
+
+    char b[160];
+    std::snprintf(b, sizeof(b), "Stuetzpunkt %u/%u erreicht, weiter zum naechsten.",
+                  uint32(s.legIdx), uint32(s.route.size()));
+    Dbg(player, s, b);
+
+    s.state = AT_CALCULATE_PATH;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Start / Stop / Repath
 // ---------------------------------------------------------------------------
@@ -714,27 +914,18 @@ bool AutoTravelMgr::IsActive(Player* player) const
 bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
                           bool hasCalib, float pnx, float pny, std::string const& name)
 {
-    if (!ATConf.enable)
-    {
-        Msg(player, "AutoTravel ist auf diesem Server deaktiviert.");
-        return false;
-    }
-
+    // Einzelziel = Route mit genau einem Stuetzpunkt. Dadurch gibt es nur
+    // einen Ablauf im Tick, egal ob Carbonite eine Route geliefert hat.
+    if (!ATConf.enable)                       { Msg(player, "AutoTravel ist deaktiviert."); return false; }
     if (!sWorld->getBoolConfig(CONFIG_ENABLE_MMAPS))
     {
-        Msg(player, "Serverseitiges Pathfinding (mmaps) ist deaktiviert. AutoTravel kann nicht arbeiten.");
+        Msg(player, "Serverseitiges Pathfinding (mmaps) ist deaktiviert.");
         return false;
     }
-
-    if (!player->IsAlive())
-    {
-        Msg(player, "Du bist tot.");
-        return false;
-    }
-
+    if (!player->IsAlive())                   { Msg(player, "Du bist tot."); return false; }
     if (player->IsInFlight() || player->GetVehicle() || player->IsBeingTeleported())
     {
-        Msg(player, "AutoTravel kann jetzt nicht gestartet werden (Flug/Fahrzeug/Teleport).");
+        Msg(player, "Jetzt gerade nicht moeglich (Flug/Fahrzeug/Teleport).");
         return false;
     }
 
@@ -748,28 +939,28 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     }
 
     ATSession& s = _sessions[player->GetGUID()];
-
     bool wasDebug = s.debug;
     s = ATSession();
-    s.debug     = wasDebug;
-    s.mapId     = player->GetMapId();
-    s.destX     = wx;
-    s.destY     = wy;
-    s.destZ     = wz;
-    s.destName  = name.empty() ? "Ziel" : name;
-    s.state     = AT_CALCULATE_PATH;
-    s.lastX     = player->GetPositionX();
-    s.lastY     = player->GetPositionY();
-    s.lastZ     = player->GetPositionZ();
+    s.debug    = wasDebug;
+    s.mapId    = player->GetMapId();
+    s.destName = name.empty() ? "Ziel" : name;
 
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "Ziel uebernommen: %s (Map %u | X %.2f Y %.2f Z %.2f)",
-                  s.destName.c_str(), s.mapId, s.destX, s.destY, s.destZ);
+    ATLeg leg;
+    leg.uiMapId = uiMapId;
+    leg.nx = nx;
+    leg.ny = ny;
+    leg.wx = wx;
+    leg.wy = wy;
+    leg.wz = wz;
+    leg.resolved = true;
+    s.route.push_back(leg);
+    s.legIdx = 0;
+
+    char buf[224];
+    std::snprintf(buf, sizeof(buf), "Ziel: Map %u | X %.2f Y %.2f Z %.2f", s.mapId, wx, wy, wz);
     Dbg(player, s, buf);
 
-    Msg(player, "Reise gestartet: " + s.destName);
-    PushStatus(player, s);
-    return true;
+    return BeginTravel(player, s);
 }
 
 void AutoTravelMgr::Stop(Player* player, std::string const& reason, bool silent)
@@ -1272,7 +1463,20 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    if (player->IsInFlight() || player->GetVehicle())
+    if (player->IsInFlight())
+    {
+        HaltMovement(player, s);
+        s.wasInFlight = true;
+        if (s.state != AT_WAIT_FLIGHT)
+        {
+            s.state = AT_WAIT_FLIGHT;
+            Msg(player, "Flug erkannt - AutoTravel wartet auf die Landung.");
+            PushStatus(player, s);
+        }
+        return;
+    }
+
+    if (player->GetVehicle())
     {
         HaltMovement(player, s);
         return;
@@ -1316,10 +1520,32 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     }
 
     // --- Zielankunft ---------------------------------------------------------
+    bool lastLeg = (s.legIdx + 1 >= s.route.size());
+    float radius = lastLeg ? ArrivalDist(s) : ATConf.legDistance;
+
     float dist = player->GetExactDist2d(s.destX, s.destY);
-    if (dist <= ArrivalDist(s) && s.state != AT_MOUNTING)
+    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
     {
         HaltMovement(player, s);
+
+        // Flugpunkt erreicht: der Spieler muss den Flug selbst starten,
+        // ein Addon darf das in 3.3.5a nicht (geschuetzte Funktion).
+        if (!lastLeg && (s.route[s.legIdx].flags & AT_LEG_FLIGHT))
+        {
+            s.state = AT_WAIT_FLIGHT;
+            s.wasInFlight = false;
+            Msg(player, "Flugmeister erreicht. Nimm den Flug - AutoTravel setzt "
+                        "die Reise nach der Landung selbst fort.");
+            PushStatus(player, s);
+            return;
+        }
+
+        if (AdvanceLeg(player, s))
+        {
+            PushStatus(player, s);
+            return;
+        }
+
         s.state = AT_ARRIVED;
         PushStatus(player, s);
         Msg(player, "Ziel erreicht - " + s.destName + ".");
@@ -1347,6 +1573,25 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             s.repathAttempts = 0;
             s.mountTried = false;
             PushStatus(player, s);
+            return;
+        }
+
+        // -------------------------------------------------------------------
+        case AT_WAIT_FLIGHT:
+        {
+            if (s.wasInFlight)
+            {
+                s.wasInFlight = false;
+                Msg(player, "Gelandet - Reise wird fortgesetzt.");
+                if (!AdvanceLeg(player, s))
+                {
+                    s.state = AT_ARRIVED;
+                    PushStatus(player, s);
+                    Msg(player, "Ziel erreicht - " + s.destName + ".");
+                    s.state = AT_IDLE;
+                }
+                PushStatus(player, s);
+            }
             return;
         }
 
@@ -1387,6 +1632,23 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 if (s.repathAttempts >= ATConf.maxRepathAttempts)
                 {
                     HaltMovement(player, s);
+
+                    // Nicht die ganze Reise wegwerfen: der naechste
+                    // Stuetzpunkt ist oft von hier aus erreichbar.
+                    if (s.legIdx + 1 < s.route.size())
+                    {
+                        char sb[160];
+                        std::snprintf(sb, sizeof(sb),
+                                      "Stuetzpunkt %u nicht erreichbar - ueberspringe ihn.",
+                                      uint32(s.legIdx + 1));
+                        Msg(player, sb);
+                        if (AdvanceLeg(player, s))
+                        {
+                            PushStatus(player, s);
+                            return;
+                        }
+                    }
+
                     if (s.lastPathType & PATHFIND_NOT_USING_PATH)
                         Msg(player, "Fuer diese Kartenkachel sind keine mmaps geladen. Der Server "
                                     "kann hier keinen Weg berechnen - eine Luftlinie waere quer "
