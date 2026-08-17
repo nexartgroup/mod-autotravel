@@ -723,6 +723,8 @@ void AutoTravelMgr::ReleaseControl(Player* player, ATSession& s)
 {
     if (s.controlTaken)
     {
+        // Fallbezug zuruecksetzen, bevor der Client wieder selbst rechnet.
+        player->SetFallInformation(0, player->GetPositionZ());
         player->SetClientControl(player, true);
         s.controlTaken = false;
     }
@@ -764,6 +766,13 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     init.SetWalk(false);
     init.Launch();
 
+    // Der Client zaehlt waehrend einer servergesteuerten Bewegung Fallzeit
+    // mit, wenn der Spline bergab durch die Luft schneidet. Beim Zurueckgeben
+    // der Kontrolle wird daraus Fallschaden, ohne dass der Charakter wirklich
+    // gefallen ist. Der Bezugspunkt wird deshalb bei jedem Abschnitt neu
+    // gesetzt.
+    player->SetFallInformation(0, player->GetPositionZ());
+
     char buf[128];
     std::snprintf(buf, sizeof(buf), "Movement gestartet: %u Punkte (Index %u/%u)",
                   uint32(chunk.size()), uint32(s.idx), uint32(s.path.size()));
@@ -774,39 +783,158 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 // Pathfinding (echtes AzerothCore NavMesh via PathGenerator)
 // ---------------------------------------------------------------------------
 
-bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
+namespace
+{
+    std::string PathTypeName(uint32 t)
+    {
+        std::string out;
+        if (t & PATHFIND_NORMAL)         out += "NORMAL ";
+        if (t & PATHFIND_SHORTCUT)       out += "SHORTCUT ";
+        if (t & PATHFIND_INCOMPLETE)     out += "INCOMPLETE ";
+        if (t & PATHFIND_NOPATH)         out += "NOPATH ";
+        if (t & PATHFIND_NOT_USING_PATH) out += "NOT_USING_PATH ";
+        if (t & PATHFIND_SHORT)          out += "SHORT ";
+        if (out.empty()) out = "BLANK";
+        return out;
+    }
+}
+
+// Ein einzelner Pathfinding-Versuch auf einen konkreten Punkt.
+bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
+                            Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const
 {
     PathGenerator gen(player);
     gen.SetUseStraightPath(false);
 
-    bool built = gen.CalculatePath(s.destX, s.destY, s.destZ, false);
-    PathType type = gen.GetPathType();
+    bool built = gen.CalculatePath(x, y, z, false);
+    typeOut = uint32(gen.GetPathType());
 
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "PathGenerator: built=%u type=0x%X points=%u",
-                  built ? 1u : 0u, uint32(type), uint32(gen.GetPath().size()));
-    Dbg(player, s, buf);
-
-    // PATHFIND_NOPATH liefert nur eine Geradeaus-Notloesung -> nicht akzeptieren.
-    if (!built || (type & PATHFIND_NOPATH) || gen.GetPath().size() < 2)
+    if (!built || (typeOut & PATHFIND_NOPATH) || gen.GetPath().size() < 2)
         return false;
 
-    // Reiner Shortcut ohne NavMesh nur ueber sehr kurze Distanz zulassen.
-    if ((type & PATHFIND_SHORTCUT) && !(type & PATHFIND_NORMAL))
+    // Reine Geradeauslinie ohne NavMesh nur ueber sehr kurze Distanz zulassen.
+    if ((typeOut & PATHFIND_SHORTCUT) && !(typeOut & PATHFIND_NORMAL))
     {
-        float d = player->GetExactDist2d(s.destX, s.destY);
-        if (d > 40.0f)
-        {
-            Dbg(player, s, "Shortcut ueber grosse Distanz verworfen.");
+        if (player->GetExactDist2d(x, y) > 40.0f)
             return false;
+    }
+
+    out = gen.GetPath();
+    incomplete = (typeOut & PATHFIND_INCOMPLETE) != 0;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Pfadberechnung mit Hoehen- und Umgebungssuche
+// ---------------------------------------------------------------------------
+// Der Carbonite-Wegpunkt kommt von einer 2D-Karte, eine Hoehe gibt es dort
+// nicht. Die aus der Gelaendehoehe geschaetzte Z-Koordinate kann daneben
+// liegen -- an Haengen, unter Bruecken, in Gebaeuden, an Klippen.
+//
+// Detour sucht das Zielpolygon nur in einem begrenzten Fenster um den
+// uebergebenen Punkt. Liegt Z zu weit daneben, findet es gar nichts und
+// meldet PATHFIND_NOPATH mit zwei Punkten (Start und Ziel) -- genau das
+// Bild aus dem Log.
+//
+// Deshalb wird nicht ein einziger Punkt probiert, sondern:
+//   1. mehrere plausible Hoehen an derselben X/Y-Stelle
+//   2. falls alles scheitert, ein Ring benachbarter Punkte
+//      (das Ziel liegt dann z. B. im Fels oder auf einem Dach)
+//
+// Der erste Treffer gewinnt und wird als neues Ziel uebernommen.
+
+bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
+{
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+    float pz = player->GetPositionZ();
+
+    // --- Hoehenkandidaten sammeln -----------------------------------------
+    float zc[10];
+    uint8 zn = 0;
+    auto addZ = [&](float z)
+    {
+        if (z <= INVALID_HEIGHT || zn >= 10)
+            return;
+        for (uint8 i = 0; i < zn; ++i)
+            if (std::fabs(zc[i] - z) < 1.5f)
+                return;
+        zc[zn++] = z;
+    };
+
+    addZ(s.destZ);
+    addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 60.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 200.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz - 60.0f));
+    addZ(pz);
+
+    uint32 type = 0;
+    bool incomplete = false;
+    Movement::PointsArray pts;
+
+    for (uint8 i = 0; i < zn; ++i)
+    {
+        if (TryPath(player, s.destX, s.destY, zc[i], pts, type, incomplete))
+        {
+            if (std::fabs(zc[i] - s.destZ) > 1.5f)
+            {
+                char b[160];
+                std::snprintf(b, sizeof(b), "Zielhoehe korrigiert: %.2f -> %.2f", s.destZ, zc[i]);
+                Dbg(player, s, b);
+            }
+            s.destZ = zc[i];
+            s.path = pts;
+            s.idx = 1;
+            s.pathIncomplete = incomplete;
+
+            char b[192];
+            std::snprintf(b, sizeof(b), "Pfad ok: type=0x%X (%s) points=%u",
+                          type, PathTypeName(type).c_str(), uint32(pts.size()));
+            Dbg(player, s, b);
+            return true;
         }
     }
 
-    s.path = gen.GetPath();
-    s.idx  = 1;   // Punkt 0 ist die aktuelle Position
-    s.pathIncomplete = (type & PATHFIND_INCOMPLETE) != 0;
+    // --- Ring in der Umgebung ---------------------------------------------
+    static float const RINGS[2] = { 12.0f, 30.0f };
+    for (uint8 r = 0; r < 2; ++r)
+    {
+        for (uint8 a = 0; a < 8; ++a)
+        {
+            float ang = float(a) * (6.28318531f / 8.0f);
+            float x = s.destX + std::cos(ang) * RINGS[r];
+            float y = s.destY + std::sin(ang) * RINGS[r];
+            float z = map->GetHeight(phase, x, y, MAX_HEIGHT);
+            if (z <= INVALID_HEIGHT)
+                z = pz;
 
-    return true;
+            if (TryPath(player, x, y, z, pts, type, incomplete))
+            {
+                char b[192];
+                std::snprintf(b, sizeof(b),
+                              "Ziel um %.0f yd versetzt (urspruengliche Stelle nicht begehbar).",
+                              RINGS[r]);
+                Dbg(player, s, b);
+                s.destX = x;
+                s.destY = y;
+                s.destZ = z;
+                s.path = pts;
+                s.idx = 1;
+                s.pathIncomplete = incomplete;
+                return true;
+            }
+        }
+    }
+
+    char buf[224];
+    std::snprintf(buf, sizeof(buf),
+                  "Kein Pfad. Letzter Typ 0x%X (%s), %u Hoehen und 16 Nachbarpunkte geprueft. "
+                  "Ziel %.1f / %.1f / %.1f",
+                  type, PathTypeName(type).c_str(), zn, s.destX, s.destY, s.destZ);
+    Dbg(player, s, buf);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,7 +1200,9 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 if (s.repathAttempts >= ATConf.maxRepathAttempts)
                 {
                     HaltMovement(player, s);
-                    Msg(player, "Kein begehbarer Weg zum Ziel gefunden. Navigation gestoppt.");
+                    Msg(player, "Kein begehbarer Weg zum Ziel gefunden. Navigation gestoppt. "
+                                "Der Wegpunkt liegt vermutlich auf einer Flaeche ohne NavMesh "
+                                "(Fels, Wasser, Dach). Debug zeigt die geprueften Hoehen.");
                     s.state = AT_FAILED;
                     PushStatus(player, s);
                     s.state = AT_IDLE;

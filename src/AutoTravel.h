@@ -110,6 +110,8 @@ private:
     void UpdateSession(Player* player, ATSession& s, uint32 diff);
 
     bool CalculatePath(Player* player, ATSession& s);
+    bool TryPath(Player* player, float x, float y, float z,
+                 Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const;
     void LaunchChunk(Player* player, ATSession& s);
     void HaltMovement(Player* player, ATSession& s);
     void ReleaseControl(Player* player, ATSession& s);
