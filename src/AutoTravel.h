@@ -94,6 +94,7 @@ struct ATSession
 
     // arrival tolerance override (0 = use global)
     float   arrivalOverride = 0.0f;
+    uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
 
     // stuck tracking
     float   lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f;

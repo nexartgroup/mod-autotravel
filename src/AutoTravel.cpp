@@ -810,8 +810,12 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
 
     ATSession& s = _sessions[player->GetGUID()];
     bool wasDebug = s.debug;
+    uint32 keepGrace = s.graceOverride;
+    float keepArrival = s.arrivalOverride;
     s = ATSession();
-    s.debug    = wasDebug;
+    s.debug           = wasDebug;
+    s.graceOverride   = keepGrace;
+    s.arrivalOverride = keepArrival;
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
     s.route    = it->second;
@@ -940,8 +944,12 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
 
     ATSession& s = _sessions[player->GetGUID()];
     bool wasDebug = s.debug;
+    uint32 keepGrace = s.graceOverride;
+    float keepArrival = s.arrivalOverride;
     s = ATSession();
-    s.debug    = wasDebug;
+    s.debug           = wasDebug;
+    s.graceOverride   = keepGrace;
+    s.arrivalOverride = keepArrival;
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
 
@@ -1045,10 +1053,21 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         s.arrivalOverride = v;
         Msg(player, "Arrival Distance = " + value);
     }
+    else if (key == "grace")
+    {
+        float v = float(atof(value.c_str()));
+        if (v < 0.0f || v > 30.0f)
+        {
+            Msg(player, "Grace muss zwischen 0 und 30 Sekunden liegen.");
+            return;
+        }
+        s.graceOverride = uint32(v * 1000.0f);
+        Dbg(player, s, "Wartezeit nach Kampf: " + value + " s");
+    }
     else
         Msg(player, "Unbekannte Option: " + key);
 
-    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && !s.debug)
+    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0 && !s.debug)
         _sessions.erase(player->GetGUID());
 }
 
@@ -1565,7 +1584,8 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 return;
             }
             s.combatTimer += diff;
-            if (s.combatTimer < ATConf.combatGraceMs)
+            uint32 grace = s.graceOverride ? s.graceOverride : ATConf.combatGraceMs;
+            if (s.combatTimer < grace)
                 return;
 
             Msg(player, "Kampf beendet - berechne neuen Pfad von der aktuellen Position.");
