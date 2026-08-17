@@ -115,8 +115,12 @@ private:
     void UpdateSession(Player* player, ATSession& s, uint32 diff);
 
     bool CalculatePath(Player* player, ATSession& s);
-    bool TryPath(Player* player, float x, float y, float z,
+    bool TryPath(Player* player, float x, float y, float z, bool straight,
                  Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const;
+
+    // Beste plausible Oberflaeche an x/y -- beruecksichtigt auch Gebaeude,
+    // Bruecken und Stadtboeden, nicht nur das Rohgelaende.
+    float BestGroundZ(Player* player, float x, float y) const;
     void LaunchChunk(Player* player, ATSession& s);
     void HaltMovement(Player* player, ATSession& s);
     void ReleaseControl(Player* player, ATSession& s);

@@ -440,6 +440,51 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// Beste Oberflaeche an einer Stelle
+// ---------------------------------------------------------------------------
+// Map::GetHeight(x, y, MAX_HEIGHT) liefert NUR die Gelaendehoehe: die
+// VMap-Abfrage sucht ab dem uebergebenen Z nur DEFAULT_HEIGHT_SEARCH (50 yd)
+// nach unten, und von 100000 aus findet sie nichts. Unter Sturmwind ist das
+// Rohgelaende rund 35 Yards unter dem Stadtboden -- genau deshalb landete der
+// Teleport "unter der Stadt".
+//
+// Deshalb wird mit realistischen Startpunkten und grossem Suchfenster
+// abgetastet und die Flaeche genommen, die der eigenen Hoehe am naechsten
+// liegt.
+
+float AutoTravelMgr::BestGroundZ(Player* player, float x, float y) const
+{
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+    float pz = player->GetPositionZ();
+
+    float const starts[6] = { pz + 300.0f, pz + 120.0f, pz + 40.0f,
+                              pz + 5.0f, pz - 40.0f, pz - 150.0f };
+
+    float best = INVALID_HEIGHT;
+    float bestDiff = 1.0e9f;
+
+    for (uint8 i = 0; i < 6; ++i)
+    {
+        float h = map->GetHeight(phase, x, y, starts[i], true, 400.0f);
+        if (h <= INVALID_HEIGHT)
+            continue;
+        float d = std::fabs(h - pz);
+        if (d < bestDiff)
+        {
+            bestDiff = d;
+            best = h;
+        }
+    }
+
+    if (best <= INVALID_HEIGHT)
+        best = map->GetHeight(phase, x, y, MAX_HEIGHT);   // reines Gelaende
+
+    return best;
+}
+
 // ---------------------------------------------------------------------------
 // Zielaufloesung: Kartenkoordinaten -> Weltkoordinaten inklusive Bodenhoehe
 // ---------------------------------------------------------------------------
@@ -460,10 +505,7 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
 
     mapId = player->GetMapId();
 
-    Map* map = player->GetMap();
-    z = map->GetHeight(player->GetPhaseMask(), x, y, MAX_HEIGHT);
-    if (z <= INVALID_HEIGHT)
-        z = map->GetHeight(player->GetPhaseMask(), x, y, player->GetPositionZ() + 100.0f);
+    z = BestGroundZ(player, x, y);
     if (z <= INVALID_HEIGHT)
     {
         err = "Fuer diese Position sind keine Hoehendaten verfuegbar (fehlende vmaps?).";
@@ -551,22 +593,27 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     float pz = player->GetPositionZ();
     addZ(z);
     addZ(terrain);
-    addZ(map->GetHeight(phase, x, y, pz + 5.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 40.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 120.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 300.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 5.0f,   true, 400.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 40.0f,  true, 400.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 120.0f, true, 400.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 300.0f, true, 400.0f));
 
     Movement::PointsArray pts;
     uint32 type = 0;
     bool inc = false;
-    for (uint8 i = 0; i < zn; ++i)
+    bool done = false;
+    for (uint8 pass = 0; pass < 2 && !done; ++pass)
     {
-        bool ok = TryPath(player, x, y, zc[i], pts, type, inc);
-        std::snprintf(b, sizeof(b), "  Z %8.2f -> 0x%X (%s), %u Punkte %s",
-                      zc[i], type, PathTypeName(type).c_str(),
-                      uint32(pts.size()), ok ? "AKZEPTIERT" : "verworfen");
-        Msg(player, b);
-        if (ok) break;
+        for (uint8 i = 0; i < zn; ++i)
+        {
+            bool ok = TryPath(player, x, y, zc[i], pass == 1, pts, type, inc);
+            std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s",
+                          pass == 1 ? "Eckpunkte" : "geglaettet",
+                          zc[i], type, PathTypeName(type).c_str(),
+                          uint32(pts.size()), ok ? "AKZEPTIERT" : "verworfen");
+            Msg(player, b);
+            if (ok) { done = true; break; }
+        }
     }
     if (zn == 0)
         Msg(player, "  Keine gueltige Hoehe an dieser Stelle - dort ist kein Boden.");
@@ -896,14 +943,16 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
 
 // Ein einzelner Pathfinding-Versuch auf einen konkreten Punkt.
-bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
+bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z, bool straight,
                             Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const
 {
     PathGenerator gen(player);
-    gen.SetUseStraightPath(false);
+    gen.SetUseStraightPath(straight);
 
     bool built = gen.CalculatePath(x, y, z, false);
     typeOut = uint32(gen.GetPathType());
+
+    out = gen.GetPath();          // auch bei Misserfolg, fuer die Diagnose
 
     if (!built || gen.GetPath().size() < 2)
         return false;
@@ -932,7 +981,6 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
     if (ground <= INVALID_HEIGHT || std::fabs(ground - last.z) > 5.0f)
         return false;
 
-    out = gen.GetPath();
     incomplete = (typeOut & PATHFIND_INCOMPLETE) != 0;
     return true;
 }
@@ -975,42 +1023,51 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         zc[zn++] = z;
     };
 
-    // Nur Werte, die GetHeight als echte Oberflaeche zurueckgibt. Die rohe
-    // Spielerhoehe oder eine Suche von unterhalb des Spielers aus wuerden
-    // Punkte in Hoehlen oder unter der Welt liefern -- genau das Verhalten,
-    // bei dem der Charakter endlos faellt.
+    // Nur echte Oberflaechen. Grosses Suchfenster, damit auch Gebaeudeboeden
+    // und Bruecken gefunden werden und nicht nur das Rohgelaende.
     addZ(s.destZ);
+    addZ(BestGroundZ(player, s.destX, s.destY));
     addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f,   true, 400.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f,  true, 400.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f, true, 400.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f, true, 400.0f));
 
     uint32 type = 0;
     bool incomplete = false;
     Movement::PointsArray pts;
 
-    for (uint8 i = 0; i < zn; ++i)
+    // Zwei Pfadmodi:
+    //   geglaettet  - schoene Wege, aber FindSmoothPath scheitert oberhalb von
+    //                 MAX_POINT_PATH_LENGTH * SMOOTH_PATH_STEP_SIZE = 296 Yards
+    //   Eckpunkte   - findStraightPath liefert nur Wegecken statt 4-Yard-
+    //                 Schritten und schafft damit ein Vielfaches der Strecke
+    for (uint8 pass = 0; pass < 2; ++pass)
     {
-        if (TryPath(player, s.destX, s.destY, zc[i], pts, type, incomplete))
+        bool straight = (pass == 1);
+        for (uint8 i = 0; i < zn; ++i)
         {
-            if (std::fabs(zc[i] - s.destZ) > 1.5f)
+            if (TryPath(player, s.destX, s.destY, zc[i], straight, pts, type, incomplete))
             {
-                char b[160];
-                std::snprintf(b, sizeof(b), "Zielhoehe korrigiert: %.2f -> %.2f", s.destZ, zc[i]);
-                Dbg(player, s, b);
-            }
-            s.destZ = zc[i];
-            s.lastPathType = type;
-            s.path = pts;
-            s.idx = 1;
-            s.pathIncomplete = incomplete;
+                if (std::fabs(zc[i] - s.destZ) > 1.5f)
+                {
+                    char b[160];
+                    std::snprintf(b, sizeof(b), "Zielhoehe korrigiert: %.2f -> %.2f", s.destZ, zc[i]);
+                    Dbg(player, s, b);
+                }
+                s.destZ = zc[i];
+                s.lastPathType = type;
+                s.path = pts;
+                s.idx = 1;
+                s.pathIncomplete = incomplete;
 
-            char b[192];
-            std::snprintf(b, sizeof(b), "Pfad ok: type=0x%X (%s) points=%u",
-                          type, PathTypeName(type).c_str(), uint32(pts.size()));
-            Dbg(player, s, b);
-            return true;
+                char b[192];
+                std::snprintf(b, sizeof(b), "Pfad ok (%s): type=0x%X (%s) points=%u",
+                              straight ? "Eckpunkte" : "geglaettet",
+                              type, PathTypeName(type).c_str(), uint32(pts.size()));
+                Dbg(player, s, b);
+                return true;
+            }
         }
     }
 
@@ -1027,7 +1084,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
             if (z <= INVALID_HEIGHT)
                 continue;                 // dort gibt es keinen Boden
 
-            if (TryPath(player, x, y, z, pts, type, incomplete))
+            if (TryPath(player, x, y, z, false, pts, type, incomplete) ||
+                TryPath(player, x, y, z, true,  pts, type, incomplete))
             {
                 char b[192];
                 std::snprintf(b, sizeof(b),
@@ -1217,6 +1275,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     if (player->IsInFlight() || player->GetVehicle())
     {
         HaltMovement(player, s);
+        return;
+    }
+
+    // Unter Wasser kann der Client waehrend servergesteuerter Bewegung nicht
+    // schwimmen -- die Luft laeuft ab, ohne dass der Spieler reagieren kann.
+    if (player->IsUnderWater())
+    {
+        HaltMovement(player, s);
+        Msg(player, "Unter Wasser wird die Reise beendet - der Wegpunkt liegt im Wasser.");
+        s.state = AT_IDLE;
         return;
     }
 
