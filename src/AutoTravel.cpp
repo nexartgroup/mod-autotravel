@@ -323,6 +323,135 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 }
 
 // ---------------------------------------------------------------------------
+// Zielaufloesung: Kartenkoordinaten -> Weltkoordinaten inklusive Bodenhoehe
+// ---------------------------------------------------------------------------
+
+bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
+                                 bool hasCalib, float pnx, float pny,
+                                 float& x, float& y, float& z, uint32& mapId,
+                                 std::string& err) const
+{
+    if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f)
+    {
+        err = "Ungueltige Zielkoordinaten vom Addon erhalten.";
+        return false;
+    }
+
+    if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err))
+        return false;
+
+    mapId = player->GetMapId();
+
+    Map* map = player->GetMap();
+    z = map->GetHeight(player->GetPhaseMask(), x, y, MAX_HEIGHT);
+    if (z <= INVALID_HEIGHT)
+        z = map->GetHeight(player->GetPhaseMask(), x, y, player->GetPositionZ() + 100.0f);
+    if (z <= INVALID_HEIGHT)
+    {
+        err = "Fuer diese Position sind keine Hoehendaten verfuegbar (fehlende vmaps?).";
+        return false;
+    }
+    return true;
+}
+
+void AutoTravelMgr::Resolve(Player* player, uint32 uiMapId, float nx, float ny,
+                            bool hasCalib, float pnx, float pny)
+{
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    uint32 mapId = 0;
+    std::string err;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    {
+        Msg(player, err);
+        return;
+    }
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "[AT]W|%u|%.3f|%.3f|%.3f", mapId, x, y, z);
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).SendSysMessage(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Teleport (bewusst getrennt vom Reisebetrieb)
+// ---------------------------------------------------------------------------
+
+void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
+                             bool hasCalib, float pnx, float pny, std::string const& name)
+{
+    if (!ATConf.allowTeleport)
+    {
+        Msg(player, "Teleport ist auf diesem Server deaktiviert.");
+        return;
+    }
+    if (player->IsInCombat())
+    {
+        Msg(player, "Im Kampf ist kein Teleport moeglich.");
+        return;
+    }
+    if (!player->IsAlive())
+    {
+        Msg(player, "Du bist tot.");
+        return;
+    }
+    if (player->IsInFlight() || player->GetVehicle() || player->IsBeingTeleported())
+    {
+        Msg(player, "Jetzt gerade nicht moeglich (Flug/Fahrzeug/Teleport).");
+        return;
+    }
+    if (player->GetMap()->IsBattlegroundOrArena() || player->InBattleground())
+    {
+        Msg(player, "In Schlachtfeldern und Arenen nicht erlaubt.");
+        return;
+    }
+
+    uint32 nowSec = uint32(time(nullptr));
+    auto cd = _tpCooldown.find(player->GetGUID());
+    if (cd != _tpCooldown.end() && nowSec < cd->second)
+    {
+        char b[96];
+        std::snprintf(b, sizeof(b), "Noch %u Sekunden Abklingzeit.", cd->second - nowSec);
+        Msg(player, b);
+        return;
+    }
+
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    uint32 mapId = 0;
+    std::string err;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    {
+        Msg(player, err);
+        return;
+    }
+
+    float dist = player->GetExactDist2d(x, y);
+    if (ATConf.teleportMinDist > 0.0f && dist < ATConf.teleportMinDist)
+    {
+        char b[128];
+        std::snprintf(b, sizeof(b), "Das Ziel ist nur %.0f yd entfernt - lauf hin.", dist);
+        Msg(player, b);
+        return;
+    }
+
+    // Laufende Reise sauber beenden, damit Spline und Teleport sich nicht
+    // gegenseitig ins Gehege kommen.
+    auto it = _sessions.find(player->GetGUID());
+    if (it != _sessions.end())
+    {
+        HaltMovement(player, it->second);
+        _sessions.erase(it);
+    }
+
+    _tpCooldown[player->GetGUID()] = nowSec + ATConf.teleportCooldown;
+
+    player->TeleportTo(mapId, x, y, z + 0.5f, player->GetOrientation());
+
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "Teleport zu %s (%.1f / %.1f / %.1f), %.0f yd.",
+                  name.empty() ? "Ziel" : name.c_str(), x, y, z, dist);
+    Msg(player, buf);
+}
+
+// ---------------------------------------------------------------------------
 // Start / Stop / Repath
 // ---------------------------------------------------------------------------
 
