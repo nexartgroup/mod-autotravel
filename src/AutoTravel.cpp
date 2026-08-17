@@ -19,7 +19,10 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <fstream>
+#include <vector>
 
 ATConfig ATConf;
 
@@ -71,6 +74,8 @@ void AutoTravelMgr::LoadConfig()
 
     if (ATConf.chunkPoints < 2)  ATConf.chunkPoints = 2;
     if (ATConf.chunkPoints > 60) ATConf.chunkPoints = 60;
+
+    LoadMapAreas();
 }
 
 // ---------------------------------------------------------------------------
@@ -115,40 +120,174 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession const& s)
 }
 
 // ---------------------------------------------------------------------------
-// Kartenkoordinaten -> Weltkoordinaten (WorldMapArea.dbc)
+// WorldMapArea.dbc -- eigener Loader
+// ---------------------------------------------------------------------------
+// AzerothCore legt fuer WorldMapArea.dbc keinen DBCStorage an (es gibt kein
+// sWorldMapAreaStore), obwohl die Datei vom Extractor erzeugt wird. Fuer die
+// Umrechnung Kartenposition -> Weltkoordinaten wird sie aber gebraucht.
+//
+// Deshalb liest das Modul die Datei beim Start selbst. Das DBC-Format ist
+// trivial und seit Vanilla unveraendert:
+//
+//   char  magic[4] = "WDBC"
+//   uint32 recordCount, fieldCount, recordSize, stringBlockSize
+//   danach recordCount * recordSize Bytes
+//
+// WorldMapArea.dbc (3.3.5a), die ersten acht Felder:
+//   0 ID   1 mapID   2 areaID   3 areaName(Stringoffset)
+//   4 locLeft   5 locRight   6 locTop   7 locBottom      (alle float)
+//
+// Nur diese acht werden gelesen. Ob dahinter zehn oder elf Felder stehen, ist
+// egal -- der Offset der ersten acht ist stabil.
+
+namespace
+{
+    struct ATMapArea
+    {
+        uint32 mapId = 0;
+        uint32 areaId = 0;
+        float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+    };
+
+    std::unordered_map<uint32, ATMapArea> sATMapAreas;
+    bool sATMapAreasLoaded = false;
+
+    bool LoadWorldMapAreaFile(std::string const& path, std::string& note)
+    {
+        std::ifstream in(path.c_str(), std::ios::binary);
+        if (!in.is_open())
+            return false;
+
+        char magic[4];
+        in.read(magic, 4);
+        if (!in || magic[0] != 'W' || magic[1] != 'D' || magic[2] != 'B' || magic[3] != 'C')
+        {
+            note = path + " ist keine DBC-Datei.";
+            return false;
+        }
+
+        uint32 recordCount = 0, fieldCount = 0, recordSize = 0, stringSize = 0;
+        in.read(reinterpret_cast<char*>(&recordCount), 4);
+        in.read(reinterpret_cast<char*>(&fieldCount), 4);
+        in.read(reinterpret_cast<char*>(&recordSize), 4);
+        in.read(reinterpret_cast<char*>(&stringSize), 4);
+        if (!in || fieldCount < 8 || recordSize < fieldCount * 4 || recordCount == 0)
+        {
+            note = path + ": unerwarteter Aufbau (Felder " + std::to_string(fieldCount) + ").";
+            return false;
+        }
+
+        std::vector<char> buf(size_t(recordCount) * recordSize);
+        in.read(buf.data(), std::streamsize(buf.size()));
+        if (!in)
+        {
+            note = path + ": Datei unvollstaendig.";
+            return false;
+        }
+
+        for (uint32 i = 0; i < recordCount; ++i)
+        {
+            char const* rec = buf.data() + size_t(i) * recordSize;
+            uint32 u[8];
+            float  f[8];
+            std::memcpy(u, rec, sizeof(u));
+            std::memcpy(f, rec, sizeof(f));
+
+            ATMapArea a;
+            a.mapId  = u[1];
+            a.areaId = u[2];
+            a.left   = f[4];
+            a.right  = f[5];
+            a.top    = f[6];
+            a.bottom = f[7];
+
+            // Kontinent- und Zoneneintraege ohne Ausdehnung sind unbrauchbar.
+            if (a.left == a.right || a.top == a.bottom)
+                continue;
+
+            sATMapAreas[u[0]] = a;
+        }
+
+        note = path + ": " + std::to_string(sATMapAreas.size()) + " Karten geladen.";
+        return !sATMapAreas.empty();
+    }
+}
+
+void AutoTravelMgr::LoadMapAreas()
+{
+    sATMapAreas.clear();
+    sATMapAreasLoaded = false;
+
+    std::string dataDir = sConfigMgr->GetOption<std::string>("DataDir", ".");
+    if (!dataDir.empty() && dataDir[dataDir.size() - 1] != '/' && dataDir[dataDir.size() - 1] != '\\')
+        dataDir += "/";
+
+    std::string const candidates[] =
+    {
+        dataDir + "dbc/WorldMapArea.dbc",
+        dataDir + "dbc/enUS/WorldMapArea.dbc",
+        dataDir + "dbc/enGB/WorldMapArea.dbc",
+        dataDir + "dbc/deDE/WorldMapArea.dbc",
+        "dbc/WorldMapArea.dbc",
+    };
+
+    std::string note;
+    for (auto const& p : candidates)
+    {
+        if (LoadWorldMapAreaFile(p, note))
+        {
+            sATMapAreasLoaded = true;
+            LOG_INFO("server.loading", "mod-autotravel: {}", note);
+            return;
+        }
+    }
+
+    LOG_ERROR("server.loading",
+              "mod-autotravel: WorldMapArea.dbc nicht gefunden oder unlesbar (DataDir='{}'). "
+              "Zielumrechnung ist deaktiviert. {}", dataDir, note);
+}
+
+// ---------------------------------------------------------------------------
+// Kartenkoordinaten -> Weltkoordinaten
 // ---------------------------------------------------------------------------
 
 bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                bool hasCalib, float pnx, float pny,
                                float& outX, float& outY, std::string& err) const
 {
-    WorldMapAreaEntry const* e = sWorldMapAreaStore.LookupEntry(uiMapId);
-    if (!e)
+    if (!sATMapAreasLoaded)
     {
-        err = "Unbekannte WorldMapArea-ID " + std::to_string(uiMapId) + ".";
+        err = "Serverseitig konnte WorldMapArea.dbc nicht geladen werden - siehe Serverlog.";
         return false;
     }
 
-    if (e->map_id != player->GetMapId())
+    auto it = sATMapAreas.find(uiMapId);
+    if (it == sATMapAreas.end())
     {
-        err = "Das Ziel liegt auf einer anderen Karte (Map " + std::to_string(e->map_id) +
-              "). Kontinentwechsel wird nicht unterstuetzt.";
+        err = "Unbekannte Karten-ID " + std::to_string(uiMapId) + ".";
+        return false;
+    }
+    ATMapArea const& e = it->second;
+
+    if (e.mapId != player->GetMapId())
+    {
+        err = "Das Ziel liegt auf einer anderen Karte (Map " + std::to_string(e.mapId) +
+              "). Kontinentwechsel wird beim Laufen nicht unterstuetzt.";
         return false;
     }
 
-    // Standardtransformation:
-    //   horizontale Kartenachse  -> Welt-Y   (y1 = links,  y2 = rechts)
-    //   vertikale  Kartenachse   -> Welt-X   (x1 = oben,   x2 = unten)
+    // Waagerechte Kartenachse -> Welt-Y (left..right),
+    // senkrechte Kartenachse  -> Welt-X (top..bottom).
     auto variantA = [&](float mx, float my, float& wx, float& wy)
     {
-        wy = e->y1 + mx * (e->y2 - e->y1);
-        wx = e->x1 + my * (e->x2 - e->x1);
+        wy = e.left + mx * (e.right - e.left);
+        wx = e.top  + my * (e.bottom - e.top);
     };
-    // Fallback fuer abweichende DBC-Feldreihenfolge in exotischen Forks.
+    // Fallback, falls ein Extractor die Feldpaare vertauscht ablegt.
     auto variantB = [&](float mx, float my, float& wx, float& wy)
     {
-        wx = e->y1 + mx * (e->y2 - e->y1);
-        wy = e->x1 + my * (e->x2 - e->x1);
+        wx = e.left + mx * (e.right - e.left);
+        wy = e.top  + my * (e.bottom - e.top);
     };
 
     if (hasCalib && pnx > 0.0f && pny > 0.0f)
@@ -166,8 +305,8 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
         {
             char b[256];
             std::snprintf(b, sizeof(b),
-                "Koordinaten-Kalibrierung fehlgeschlagen (Abweichung %.0f/%.0f yd). "
-                "Bitte die Weltkarte auf die Zielzone stellen und erneut starten.", ea, eb);
+                "Koordinaten-Gegenprobe fehlgeschlagen (Abweichung %.0f/%.0f yd). "
+                "Vermutlich die falsche Karten-ID - /at target zeigt die benutzte.", ea, eb);
             err = b;
             return false;
         }
@@ -181,136 +320,6 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 
     variantA(nx, ny, outX, outY);
     return true;
-}
-
-
-// ---------------------------------------------------------------------------
-// Zielaufloesung: Kartenkoordinaten -> Weltkoordinaten inklusive Bodenhoehe
-// ---------------------------------------------------------------------------
-
-bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
-                                 bool hasCalib, float pnx, float pny,
-                                 float& x, float& y, float& z, uint32& mapId,
-                                 std::string& err) const
-{
-    if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f)
-    {
-        err = "Ungueltige Zielkoordinaten vom Addon erhalten.";
-        return false;
-    }
-
-    if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err))
-        return false;
-
-    mapId = player->GetMapId();
-
-    Map* map = player->GetMap();
-    z = map->GetHeight(player->GetPhaseMask(), x, y, MAX_HEIGHT);
-    if (z <= INVALID_HEIGHT)
-        z = map->GetHeight(player->GetPhaseMask(), x, y, player->GetPositionZ() + 100.0f);
-    if (z <= INVALID_HEIGHT)
-    {
-        err = "Fuer diese Position ist keine Hoehendaten verfuegbar (fehlende vmaps?).";
-        return false;
-    }
-    return true;
-}
-
-void AutoTravelMgr::Resolve(Player* player, uint32 uiMapId, float nx, float ny,
-                            bool hasCalib, float pnx, float pny)
-{
-    float x, y, z;
-    uint32 mapId;
-    std::string err;
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
-    {
-        Msg(player, err);
-        return;
-    }
-    char buf[192];
-    std::snprintf(buf, sizeof(buf), "[AT]W|%u|%.3f|%.3f|%.3f", mapId, x, y, z);
-    if (player->GetSession())
-        ChatHandler(player->GetSession()).SendSysMessage(buf);
-}
-
-// ---------------------------------------------------------------------------
-// Teleport (bewusst getrennt vom Reisebetrieb)
-// ---------------------------------------------------------------------------
-
-void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
-                             bool hasCalib, float pnx, float pny, std::string const& name)
-{
-    if (!ATConf.allowTeleport)
-    {
-        Msg(player, "Teleport ist auf diesem Server deaktiviert.");
-        return;
-    }
-    if (player->IsInCombat())
-    {
-        Msg(player, "Im Kampf ist kein Teleport moeglich.");
-        return;
-    }
-    if (!player->IsAlive())
-    {
-        Msg(player, "Du bist tot.");
-        return;
-    }
-    if (player->IsInFlight() || player->GetVehicle() || player->IsBeingTeleported())
-    {
-        Msg(player, "Jetzt gerade nicht moeglich (Flug/Fahrzeug/Teleport).");
-        return;
-    }
-    if (player->GetMap()->IsBattlegroundOrArena() || player->InBattleground())
-    {
-        Msg(player, "In Schlachtfeldern und Arenen nicht erlaubt.");
-        return;
-    }
-
-    uint32 nowSec = uint32(time(nullptr));
-    auto cd = _tpCooldown.find(player->GetGUID());
-    if (cd != _tpCooldown.end() && nowSec < cd->second)
-    {
-        char b[96];
-        std::snprintf(b, sizeof(b), "Noch %u Sekunden Abklingzeit.", cd->second - nowSec);
-        Msg(player, b);
-        return;
-    }
-
-    float x, y, z;
-    uint32 mapId;
-    std::string err;
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
-    {
-        Msg(player, err);
-        return;
-    }
-
-    float dist = player->GetExactDist2d(x, y);
-    if (ATConf.teleportMinDist > 0.0f && dist < ATConf.teleportMinDist)
-    {
-        char b[128];
-        std::snprintf(b, sizeof(b), "Das Ziel ist nur %.0f yd entfernt - lauf hin.", dist);
-        Msg(player, b);
-        return;
-    }
-
-    // Laufende Reise sauber beenden
-    auto it = _sessions.find(player->GetGUID());
-    if (it != _sessions.end() && it->second.state != AT_IDLE)
-    {
-        HaltMovement(player, it->second);
-        it->second.state = AT_IDLE;
-        _sessions.erase(it);
-    }
-
-    _tpCooldown[player->GetGUID()] = nowSec + ATConf.teleportCooldown;
-
-    player->TeleportTo(mapId, x, y, z + 0.5f, player->GetOrientation());
-
-    char buf[192];
-    std::snprintf(buf, sizeof(buf), "Teleport zu %s (%.1f / %.1f / %.1f), %.0f yd.",
-                  name.empty() ? "Ziel" : name.c_str(), x, y, z, dist);
-    Msg(player, buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,19 +602,17 @@ uint32 AutoTravelMgr::PickGroundMount(Player* player) const
 
         for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
         {
-            switch (si->Effects[i].ApplyAuraName)
+            uint32 aura = si->Effects[i].ApplyAuraName;
+
+            if (aura == SPELL_AURA_MOUNTED)
+                mounted = true;
+            else if (aura == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED)
+                speed = std::max<int32>(speed, si->Effects[i].BasePoints);
+            else if (aura >= 206 && aura <= 208)
             {
-                case SPELL_AURA_MOUNTED:
-                    mounted = true;
-                    break;
-                case SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED:
-                    speed = std::max<int32>(speed, si->Effects[i].BasePoints);
-                    break;
-                case SPELL_AURA_MOD_FLIGHT_SPEED_MOUNTED:
-                    flying = true;
-                    break;
-                default:
-                    break;
+                // 206-208 sind die Flugtempo-Auren. Die Enum-Namen dafuer
+                // unterscheiden sich zwischen den Cores, die Werte nicht.
+                flying = true;
             }
         }
 

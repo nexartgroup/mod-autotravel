@@ -85,6 +85,7 @@ public:
     static AutoTravelMgr* instance();
 
     void LoadConfig();
+    void LoadMapAreas();
     void Update(uint32 diff);
 
     bool Start(Player* player, uint32 uiMapId, float nx, float ny,
