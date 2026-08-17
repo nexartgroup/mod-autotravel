@@ -1,0 +1,105 @@
+[worldserver]
+
+########################################
+# mod-autotravel configuration
+########################################
+
+#    AutoTravel.Enable
+#        Modul global ein-/ausschalten.
+#        Default: 1
+AutoTravel.Enable = 1
+
+#    AutoTravel.ArrivalDistance
+#        Zielradius in Yards (2D). Innerhalb dieses Radius gilt das Ziel
+#        als erreicht.
+#        Default: 8
+AutoTravel.ArrivalDistance = 8
+
+#    AutoTravel.AutoMount
+#        Automatisch ein Bodenmount benutzen, wenn erlaubt.
+#        Default: 1
+AutoTravel.AutoMount = 1
+
+#    AutoTravel.MountMinDistance
+#        Erst ab dieser Restdistanz (Yards) wird gemountet.
+#        Default: 150
+AutoTravel.MountMinDistance = 150
+
+#    AutoTravel.PauseInCombat
+#        Bewegung im Kampf pausieren und Kontrolle an den Spieler zurueckgeben.
+#        Default: 1
+AutoTravel.PauseInCombat = 1
+
+#    AutoTravel.ResumeAfterCombat
+#        Nach Kampfende automatisch neu pathen und weiterlaufen.
+#        Default: 1
+AutoTravel.ResumeAfterCombat = 1
+
+#    AutoTravel.CombatGraceMs
+#        Wartezeit nach Kampfende, bevor neu gepatht wird.
+#        Default: 1500
+AutoTravel.CombatGraceMs = 1500
+
+#    AutoTravel.StuckDetection
+#        Default: 1
+AutoTravel.StuckDetection = 1
+
+#    AutoTravel.StuckTimeoutMs
+#        Messfenster fuer die Stuck-Erkennung.
+#        Default: 5000
+AutoTravel.StuckTimeoutMs = 5000
+
+#    AutoTravel.StuckMinDistance
+#        Minimale Strecke (Yards) innerhalb des Messfensters. Darunter gilt
+#        der Charakter als haengengeblieben.
+#        Default: 3
+AutoTravel.StuckMinDistance = 3
+
+#    AutoTravel.MaxRepathAttempts
+#        Nach so vielen erfolglosen Versuchen wird abgebrochen (keine
+#        Endlosschleife).
+#        Default: 8
+AutoTravel.MaxRepathAttempts = 8
+
+#    AutoTravel.ResumeAfterDeath
+#        Ziel nach dem Tod gespeichert lassen und nach Wiederbelebung
+#        fortsetzen.
+#        Default: 0
+AutoTravel.ResumeAfterDeath = 0
+
+#    AutoTravel.TakeClientControl
+#        1 = Server uebernimmt waehrend der Fahrt die Bewegungskontrolle
+#            (SetClientControl). Zuverlaessig, aber der Spieler kann waehrend
+#            der Fahrt nicht selbst steuern.
+#        0 = nur Splines ohne Kontrollentzug. Sanfter, aber der Client kann
+#            gegensteuern und die Bewegung abbrechen.
+#        Default: 1
+AutoTravel.TakeClientControl = 1
+
+#    AutoTravel.ChunkPoints
+#        Wie viele Pfadpunkte pro Spline gesendet werden. Kleiner = feiner
+#        reagierend, groesser = weniger Pakete.
+#        Default: 12
+AutoTravel.ChunkPoints = 12
+
+#    AutoTravel.AllowTeleport
+#        Erlaubt den Teleport-Knopf des Addons (.at tp). Steht das auf 0,
+#        funktioniert nur das Laufen.
+#        Default: 1
+AutoTravel.AllowTeleport = 1
+
+#    AutoTravel.TeleportMinDistance
+#        Unter dieser Entfernung wird der Teleport abgelehnt (0 = keine Grenze).
+#        Sinnvoll, damit kurze Strecken gelaufen statt gesprungen werden.
+#        Default: 0
+AutoTravel.TeleportMinDistance = 0
+
+#    AutoTravel.TeleportCooldownSec
+#        Abklingzeit zwischen zwei Teleports.
+#        Default: 5
+AutoTravel.TeleportCooldownSec = 5
+
+#    AutoTravel.Debug
+#        Serverweiter Debug-Modus.
+#        Default: 0
+AutoTravel.Debug = 0
