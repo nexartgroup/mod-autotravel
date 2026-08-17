@@ -60,6 +60,7 @@ struct ATSession
     Movement::PointsArray path;
     size_t  idx         = 0;
     bool    pathIncomplete = false;
+    uint32  lastPathType   = 0;
 
     bool    controlTaken   = false;
     bool    debug          = false;
@@ -98,6 +99,10 @@ public:
     // Lernt die Zuordnung Client-Karten-ID -> WorldMapArea-ID anhand der
     // eigenen Position. Funktioniert auch, wenn das Ziel woanders liegt.
     void LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny);
+
+    // Ausfuehrliche Diagnose zu einem Ziel, ohne loszulaufen.
+    void Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
+                  bool hasCalib, float pnx, float pny);
     void Stop(Player* player, std::string const& reason, bool silent = false);
     void Repath(Player* player);
     void PrintStatus(Player* player);

@@ -81,7 +81,7 @@ public:
 
         std::string const& cmd = a[0];
 
-        if (cmd == "start" || cmd == "tp" || cmd == "resolve")
+        if (cmd == "start" || cmd == "tp" || cmd == "resolve" || cmd == "diag")
         {
             if (a.size() < 7)
             {
@@ -108,6 +108,8 @@ public:
                 sAutoTravel->Start(player, uiMapId, nx, ny, hasCalib, pnx, pny, name);
             else if (cmd == "tp")
                 sAutoTravel->Teleport(player, uiMapId, nx, ny, hasCalib, pnx, pny, name);
+            else if (cmd == "diag")
+                sAutoTravel->Diagnose(player, uiMapId, nx, ny, hasCalib, pnx, pny);
             else
                 sAutoTravel->Resolve(player, uiMapId, nx, ny, hasCalib, pnx, pny);
             return true;

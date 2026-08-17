@@ -473,6 +473,89 @@ void AutoTravelMgr::Resolve(Player* player, uint32 uiMapId, float nx, float ny,
         ChatHandler(player->GetSession()).SendSysMessage(buf);
 }
 
+
+// ---------------------------------------------------------------------------
+// Diagnose
+// ---------------------------------------------------------------------------
+
+void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
+                             bool hasCalib, float pnx, float pny)
+{
+    char b[256];
+
+    Msg(player, "--- AutoTravel Diagnose ---");
+
+    std::snprintf(b, sizeof(b), "mmaps aktiv: %s | WorldMapArea geladen: %s",
+                  sWorld->getBoolConfig(CONFIG_ENABLE_MMAPS) ? "ja" : "NEIN",
+                  sATMapAreasLoaded ? "ja" : "NEIN");
+    Msg(player, b);
+
+    std::snprintf(b, sizeof(b), "Spieler: Map %u Zone %u | %.1f / %.1f / %.1f",
+                  player->GetMapId(), player->GetZoneId(),
+                  player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
+    Msg(player, b);
+
+    auto fix = sATIdFix.find(uiMapId);
+    std::string fixTxt = (fix != sATIdFix.end())
+        ? std::to_string(fix->second) : std::string("noch nicht gelernt");
+    std::snprintf(b, sizeof(b), "Karten-ID %u -> WorldMapArea %s | Gegenprobe: %s",
+                  uiMapId, fixTxt.c_str(), hasCalib ? "vorhanden" : "fehlt");
+    Msg(player, b);
+
+    float x, y, z;
+    uint32 mapId;
+    std::string err;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    {
+        Msg(player, "Zielaufloesung fehlgeschlagen: " + err);
+        return;
+    }
+
+    std::snprintf(b, sizeof(b), "Ziel: %.1f / %.1f / %.1f | Entfernung %.0f yd",
+                  x, y, z, player->GetExactDist2d(x, y));
+    Msg(player, b);
+
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+    float terrain = map->GetHeight(phase, x, y, MAX_HEIGHT);
+    if (terrain > INVALID_HEIGHT)
+        std::snprintf(b, sizeof(b), "Gelaendehoehe dort: %.2f (Ziel-Z %.2f)", terrain, z);
+    else
+        std::snprintf(b, sizeof(b), "Gelaendehoehe dort: keine - an dieser Stelle ist kein Boden.");
+    Msg(player, b);
+
+    float zc[6];
+    uint8 zn = 0;
+    auto addZ = [&](float v)
+    {
+        if (v <= INVALID_HEIGHT || zn >= 6) return;
+        for (uint8 i = 0; i < zn; ++i) if (std::fabs(zc[i] - v) < 1.5f) return;
+        zc[zn++] = v;
+    };
+    float pz = player->GetPositionZ();
+    addZ(z);
+    addZ(terrain);
+    addZ(map->GetHeight(phase, x, y, pz + 5.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 40.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 120.0f));
+    addZ(map->GetHeight(phase, x, y, pz + 300.0f));
+
+    Movement::PointsArray pts;
+    uint32 type = 0;
+    bool inc = false;
+    for (uint8 i = 0; i < zn; ++i)
+    {
+        bool ok = TryPath(player, x, y, zc[i], pts, type, inc);
+        std::snprintf(b, sizeof(b), "  Z %8.2f -> 0x%X (%s), %u Punkte %s",
+                      zc[i], type, PathTypeName(type).c_str(),
+                      uint32(pts.size()), ok ? "AKZEPTIERT" : "verworfen");
+        Msg(player, b);
+        if (ok) break;
+    }
+    if (zn == 0)
+        Msg(player, "  Keine gueltige Hoehe an dieser Stelle - dort ist kein Boden.");
+}
+
 // ---------------------------------------------------------------------------
 // Teleport (bewusst getrennt vom Reisebetrieb)
 // ---------------------------------------------------------------------------
@@ -744,10 +827,22 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     Movement::PointsArray chunk;
     chunk.push_back(G3D::Vector3(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ()));
 
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+
     uint32 n = 0;
     while (s.idx < s.path.size() && n < ATConf.chunkPoints)
     {
-        chunk.push_back(s.path[s.idx]);
+        G3D::Vector3 p = s.path[s.idx];
+
+        // NavMesh-Punkte liegen nicht exakt auf der Oberflaeche. Bergab
+        // schneidet der Spline sonst durch das Gelaende (Charakter faellt
+        // durch den Boden) oder darueber (Charakter schwebt).
+        float g = map->GetHeight(phase, p.x, p.y, p.z + 2.0f);
+        if (g > INVALID_HEIGHT && std::fabs(g - p.z) < 6.0f)
+            p.z = g + 0.1f;
+
+        chunk.push_back(p);
         ++s.idx;
         ++n;
     }
@@ -809,7 +904,16 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
     bool built = gen.CalculatePath(x, y, z, false);
     typeOut = uint32(gen.GetPathType());
 
-    if (!built || (typeOut & PATHFIND_NOPATH) || gen.GetPath().size() < 2)
+    if (!built || gen.GetPath().size() < 2)
+        return false;
+
+    // Kein Polygon fuer Start oder Ziel gefunden.
+    if (typeOut & PATHFIND_NOPATH)
+        return false;
+
+    // Der Core konnte das NavMesh gar nicht benutzen (fehlende mmap-Kachel).
+    // Das Ergebnis waere eine Luftlinie quer durch Berge -- ablehnen.
+    if (typeOut & PATHFIND_NOT_USING_PATH)
         return false;
 
     // Reine Geradeauslinie ohne NavMesh nur ueber sehr kurze Distanz zulassen.
@@ -818,6 +922,14 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
         if (player->GetExactDist2d(x, y) > 40.0f)
             return false;
     }
+
+    // Der Endpunkt muss auf festem Boden liegen. Sonst laeuft der Charakter
+    // ins Leere und "erreicht" sein Ziel unter der Welt.
+    G3D::Vector3 const& last = gen.GetPath().back();
+    Map* map = player->GetMap();
+    float ground = map->GetHeight(player->GetPhaseMask(), last.x, last.y, last.z + 2.0f);
+    if (ground <= INVALID_HEIGHT || std::fabs(ground - last.z) > 5.0f)
+        return false;
 
     out = gen.GetPath();
     incomplete = (typeOut & PATHFIND_INCOMPLETE) != 0;
@@ -862,13 +974,16 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         zc[zn++] = z;
     };
 
+    // Nur Werte, die GetHeight als echte Oberflaeche zurueckgibt. Die rohe
+    // Spielerhoehe oder eine Suche von unterhalb des Spielers aus wuerden
+    // Punkte in Hoehlen oder unter der Welt liefern -- genau das Verhalten,
+    // bei dem der Charakter endlos faellt.
     addZ(s.destZ);
     addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
     addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 60.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 200.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz - 60.0f));
-    addZ(pz);
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f));
+    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f));
 
     uint32 type = 0;
     bool incomplete = false;
@@ -885,6 +1000,7 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 Dbg(player, s, b);
             }
             s.destZ = zc[i];
+            s.lastPathType = type;
             s.path = pts;
             s.idx = 1;
             s.pathIncomplete = incomplete;
@@ -908,7 +1024,7 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
             float y = s.destY + std::sin(ang) * RINGS[r];
             float z = map->GetHeight(phase, x, y, MAX_HEIGHT);
             if (z <= INVALID_HEIGHT)
-                z = pz;
+                continue;                 // dort gibt es keinen Boden
 
             if (TryPath(player, x, y, z, pts, type, incomplete))
             {
@@ -927,6 +1043,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
             }
         }
     }
+
+    s.lastPathType = type;
 
     char buf[224];
     std::snprintf(buf, sizeof(buf),
@@ -1200,9 +1318,13 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 if (s.repathAttempts >= ATConf.maxRepathAttempts)
                 {
                     HaltMovement(player, s);
-                    Msg(player, "Kein begehbarer Weg zum Ziel gefunden. Navigation gestoppt. "
-                                "Der Wegpunkt liegt vermutlich auf einer Flaeche ohne NavMesh "
-                                "(Fels, Wasser, Dach). Debug zeigt die geprueften Hoehen.");
+                    if (s.lastPathType & PATHFIND_NOT_USING_PATH)
+                        Msg(player, "Fuer diese Kartenkachel sind keine mmaps geladen. Der Server "
+                                    "kann hier keinen Weg berechnen - eine Luftlinie waere quer "
+                                    "durch Berge und wird abgelehnt.");
+                    else
+                        Msg(player, "Kein begehbarer Weg gefunden. Navigation gestoppt. "
+                                    "'at diag' im Addon zeigt, woran es liegt.");
                     s.state = AT_FAILED;
                     PushStatus(player, s);
                     s.state = AT_IDLE;
