@@ -41,6 +41,22 @@ char const* ATStateName(ATState s)
     return "UNKNOWN";
 }
 
+namespace
+{
+    std::string PathTypeName(uint32 t)
+    {
+        std::string out;
+        if (t & PATHFIND_NORMAL)         out += "NORMAL ";
+        if (t & PATHFIND_SHORTCUT)       out += "SHORTCUT ";
+        if (t & PATHFIND_INCOMPLETE)     out += "INCOMPLETE ";
+        if (t & PATHFIND_NOPATH)         out += "NOPATH ";
+        if (t & PATHFIND_NOT_USING_PATH) out += "NOT_USING_PATH ";
+        if (t & PATHFIND_SHORT)          out += "SHORT ";
+        if (out.empty()) out = "BLANK";
+        return out;
+    }
+}
+
 AutoTravelMgr* AutoTravelMgr::instance()
 {
     static AutoTravelMgr inst;
@@ -878,21 +894,6 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 // Pathfinding (echtes AzerothCore NavMesh via PathGenerator)
 // ---------------------------------------------------------------------------
 
-namespace
-{
-    std::string PathTypeName(uint32 t)
-    {
-        std::string out;
-        if (t & PATHFIND_NORMAL)         out += "NORMAL ";
-        if (t & PATHFIND_SHORTCUT)       out += "SHORTCUT ";
-        if (t & PATHFIND_INCOMPLETE)     out += "INCOMPLETE ";
-        if (t & PATHFIND_NOPATH)         out += "NOPATH ";
-        if (t & PATHFIND_NOT_USING_PATH) out += "NOT_USING_PATH ";
-        if (t & PATHFIND_SHORT)          out += "SHORT ";
-        if (out.empty()) out = "BLANK";
-        return out;
-    }
-}
 
 // Ein einzelner Pathfinding-Versuch auf einen konkreten Punkt.
 bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z,
