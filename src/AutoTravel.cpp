@@ -98,6 +98,12 @@ void AutoTravelMgr::LoadConfig()
     ATConf.resumeAfterDeath  = sConfigMgr->GetOption<bool>  ("AutoTravel.ResumeAfterDeath", false);
     ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", true);
     ATConf.chunkPoints       = sConfigMgr->GetOption<uint32>("AutoTravel.ChunkPoints", 12);
+    ATConf.swim              = sConfigMgr->GetOption<bool>  ("AutoTravel.Swim", true);
+    ATConf.swimSurfaceOffset = sConfigMgr->GetOption<float> ("AutoTravel.SwimSurfaceOffset", 1.2f);
+    ATConf.minSwimDepth      = sConfigMgr->GetOption<float> ("AutoTravel.MinSwimDepth", 2.0f);
+    ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
+    ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
+    ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
     ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
     ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
@@ -109,6 +115,8 @@ void AutoTravelMgr::LoadConfig()
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
     ATConf.debug             = sConfigMgr->GetOption<bool>  ("AutoTravel.Debug", false);
 
+    if (ATConf.arrivalDistance < 1.0f) ATConf.arrivalDistance = 1.0f;
+    if (ATConf.legDistance     < 1.0f) ATConf.legDistance     = 1.0f;
     if (ATConf.chunkPoints < 2)  ATConf.chunkPoints = 2;
     if (ATConf.chunkPoints > 60) ATConf.chunkPoints = 60;
 
@@ -544,7 +552,54 @@ float AutoTravelMgr::BestGroundZ(Player* player, float x, float y) const
     if (best <= INVALID_HEIGHT)
         best = map->GetHeight(phase, x, y, MAX_HEIGHT);   // reines Gelaende
 
-    return best;
+    if (best <= INVALID_HEIGHT)
+        return best;
+
+    // Steht dort Wasser, ist die Oberflaeche die richtige Reisehoehe -- sonst
+    // landet ein Teleport am Seeboden und die Route fuehrt tauchend hindurch.
+    return TravelZ(player, x, y, best);
+}
+
+
+// ---------------------------------------------------------------------------
+// Wasser
+// ---------------------------------------------------------------------------
+// Die Pfadpunkte des NavMesh liegen im Wasser am GRUND. Faehrt der Spline sie
+// unveraendert ab, laeuft der Charakter ueber den Seeboden und ertrinkt --
+// bei abgegebener Steuerung kann er nicht selbst auftauchen.
+//
+// Deshalb wird jeder Punkt gegen die Wasseroberflaeche geprueft und, wo noetig,
+// knapp darunter gelegt. Damit schwimmt der Charakter an der Oberflaeche
+// entlang, die Luft laeuft nicht ab, und die Schwimmanimation stimmt.
+
+bool AutoTravelMgr::WaterSurface(Player* player, float x, float y, float probeZ, float& level) const
+{
+    if (!ATConf.swim)
+        return false;
+
+    Map* map = player->GetMap();
+    float ground = INVALID_HEIGHT;
+    float lvl = map->GetWaterOrGroundLevel(player->GetPhaseMask(), x, y, probeZ, &ground);
+
+    if (lvl <= INVALID_HEIGHT || ground <= INVALID_HEIGHT)
+        return false;
+    if (lvl - ground < ATConf.minSwimDepth)
+        return false;                       // Pfuetze oder Furt: normal laufen
+
+    level = lvl;
+    return true;
+}
+
+float AutoTravelMgr::TravelZ(Player* player, float x, float y, float groundZ) const
+{
+    float lvl = 0.0f;
+    if (WaterSurface(player, x, y, groundZ + 2.0f, lvl))
+    {
+        float swimZ = lvl - ATConf.swimSurfaceOffset;
+        if (swimZ > groundZ)
+            return swimZ;
+    }
+    return groundZ;
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,7 +1178,7 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         float v = float(atof(value.c_str()));
         if (v < 0.5f || v > 100.0f)
         {
-            Msg(player, "Arrival Distance muss zwischen 0.5 und 100 liegen.");
+            Msg(player, "Zielradius muss zwischen 0.5 und 100 Yards liegen.");
             return;
         }
         s.arrivalOverride = v;
@@ -1155,7 +1210,12 @@ void AutoTravelMgr::ReleaseControl(Player* player, ATSession& s)
 {
     if (s.controlTaken)
     {
-        // Fallbezug zuruecksetzen, bevor der Client wieder selbst rechnet.
+        // Fallbezug und Bewegungsflags zuruecksetzen, bevor der Client wieder
+        // selbst rechnet -- sonst bleibt die Fall- oder Schwimmanimation haengen.
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
+        if (s.swimming && !player->IsInWater())
+            player->RemoveUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+        s.swimming = false;
         player->SetFallInformation(0, player->GetPositionZ());
         player->SetClientControl(player, true);
         s.controlTaken = false;
@@ -1188,6 +1248,7 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
+    bool water = false;
 
     uint32 n = 0;
     while (s.idx < s.path.size() && n < ATConf.chunkPoints)
@@ -1200,6 +1261,17 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
         float g = map->GetHeight(phase, p.x, p.y, p.z + 2.0f);
         if (g > INVALID_HEIGHT && std::fabs(g - p.z) < 6.0f)
             p.z = g + 0.1f;
+        else if (g > INVALID_HEIGHT && g > p.z)
+            p.z = g + 0.1f;                 // Punkt lag unter dem Boden
+
+        // Steht dort Wasser, an die Oberflaeche legen statt ueber den Grund.
+        float base = (g > INVALID_HEIGHT) ? g : p.z;
+        float travel = TravelZ(player, p.x, p.y, base);
+        if (travel > p.z)
+        {
+            p.z = travel;
+            water = true;
+        }
 
         chunk.push_back(p);
         ++s.idx;
@@ -1214,6 +1286,18 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
         player->SetClientControl(player, false);
         s.controlTaken = true;
     }
+
+    // Ein haengengebliebenes Fall-Flag laesst den Charakter bis zum naechsten
+    // Wegpunkt in der Fallanimation huepfen. Vor jedem Abschnitt zuruecksetzen.
+    player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
+    player->SetFallInformation(0, player->GetPositionZ());
+
+    // Schwimmflagge steuert Animation und Tempo des Splines.
+    if (water)
+        player->AddUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    else
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    s.swimming = water;
 
     Movement::MoveSplineInit init(player);
     init.MovebyPath(chunk);
@@ -1594,15 +1678,78 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    // Unter Wasser kann der Client waehrend servergesteuerter Bewegung nicht
-    // schwimmen -- die Luft laeuft ab, ohne dass der Spieler reagieren kann.
+    // --- Durch den Boden gefallen -------------------------------------------
+    // Wenn der Charakter unter der begehbaren Flaeche landet, laeuft er in
+    // gerader Linie weiter und huepft dabei in der Fallanimation. Erkennen und
+    // zurueckholen ist hier die einzige Rettung -- das ist ausdruecklich eine
+    // Stoerungsbehebung, kein Reisemittel.
+    if (ATConf.rescueUnderMesh && s.state != AT_WAIT_FLIGHT && s.state != AT_COMBAT_PAUSED)
+    {
+        float px = player->GetPositionX();
+        float py = player->GetPositionY();
+        float pz = player->GetPositionZ();
+
+        float ground = player->GetMap()->GetHeight(player->GetPhaseMask(), px, py,
+                                                   pz + 2.0f, true, 200.0f);
+        if (ground <= INVALID_HEIGHT)
+            ground = BestGroundZ(player, px, py);
+
+        if (ground > INVALID_HEIGHT && pz < ground - ATConf.underMeshDepth)
+        {
+            // Zwei Messungen hintereinander, damit kurze Spruenge oder ein
+            // Punkt unter einer Bruecke nicht faelschlich ausloesen.
+            if (++s.underMeshHits >= 2)
+            {
+                s.underMeshHits = 0;
+                ++s.rescueCount;
+
+                float target = TravelZ(player, px, py, ground) + 0.5f;
+                HaltMovement(player, s);
+                player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
+                player->NearTeleportTo(px, py, target, player->GetOrientation());
+                player->SetFallInformation(0, target);
+
+                char b[192];
+                std::snprintf(b, sizeof(b),
+                              "Unter der begehbaren Flaeche gelandet (%.1f statt %.1f) - "
+                              "zurueckgesetzt und neu berechnet.", pz, target);
+                Msg(player, b);
+
+                s.path.clear();
+                s.idx = 0;
+                s.state = AT_CALCULATE_PATH;
+
+                if (s.rescueCount >= 5)
+                {
+                    Msg(player, "Zu oft durch den Boden gefallen - Navigation gestoppt.");
+                    s.state = AT_IDLE;
+                }
+                return;
+            }
+        }
+        else
+            s.underMeshHits = 0;
+    }
+
+    // --- Untergetaucht --------------------------------------------------------
+    // Normalfall ist Schwimmen an der Oberflaeche; die Pfadpunkte liegen dafuer
+    // knapp unter dem Wasserspiegel. Bleibt der Charakter trotzdem laenger
+    // untergetaucht, wird abgebrochen, bevor die Luft ausgeht.
     if (player->IsUnderWater() && s.state != AT_WAIT_FLIGHT)
     {
-        HaltMovement(player, s);
-        Msg(player, "Unter Wasser wird die Reise beendet - der Wegpunkt liegt im Wasser.");
-        s.state = AT_IDLE;
-        return;
+        s.underwaterTimer += diff;
+        if (!ATConf.swim || s.underwaterTimer > ATConf.maxUnderwaterMs)
+        {
+            HaltMovement(player, s);
+            Msg(player, ATConf.swim
+                ? "Zu lange unter Wasser - Reise beendet, bevor die Luft ausgeht."
+                : "Der Weg fuehrt durch Wasser - Schwimmen ist abgeschaltet.");
+            s.state = AT_IDLE;
+            return;
+        }
     }
+    else
+        s.underwaterTimer = 0;
 
     // --- Kampf ---------------------------------------------------------------
     if (ATConf.pauseInCombat && player->IsInCombat())

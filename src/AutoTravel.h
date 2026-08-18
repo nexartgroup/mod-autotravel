@@ -85,6 +85,12 @@ struct ATConfig
     bool  resumeAfterDeath  = false;
     bool  takeClientControl = true;
     uint32 chunkPoints      = 12;
+    bool  swim              = true;
+    float swimSurfaceOffset = 1.2f;    // wie tief unter der Oberflaeche
+    float minSwimDepth      = 2.0f;    // darunter ist es eine Pfuetze
+    uint32 maxUnderwaterMs  = 45000;   // Notbremse, falls doch getaucht wird
+    bool  rescueUnderMesh   = true;
+    float underMeshDepth    = 2.5f;    // ab so viel unter dem Boden gilt es als durchgefallen
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
@@ -124,6 +130,11 @@ struct ATSession
     // arrival tolerance override (0 = use global)
     float   arrivalOverride = 0.0f;
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
+
+    uint32  underwaterTimer = 0;
+    bool    swimming        = false;
+    uint8   underMeshHits   = 0;
+    uint32  rescueCount     = 0;
 
     // stuck tracking
     float   lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f;
@@ -193,6 +204,13 @@ private:
     // Beste plausible Oberflaeche an x/y -- beruecksichtigt auch Gebaeude,
     // Bruecken und Stadtboeden, nicht nur das Rohgelaende.
     float BestGroundZ(Player* player, float x, float y) const;
+
+    // Wasseroberflaeche an x/y. Rueckgabe false = kein nennenswertes Wasser.
+    bool  WaterSurface(Player* player, float x, float y, float probeZ, float& level) const;
+
+    // Hoehe, auf der sich der Charakter dort bewegen soll: Boden, oder knapp
+    // unter der Wasseroberflaeche, wenn dort geschwommen wird.
+    float TravelZ(Player* player, float x, float y, float groundZ) const;
     void LaunchChunk(Player* player, ATSession& s);
     void HaltMovement(Player* player, ATSession& s);
     void ReleaseControl(Player* player, ATSession& s);

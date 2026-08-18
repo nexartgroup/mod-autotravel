@@ -12,8 +12,49 @@ AutoTravel.Enable = 1
 #    AutoTravel.ArrivalDistance
 #        Zielradius in Yards (2D). Innerhalb dieses Radius gilt das Ziel
 #        als erreicht.
+#        Minimum 0.5, damit sich auch punktgenaue Ziele einstellen lassen.
 #        Default: 8
 AutoTravel.ArrivalDistance = 8
+
+########################################
+# Wasser und Bodenkontakt
+########################################
+
+#    AutoTravel.Swim
+#        Wegpunkte im Wasser werden an die Oberflaeche gelegt, statt ueber den
+#        Grund zu fuehren. 0 = Reise bricht bei Wasser ab (altes Verhalten).
+#        Default: 1
+AutoTravel.Swim = 1
+
+#    AutoTravel.SwimSurfaceOffset
+#        Wie tief unter dem Wasserspiegel geschwommen wird (Yards).
+#        Default: 1.2
+AutoTravel.SwimSurfaceOffset = 1.2
+
+#    AutoTravel.MinSwimDepth
+#        Ab dieser Wassertiefe wird geschwommen. Darunter ist es eine Furt und
+#        der Charakter laeuft normal hindurch.
+#        Default: 2
+AutoTravel.MinSwimDepth = 2
+
+#    AutoTravel.MaxUnderwaterMs
+#        Notbremse: bleibt der Charakter so lange untergetaucht, wird die Reise
+#        beendet, bevor die Luft ausgeht.
+#        Default: 45000
+AutoTravel.MaxUnderwaterMs = 45000
+
+#    AutoTravel.RescueUnderMesh
+#        Erkennt, wenn der Charakter unter die begehbare Flaeche geraten ist,
+#        und setzt ihn zurueck darauf. Das ist eine Stoerungsbehebung, kein
+#        Reisemittel.
+#        Default: 1
+AutoTravel.RescueUnderMesh = 1
+
+#    AutoTravel.UnderMeshDepth
+#        Ab so vielen Yards unter dem Boden gilt der Charakter als
+#        durchgefallen.
+#        Default: 2.5
+AutoTravel.UnderMeshDepth = 2.5
 
 #    AutoTravel.LegDistance
 #        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
