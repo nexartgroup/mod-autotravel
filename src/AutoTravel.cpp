@@ -1164,6 +1164,16 @@ void AutoTravelMgr::ReleaseControl(Player* player, ATSession& s)
 
 void AutoTravelMgr::HaltMovement(Player* player, ATSession& s)
 {
+    // Sicherung: waehrend eines Taxifluges wuerde StopMoving() den Spline des
+    // FlightPathMovementGenerator loeschen. Der Spieler sitzt dann auf dem
+    // Greifen, fliegt aber nicht. Deshalb hier grundsaetzlich nichts tun --
+    // unabhaengig davon, welche Stelle im Modul den Aufruf ausloest.
+    if (player->IsInFlight())
+    {
+        ReleaseControl(player, s);
+        return;
+    }
+
     player->StopMoving();
     ReleaseControl(player, s);
 }
@@ -1531,6 +1541,26 @@ void AutoTravelMgr::Update(uint32 diff)
 
 void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 {
+    // --- Taxiflug ------------------------------------------------------------
+    // Waehrend eines Fluges wird NICHTS angefasst. Insbesondere darf hier kein
+    // StopMoving() laufen: das loescht den Spline des FlightPathMovementGenerator.
+    // Der Spieler sitzt dann zwar auf dem Greifen, fliegt aber nicht und kann
+    // stattdessen zu Fuss herumlaufen -- genau dieses Fehlerbild.
+    if (player->IsInFlight())
+    {
+        if (s.controlTaken)
+            ReleaseControl(player, s);     // ohne StopMoving
+
+        s.wasInFlight = true;
+        if (s.state != AT_WAIT_FLIGHT)
+        {
+            s.state = AT_WAIT_FLIGHT;
+            Msg(player, "Flug laeuft - AutoTravel wartet auf die Landung.");
+            PushStatus(player, s);
+        }
+        return;
+    }
+
     // --- harte Abbruchbedingungen -------------------------------------------
     if (player->GetMapId() != s.mapId || player->IsBeingTeleported())
     {
@@ -1558,19 +1588,6 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    if (player->IsInFlight())
-    {
-        HaltMovement(player, s);
-        s.wasInFlight = true;
-        if (s.state != AT_WAIT_FLIGHT)
-        {
-            s.state = AT_WAIT_FLIGHT;
-            Msg(player, "Flug erkannt - AutoTravel wartet auf die Landung.");
-            PushStatus(player, s);
-        }
-        return;
-    }
-
     if (player->GetVehicle())
     {
         HaltMovement(player, s);
@@ -1579,7 +1596,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
     // Unter Wasser kann der Client waehrend servergesteuerter Bewegung nicht
     // schwimmen -- die Luft laeuft ab, ohne dass der Spieler reagieren kann.
-    if (player->IsUnderWater())
+    if (player->IsUnderWater() && s.state != AT_WAIT_FLIGHT)
     {
         HaltMovement(player, s);
         Msg(player, "Unter Wasser wird die Reise beendet - der Wegpunkt liegt im Wasser.");
@@ -1631,17 +1648,33 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             s.state = AT_WAIT_FLIGHT;
             s.wasInFlight = false;
 
-            char mb[256];
+            // Zielangabe: Name des naechsten Punktes, sonst das Reiseziel.
+            std::string where = cur.nextName;
+            if (where.empty() && s.legIdx + 1 < s.route.size())
+                where = s.route[s.legIdx + 1].name;
+            if (where.empty())
+                where = "Richtung " + s.destName;
+
+            float rest = 0.0f;
+            if (s.legIdx + 1 < s.route.size() && s.route[s.legIdx + 1].resolved)
+                rest = player->GetExactDist2d(s.route[s.legIdx + 1].wx,
+                                              s.route[s.legIdx + 1].wy);
+
+            std::string restTxt;
+            if (rest > 0.0f)
+                restTxt = " (" + std::to_string(int(rest)) + " yd)";
+
+            char mb[320];
             if (cur.flags & AT_LEG_SPECIAL)
                 std::snprintf(mb, sizeof(mb),
-                    "Hier geht es per %s weiter nach '%s'. Nimm die Verbindung - "
-                    "AutoTravel macht danach von selbst weiter.",
-                    LinkTypeNameFor(cur.linkType),
-                    cur.nextName.empty() ? "naechster Punkt" : cur.nextName.c_str());
+                    "Weiter per %s nach: %s%s. Nimm die Verbindung - AutoTravel "
+                    "macht danach von selbst weiter.",
+                    LinkTypeNameFor(cur.linkType), where.c_str(), restTxt.c_str());
             else
                 std::snprintf(mb, sizeof(mb),
-                    "Flugmeister erreicht. Nimm den Flug - AutoTravel setzt die "
-                    "Reise nach der Landung selbst fort.");
+                    "Flugmeister erreicht. Nimm den Flug nach: %s%s. AutoTravel setzt "
+                    "die Reise nach der Landung selbst fort.",
+                    where.c_str(), restTxt.c_str());
             Msg(player, mb);
             PushStatus(player, s);
             return;
