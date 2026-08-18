@@ -27,6 +27,18 @@
 
 ATConfig ATConf;
 
+char const* LinkTypeNameFor(uint8 t)
+{
+    switch (t)
+    {
+        case 1:  return "Laufweg";
+        case 2:  return "Portal";
+        case 3:  return "Transport";
+        case 4:  return "Flugroute";
+        default: return "Sonderverbindung";
+    }
+}
+
 char const* ATStateName(ATState s)
 {
     switch (s)
@@ -86,6 +98,12 @@ void AutoTravelMgr::LoadConfig()
     ATConf.resumeAfterDeath  = sConfigMgr->GetOption<bool>  ("AutoTravel.ResumeAfterDeath", false);
     ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", true);
     ATConf.chunkPoints       = sConfigMgr->GetOption<uint32>("AutoTravel.ChunkPoints", 12);
+    ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
+    ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
+    ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
+    ATConf.nodeMinDistance   = sConfigMgr->GetOption<float> ("AutoTravel.NodeMinDistance", 300.0f);
+    ATConf.useSpecialLinks   = sConfigMgr->GetOption<bool>  ("AutoTravel.UseSpecialLinks", true);
+    ATConf.specialLinkCost   = sConfigMgr->GetOption<float> ("AutoTravel.SpecialLinkCost", 400.0f);
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
@@ -95,6 +113,7 @@ void AutoTravelMgr::LoadConfig()
     if (ATConf.chunkPoints > 60) ATConf.chunkPoints = 60;
 
     LoadMapAreas();
+    LoadTravelNodes();
 }
 
 // ---------------------------------------------------------------------------
@@ -860,8 +879,65 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
     return false;
 }
 
+// Wenn der Playerbot-Knotengraph verfuegbar ist, ersetzt er die groben
+// Carbonite-Stuetzpunkte: er kennt Flugrouten, Portale und Schiffe und liefert
+// echte Weltkoordinaten. Das eigentliche Ziel bleibt der letzte Carbonite-Punkt.
+void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
+{
+    if (!ATConf.useTravelNodes || s.route.empty())
+        return;
+
+    ATLeg last = s.route.back();
+    if (!last.resolved)
+    {
+        uint32 m = 0;
+        std::string err;
+        if (!ResolveWorld(player, last.uiMapId, last.nx, last.ny, false, 0.0f, 0.0f,
+                          last.wx, last.wy, last.wz, m, err))
+            return;
+        last.resolved = true;
+    }
+
+    float d = player->GetExactDist2d(last.wx, last.wy);
+    if (d < ATConf.nodeMinDistance)
+        return;                       // kurze Strecke: direkt pathen
+
+    std::vector<ATLeg> nodeLegs;
+    std::string note;
+    if (!BuildNodeRoute(player, last.wx, last.wy, last.wz, nodeLegs, note))
+    {
+        Dbg(player, s, "Knotenroute nicht nutzbar (" + note + ") - benutze Carbonite-Stuetzpunkte.");
+        return;
+    }
+
+    nodeLegs.push_back(last);
+    s.route  = nodeLegs;
+    s.legIdx = 0;
+
+    uint32 special = 0;
+    for (ATLeg const& l : s.route)
+        if (l.flags & AT_LEG_SPECIAL)
+            ++special;
+
+    char b[224];
+    std::snprintf(b, sizeof(b), "Knotenroute: %s%s",
+                  note.c_str(),
+                  special ? " (enthaelt Sonderverbindungen)" : "");
+    Dbg(player, s, b);
+
+    if (special)
+    {
+        std::snprintf(b, sizeof(b),
+                      "Route benutzt %u Sonderverbindung(en) - dort musst du selbst "
+                      "fliegen oder das Portal nehmen.", special);
+        Msg(player, b);
+    }
+}
+
 bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 {
+    ApplyNodeRouting(player, s);
+
     if (!SetLegTarget(player, s))
     {
         Msg(player, "Kein brauchbarer Stuetzpunkt in der Route.");
@@ -1549,12 +1625,24 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
         // Flugpunkt erreicht: der Spieler muss den Flug selbst starten,
         // ein Addon darf das in 3.3.5a nicht (geschuetzte Funktion).
-        if (!lastLeg && (s.route[s.legIdx].flags & AT_LEG_FLIGHT))
+        ATLeg const& cur = s.route[s.legIdx];
+        if (!lastLeg && (cur.flags & (AT_LEG_FLIGHT | AT_LEG_SPECIAL)))
         {
             s.state = AT_WAIT_FLIGHT;
             s.wasInFlight = false;
-            Msg(player, "Flugmeister erreicht. Nimm den Flug - AutoTravel setzt "
-                        "die Reise nach der Landung selbst fort.");
+
+            char mb[256];
+            if (cur.flags & AT_LEG_SPECIAL)
+                std::snprintf(mb, sizeof(mb),
+                    "Hier geht es per %s weiter nach '%s'. Nimm die Verbindung - "
+                    "AutoTravel macht danach von selbst weiter.",
+                    LinkTypeNameFor(cur.linkType),
+                    cur.nextName.empty() ? "naechster Punkt" : cur.nextName.c_str());
+            else
+                std::snprintf(mb, sizeof(mb),
+                    "Flugmeister erreicht. Nimm den Flug - AutoTravel setzt die "
+                    "Reise nach der Landung selbst fort.");
+            Msg(player, mb);
             PushStatus(player, s);
             return;
         }
@@ -1599,6 +1687,27 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         // -------------------------------------------------------------------
         case AT_WAIT_FLIGHT:
         {
+            // Auch ohne erkannten Flug fortsetzen, sobald der Charakter in der
+            // Naehe des naechsten Punktes auftaucht - das deckt Portale,
+            // Schiffe und Zeppeline mit ab.
+            if (!s.wasInFlight && s.legIdx + 1 < s.route.size())
+            {
+                ATLeg const& nxt = s.route[s.legIdx + 1];
+                if (nxt.resolved && player->GetExactDist2d(nxt.wx, nxt.wy) < 80.0f)
+                {
+                    Msg(player, "Verbindung genutzt - Reise wird fortgesetzt.");
+                    if (!AdvanceLeg(player, s))
+                    {
+                        s.state = AT_ARRIVED;
+                        PushStatus(player, s);
+                        Msg(player, "Ziel erreicht - " + s.destName + ".");
+                        s.state = AT_IDLE;
+                    }
+                    PushStatus(player, s);
+                    return;
+                }
+            }
+
             if (s.wasInFlight)
             {
                 s.wasInFlight = false;

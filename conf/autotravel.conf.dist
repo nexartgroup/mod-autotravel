@@ -89,6 +89,49 @@ AutoTravel.TakeClientControl = 1
 #        Default: 12
 AutoTravel.ChunkPoints = 12
 
+########################################
+# Reiseknoten von mod-playerbots
+########################################
+#
+# mod-playerbots pflegt einen Graphen aus Reiseknoten (Tabellen
+# playerbots_travelnode / _link). Dieser Graph kennt Verbindungen, die das
+# NavMesh nicht kennen kann: Flugrouten, Portale, Schiffe. AutoTravel liest ihn
+# per SQL - es besteht KEINE Kompilierabhaengigkeit zu mod-playerbots.
+# Fehlen die Tabellen, benutzt AutoTravel weiterhin die Carbonite-Route.
+
+#    AutoTravel.UseTravelNodes
+#        Default: 1
+AutoTravel.UseTravelNodes = 1
+
+#    AutoTravel.NodeDatabase
+#        Schemaname der Playerbot-Datenbank. Der MySQL-Benutzer des
+#        worldservers braucht darauf Leserechte.
+#        Default: "acore_playerbots"
+AutoTravel.NodeDatabase = "acore_playerbots"
+
+#    AutoTravel.NodeSearchRadius
+#        Wie weit nach dem naechstgelegenen Knoten gesucht wird (Yards).
+#        Default: 800
+AutoTravel.NodeSearchRadius = 800
+
+#    AutoTravel.NodeMinDistance
+#        Erst ab dieser Zielentfernung wird der Knotengraph benutzt. Darunter
+#        pathet das NavMesh direkt, das ist genauer.
+#        Default: 300
+AutoTravel.NodeMinDistance = 300
+
+#    AutoTravel.UseSpecialLinks
+#        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die
+#        Routensuche einbeziehen. Der Spieler muss sie selbst ausloesen.
+#        Default: 1
+AutoTravel.UseSpecialLinks = 1
+
+#    AutoTravel.SpecialLinkCost
+#        Aufschlag in Yards fuer eine Sonderverbindung, damit sie nur benutzt
+#        wird, wenn sie wirklich viel Strecke spart.
+#        Default: 400
+AutoTravel.SpecialLinkCost = 400
+
 #    AutoTravel.AllowTeleport
 #        Erlaubt den Teleport-Knopf des Addons (.at tp). Steht das auf 0,
 #        funktioniert nur das Laufen.

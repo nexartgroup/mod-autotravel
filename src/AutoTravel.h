@@ -6,6 +6,7 @@
 #include "MoveSplineInitArgs.h"
 
 #include <string>
+#include <cstddef>
 #include <unordered_map>
 #include <vector>
 
@@ -25,8 +26,26 @@ enum ATState : uint8
 
 enum ATLegFlags : uint8
 {
-    AT_LEG_NORMAL = 0,
-    AT_LEG_FLIGHT = 1,     // Carbonite-Abschnitt "F": Flugmeister
+    AT_LEG_NORMAL  = 0,
+    AT_LEG_FLIGHT  = 1,    // Carbonite-Abschnitt "F": Flugmeister
+    AT_LEG_SPECIAL = 2,    // TravelNode-Verbindung, die nicht gelaufen wird
+};
+
+// Reiseknoten aus der Playerbot-Datenbank (playerbots_travelnode).
+// Die Koordinaten sind bereits Weltkoordinaten - keine Umrechnung noetig.
+struct ATNode
+{
+    uint32 id = 0;
+    uint32 mapId = 0;
+    float  x = 0.0f, y = 0.0f, z = 0.0f;
+    std::string name;
+};
+
+struct ATNodeLink
+{
+    uint32 to = 0;
+    uint8  type = 0;
+    float  cost = 0.0f;
 };
 
 // Ein Stuetzpunkt der Carbonite-Route. Zwischen zwei Stuetzpunkten sucht das
@@ -41,9 +60,13 @@ struct ATLeg
     float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
     bool   resolved = false;
     std::string name;
+
+    uint8  linkType = 0;       // Art der Verbindung zum NAECHSTEN Punkt
+    std::string nextName;      // Name des naechsten Punktes
 };
 
 char const* ATStateName(ATState s);
+char const* LinkTypeNameFor(uint8 t);
 
 struct ATConfig
 {
@@ -62,6 +85,12 @@ struct ATConfig
     bool  resumeAfterDeath  = false;
     bool  takeClientControl = true;
     uint32 chunkPoints      = 12;
+    bool  useTravelNodes    = true;
+    std::string nodeDb      = "acore_playerbots";
+    float nodeSearchRadius  = 800.0f;
+    float nodeMinDistance   = 300.0f;
+    bool  useSpecialLinks   = true;
+    float specialLinkCost   = 400.0f;
     bool  allowTeleport     = true;
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;
@@ -115,6 +144,13 @@ public:
 
     void LoadConfig();
     void LoadMapAreas();
+    void LoadTravelNodes();
+
+    // Route ueber den Playerbot-Knotengraphen. false = kein Weg gefunden.
+    bool BuildNodeRoute(Player* player, float dx, float dy, float dz,
+                        std::vector<ATLeg>& out, std::string& note) const;
+    void NodeInfo(Player* player);
+    size_t NodeCount() const;
     void Update(uint32 diff);
 
     bool Start(Player* player, uint32 uiMapId, float nx, float ny,
@@ -148,6 +184,7 @@ private:
 
     bool CalculatePath(Player* player, ATSession& s);
     bool BeginTravel(Player* player, ATSession& s);
+    void ApplyNodeRouting(Player* player, ATSession& s);
     bool SetLegTarget(Player* player, ATSession& s);
     bool AdvanceLeg(Player* player, ATSession& s);
     bool TryPath(Player* player, float x, float y, float z, bool straight,

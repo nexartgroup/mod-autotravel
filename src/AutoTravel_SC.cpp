@@ -138,6 +138,12 @@ public:
             return true;
         }
 
+        if (cmd == "nodes")
+        {
+            sAutoTravel->NodeInfo(player);
+            return true;
+        }
+
         if (cmd == "stop")
         {
             sAutoTravel->Stop(player, "Reise gestoppt.");
