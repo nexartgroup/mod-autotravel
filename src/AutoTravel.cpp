@@ -1121,9 +1121,9 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
     if (key == "arrival")
     {
         float v = float(atof(value.c_str()));
-        if (v < 2.0f || v > 100.0f)
+        if (v < 0.5f || v > 100.0f)
         {
-            Msg(player, "Arrival Distance muss zwischen 2 und 100 liegen.");
+            Msg(player, "Arrival Distance muss zwischen 0.5 und 100 liegen.");
             return;
         }
         s.arrivalOverride = v;
