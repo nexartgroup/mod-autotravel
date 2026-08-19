@@ -104,6 +104,7 @@ void AutoTravelMgr::LoadConfig()
     ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
     ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
     ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
+    ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 6.0f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
     ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
     ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
@@ -1678,12 +1679,18 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    // --- Durch den Boden gefallen -------------------------------------------
-    // Wenn der Charakter unter der begehbaren Flaeche landet, laeuft er in
-    // gerader Linie weiter und huepft dabei in der Fallanimation. Erkennen und
-    // zurueckholen ist hier die einzige Rettung -- das ist ausdruecklich eine
-    // Stoerungsbehebung, kein Reisemittel.
-    if (ATConf.rescueUnderMesh && s.state != AT_WAIT_FLIGHT && s.state != AT_COMBAT_PAUSED)
+    // --- Kein Kontakt zur begehbaren Flaeche --------------------------------
+    // Zwei Stoerungen mit demselben Bild: der Charakter huepft in der
+    // Fallanimation und laeuft dabei geradeaus weiter.
+    //
+    //   zu tief  -> durch den Boden gefallen, kommt nie wieder hoch
+    //   zu hoch  -> haengt in der Luft und sinkt langsam ab
+    //
+    // Bezugsgroesse ist NICHT die rohe Bodenhoehe, sondern die Reisehoehe:
+    // beim Schwimmen ist das die Wasseroberflaeche, sonst der Boden. Ohne das
+    // waere jeder Schwimmzug ein Fehlalarm, weil der Seegrund weit unten liegt.
+    if (ATConf.rescueUnderMesh && s.state != AT_WAIT_FLIGHT && s.state != AT_COMBAT_PAUSED
+        && !player->IsInFlight())
     {
         float px = player->GetPositionX();
         float py = player->GetPositionY();
@@ -1694,41 +1701,47 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         if (ground <= INVALID_HEIGHT)
             ground = BestGroundZ(player, px, py);
 
-        if (ground > INVALID_HEIGHT && pz < ground - ATConf.underMeshDepth)
+        float ref = (ground > INVALID_HEIGHT) ? TravelZ(player, px, py, ground) : INVALID_HEIGHT;
+
+        bool tooLow  = (ref > INVALID_HEIGHT) && (pz < ref - ATConf.underMeshDepth);
+        bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + ATConf.aboveMeshHeight);
+
+        if (tooLow || tooHigh)
         {
-            // Zwei Messungen hintereinander, damit kurze Spruenge oder ein
-            // Punkt unter einer Bruecke nicht faelschlich ausloesen.
-            if (++s.underMeshHits >= 2)
+            // Mehrere Messungen hintereinander, damit ein Sprung, eine Rampe
+            // oder ein Punkt unter einer Bruecke nicht faelschlich ausloest.
+            if (++s.offMeshHits >= 3)
             {
-                s.underMeshHits = 0;
+                s.offMeshHits = 0;
                 ++s.rescueCount;
 
-                float target = TravelZ(player, px, py, ground) + 0.5f;
+                float target = ref + 0.5f;
                 HaltMovement(player, s);
                 player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
                 player->NearTeleportTo(px, py, target, player->GetOrientation());
                 player->SetFallInformation(0, target);
 
-                char b[192];
+                char b[224];
                 std::snprintf(b, sizeof(b),
-                              "Unter der begehbaren Flaeche gelandet (%.1f statt %.1f) - "
-                              "zurueckgesetzt und neu berechnet.", pz, target);
+                              "Kein Bodenkontakt (%.1f statt %.1f, %s) - zurueckgesetzt "
+                              "und neu berechnet.",
+                              pz, target, tooLow ? "unter der Flaeche" : "in der Luft");
                 Msg(player, b);
 
                 s.path.clear();
                 s.idx = 0;
                 s.state = AT_CALCULATE_PATH;
 
-                if (s.rescueCount >= 5)
+                if (s.rescueCount >= 6)
                 {
-                    Msg(player, "Zu oft durch den Boden gefallen - Navigation gestoppt.");
+                    Msg(player, "Zu oft ohne Bodenkontakt - Navigation gestoppt.");
                     s.state = AT_IDLE;
                 }
                 return;
             }
         }
         else
-            s.underMeshHits = 0;
+            s.offMeshHits = 0;
     }
 
     // --- Untergetaucht --------------------------------------------------------

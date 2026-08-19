@@ -51,10 +51,17 @@ AutoTravel.MaxUnderwaterMs = 45000
 AutoTravel.RescueUnderMesh = 1
 
 #    AutoTravel.UnderMeshDepth
-#        Ab so vielen Yards unter dem Boden gilt der Charakter als
+#        Ab so vielen Yards unter der Reisehoehe gilt der Charakter als
 #        durchgefallen.
 #        Default: 2.5
 AutoTravel.UnderMeshDepth = 2.5
+
+#    AutoTravel.AboveMeshHeight
+#        Ab so vielen Yards ueber der Reisehoehe gilt er als haengend oder
+#        fallend und wird nach unten auf die Flaeche gesetzt. Grosszuegiger als
+#        UnderMeshDepth, damit Spruenge und Rampen nicht ausloesen.
+#        Default: 6
+AutoTravel.AboveMeshHeight = 6
 
 #    AutoTravel.LegDistance
 #        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als

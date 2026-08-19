@@ -91,6 +91,7 @@ struct ATConfig
     uint32 maxUnderwaterMs  = 45000;   // Notbremse, falls doch getaucht wird
     bool  rescueUnderMesh   = true;
     float underMeshDepth    = 2.5f;    // ab so viel unter dem Boden gilt es als durchgefallen
+    float aboveMeshHeight   = 6.0f;    // ab so viel darueber gilt er als haengend/fallend
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
@@ -133,7 +134,8 @@ struct ATSession
 
     uint32  underwaterTimer = 0;
     bool    swimming        = false;
-    uint8   underMeshHits   = 0;
+    uint8   offMeshHits     = 0;
+    float   lastOffMeshZ    = 0.0f;
     uint32  rescueCount     = 0;
 
     // stuck tracking
