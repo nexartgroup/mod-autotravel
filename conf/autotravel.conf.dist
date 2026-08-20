@@ -122,20 +122,6 @@ AutoTravel.MaxRepathAttempts = 8
 #        Default: 0
 AutoTravel.ResumeAfterDeath = 0
 
-#    AutoTravel.SteerDetect
-#        Erkennt eigene Steuerungseingaben (WASD, Leertaste, Drehen) anhand der
-#        Bewegungsflaggen, die der Client sendet. Ein servergesteuerter Spline
-#        setzt diese Flaggen nicht -- damit lassen sich beide Faelle sauber
-#        unterscheiden. Waehrend der Spieler steuert, pausiert die Reise.
-#        Default: 1
-AutoTravel.SteerDetect = 1
-
-#    AutoTravel.SteerPauseMs
-#        So lange muss nach der letzten Eingabe Ruhe sein, bis die Reise wieder
-#        uebernimmt. Das Addon kann den Wert pro Charakter setzen.
-#        Default: 8000
-AutoTravel.SteerPauseMs = 8000
-
 #    AutoTravel.TakeClientControl
 #        1 = Server uebernimmt waehrend der Fahrt die Bewegungskontrolle
 #            (SetClientControl). Zuverlaessig, aber der Spieler kann waehrend

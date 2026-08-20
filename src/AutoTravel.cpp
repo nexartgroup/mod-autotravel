@@ -97,9 +97,7 @@ void AutoTravelMgr::LoadConfig()
     ATConf.stuckMinDistance  = sConfigMgr->GetOption<float> ("AutoTravel.StuckMinDistance", 3.0f);
     ATConf.maxRepathAttempts = sConfigMgr->GetOption<uint32>("AutoTravel.MaxRepathAttempts", 8);
     ATConf.resumeAfterDeath  = sConfigMgr->GetOption<bool>  ("AutoTravel.ResumeAfterDeath", false);
-    ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", false);
-    ATConf.steerDetect       = sConfigMgr->GetOption<bool>  ("AutoTravel.SteerDetect", true);
-    ATConf.steerPauseMs      = sConfigMgr->GetOption<uint32>("AutoTravel.SteerPauseMs", 8000);
+    ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", true);
     ATConf.chunkPoints       = sConfigMgr->GetOption<uint32>("AutoTravel.ChunkPoints", 12);
     ATConf.swim              = sConfigMgr->GetOption<bool>  ("AutoTravel.Swim", true);
     ATConf.swimSurfaceOffset = sConfigMgr->GetOption<float> ("AutoTravel.SwimSurfaceOffset", 1.2f);
@@ -891,9 +889,7 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
     int8 keepControl = s.controlOverride;
-    uint32 keepWait = s.inputWaitMs;
     s = ATSession();
-    s.inputWaitMs     = keepWait;
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
@@ -1086,9 +1082,7 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
     int8 keepControl = s.controlOverride;
-    uint32 keepWait = s.inputWaitMs;
     s = ATSession();
-    s.inputWaitMs     = keepWait;
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
@@ -1136,7 +1130,7 @@ void AutoTravelMgr::Stop(Player* player, std::string const& reason, bool silent)
 // Der Spieler will selbst handeln: Bewegung anhalten und die Steuerung
 // zurueckgeben. Ohne das laesst sich waehrend der Fahrt keine Ausruestung
 // wechseln, kein Zauber wirken und nicht ausweichen.
-void AutoTravelMgr::SetPlayerPause(Player* player, bool on, bool bySteer)
+void AutoTravelMgr::SetPlayerPause(Player* player, bool on)
 {
     auto it = _sessions.find(player->GetGUID());
     if (it == _sessions.end())
@@ -1147,8 +1141,6 @@ void AutoTravelMgr::SetPlayerPause(Player* player, bool on, bool bySteer)
         return;
 
     s.playerPaused = on;
-    s.pausedBySteer = on ? bySteer : false;
-    s.steerIdle = 0;
 
     if (on)
     {
@@ -1156,9 +1148,7 @@ void AutoTravelMgr::SetPlayerPause(Player* player, bool on, bool bySteer)
         s.path.clear();
         s.idx = 0;
         s.state = AT_PLAYER_PAUSED;
-        Msg(player, bySteer
-            ? "Du steuerst selbst - Reise angehalten."
-            : "Spielervorrang - Reise angehalten, Steuerung liegt bei dir.");
+        Msg(player, "Spielervorrang - Reise angehalten, Steuerung liegt bei dir.");
     }
     else
     {
@@ -1251,28 +1241,6 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         if (s.controlOverride == 0 && s.controlTaken)
             ReleaseControl(player, s);
     }
-    else if (key == "steerwait")
-    {
-        float v = float(atof(value.c_str()));
-        if (v < 1.0f || v > 60.0f)
-        {
-            Msg(player, "Wartezeit muss zwischen 1 und 60 Sekunden liegen.");
-            return;
-        }
-        s.inputWaitMs = uint32(v * 1000.0f);
-        Dbg(player, s, "Wartezeit nach eigener Steuerung: " + value + " s");
-    }
-    else if (key == "inputwait")
-    {
-        float v = float(atof(value.c_str()));
-        if (v < 1.0f || v > 60.0f)
-        {
-            Msg(player, "Wartezeit muss zwischen 1 und 60 Sekunden liegen.");
-            return;
-        }
-        s.inputWaitMs = uint32(v * 1000.0f);
-        Dbg(player, s, "Wartezeit nach eigener Eingabe: " + value + " s");
-    }
     else if (key == "grace")
     {
         float v = float(atof(value.c_str()));
@@ -1288,7 +1256,7 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         Msg(player, "Unbekannte Option: " + key);
 
     if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0
-        && s.controlOverride < 0 && s.inputWaitMs == 0 && !s.debug)
+        && s.controlOverride < 0 && !s.debug)
         _sessions.erase(player->GetGUID());
 }
 
@@ -1401,7 +1369,6 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     init.Launch();
 
     // Kurz keine Steuererkennung: die Spline setzt selbst Bewegungsflaggen.
-    s.launchGuard = 900;
 
     // Der Client zaehlt waehrend einer servergesteuerten Bewegung Fallzeit
     // mit, wenn der Spline bergab durch die Luft schneidet. Beim Zurueckgeben
@@ -1777,45 +1744,20 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    // --- Eigene Steuereingaben erkennen --------------------------------------
-    // Behaelt der Spieler die Kontrolle, meldet sein Client die gedrueckten
-    // Richtungstasten in m_movementInfo. Unsere eigene Spline setzt kurz nach
-    // dem Start ebenfalls MOVEMENTFLAG_FORWARD -- deshalb eine kurze Sperre
-    // nach jedem Bewegungsabschnitt, sonst haetten wir einen Fehlalarm.
-    bool takeControl = (s.controlOverride < 0) ? ATConf.takeClientControl
-                                               : (s.controlOverride == 1);
-
-    if (s.launchGuard > diff) s.launchGuard -= diff; else s.launchGuard = 0;
-
-    if (ATConf.steerDetect && !takeControl && s.launchGuard == 0)
-    {
-        uint32 const inputFlags =
-              MOVEMENTFLAG_FORWARD | MOVEMENTFLAG_BACKWARD
-            | MOVEMENTFLAG_STRAFE_LEFT | MOVEMENTFLAG_STRAFE_RIGHT
-            | MOVEMENTFLAG_FALLING;
-
-        bool steering = player->m_movementInfo.HasMovementFlag(inputFlags);
-
-        if (steering)
-        {
-            if (!s.playerPaused)
-            {
-                SetPlayerPause(player, true, true);
-                return;
-            }
-            s.steerIdle = 0;
-        }
-        else if (s.playerPaused && s.pausedBySteer)
-        {
-            s.steerIdle += diff;
-            uint32 wait = s.inputWaitMs ? s.inputWaitMs : ATConf.steerPauseMs;
-            if (s.steerIdle >= wait)
-            {
-                SetPlayerPause(player, false);
-                return;
-            }
-        }
-    }
+    // --- Warum hier KEINE Steuerungserkennung steht --------------------------
+    // Naheliegend waere, die Bewegungsflaggen des Spielers auszuwerten. Das
+    // funktioniert nicht: MoveSplineInit::Launch() setzt MOVEMENTFLAG_FORWARD
+    // selbst, und zwar fuer die gesamte Dauer der Bewegung. Der Server sieht
+    // seine eigene Fahrt also nicht anders als einen laufenden Spieler und
+    // pausiert sich in einer Schleife selbst.
+    //
+    // Eine kurze Sperre nach dem Start hilft nicht, weil die Flagge dauerhaft
+    // gesetzt bleibt. Auch ein Abgleich mit der Spline-Sollposition traegt
+    // nicht: solange der Server die Kontrolle hat, kann der Client gar nicht
+    // abweichen, und ohne Kontrolle bewegt die Spline den Charakter nicht.
+    //
+    // Die Unterscheidung gehoert deshalb auf die Clientseite, wo bekannt ist,
+    // wer eine Aktion ausgeloest hat. Das Addon meldet sich mit ".at pause".
 
     // --- Spielervorrang: ausdruecklich angefordert ---------------------------
     if (s.playerPaused)
