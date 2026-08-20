@@ -136,9 +136,7 @@ struct ATSession
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
     int8    controlOverride = -1;     // -1 = Konfiguration, 0 = aus, 1 = an
     bool    playerPaused    = false;  // ausdruecklich angefordert (.at pause 1)
-    bool    inputPaused     = false;  // wegen eigener Steuerungseingaben
-    uint32  inputIdleMs     = 0;      // wie lange keine Eingabe mehr kam
-    uint32  inputWaitMs     = 0;      // 0 = Konfigurationswert
+    uint32  inputWaitMs     = 0;      // Wartezeit pro Charakter, 0 = Konfiguration
     bool    pausedBySteer   = false;  // ausgeloest durch eigene Steuereingabe
     uint32  steerIdle       = 0;      // wie lange schon keine Eingabe mehr
     uint32  launchGuard     = 0;      // kurz nach dem Start keine Erkennung

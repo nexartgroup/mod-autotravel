@@ -27,26 +27,6 @@
 
 ATConfig ATConf;
 
-// ---------------------------------------------------------------------------
-// Eigene Steuerungseingaben erkennen
-// ---------------------------------------------------------------------------
-// Bewegt der Spieler seinen Charakter selbst, schickt sein Client
-// Bewegungsflaggen mit. Ein servergesteuerter Spline setzt diese Flaggen NICHT
-// -- er bewegt die Einheit an den Flaggen vorbei. Damit lassen sich beide
-// Faelle sauber auseinanderhalten, ohne im Client herumzuraten.
-//
-// Die Zahlenwerte statt der Enum-Namen, weil die Namen sich zwischen Cores
-// unterscheiden, die Werte aber seit Vanilla feststehen:
-//   0x001 vorwaerts   0x002 rueckwaerts   0x004/0x008 seitwaerts
-//   0x010/0x020 drehen   0x040/0x080 neigen
-//   0x400/0x800 auf/ab (schwimmen, fliegen)   0x1000 fallen (Sprung)
-static uint32 const AT_INPUT_FLAGS = 0x00001CFFu;
-
-static bool HasPlayerInput(Player* player)
-{
-    return (player->GetUnitMovementFlags() & AT_INPUT_FLAGS) != 0;
-}
-
 char const* LinkTypeNameFor(uint8 t)
 {
     switch (t)
@@ -1279,7 +1259,7 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
             Msg(player, "Wartezeit muss zwischen 1 und 60 Sekunden liegen.");
             return;
         }
-        ATConf.steerPauseMs = uint32(v * 1000.0f);
+        s.inputWaitMs = uint32(v * 1000.0f);
         Dbg(player, s, "Wartezeit nach eigener Steuerung: " + value + " s");
     }
     else if (key == "inputwait")
@@ -1828,7 +1808,8 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         else if (s.playerPaused && s.pausedBySteer)
         {
             s.steerIdle += diff;
-            if (s.steerIdle >= ATConf.steerPauseMs)
+            uint32 wait = s.inputWaitMs ? s.inputWaitMs : ATConf.steerPauseMs;
+            if (s.steerIdle >= wait)
             {
                 SetPlayerPause(player, false);
                 return;
@@ -1843,55 +1824,6 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             ReleaseControl(player, s);
         s.state = AT_PLAYER_PAUSED;
         return;
-    }
-
-    // --- Spielervorrang: eigene Steuerungseingabe ----------------------------
-    // Solange der Spieler selbst steuert, haelt die Reise an. Nach der
-    // eingestellten Ruhezeit uebernimmt sie wieder -- mit neu berechnetem Weg
-    // von der Stelle, an der der Spieler stehengeblieben ist.
-    if (ATConf.playerInputPause && s.state != AT_WAIT_FLIGHT)
-    {
-        uint32 wait = s.inputWaitMs ? s.inputWaitMs : ATConf.playerInputWaitMs;
-
-        if (HasPlayerInput(player))
-        {
-            s.inputIdleMs = 0;
-            if (!s.inputPaused)
-            {
-                s.inputPaused = true;
-                HaltMovement(player, s);
-                s.path.clear();
-                s.idx = 0;
-                s.state = AT_PLAYER_PAUSED;
-                Msg(player, "Eigene Steuerung erkannt - Reise pausiert.");
-                PushStatus(player, s);
-            }
-            return;
-        }
-
-        if (s.inputPaused)
-        {
-            s.inputIdleMs += diff;
-            if (s.inputIdleMs < wait)
-            {
-                s.state = AT_PLAYER_PAUSED;
-                return;
-            }
-
-            s.inputPaused    = false;
-            s.inputIdleMs    = 0;
-            s.repathAttempts = 0;
-            s.offMeshHits    = 0;
-            s.stuckTimer     = 0;
-            s.mountTried     = false;
-            s.lastX = player->GetPositionX();
-            s.lastY = player->GetPositionY();
-            s.lastZ = player->GetPositionZ();
-            s.state = AT_CALCULATE_PATH;
-            Msg(player, "Keine Eingabe mehr - neuer Weg von der aktuellen Position.");
-            PushStatus(player, s);
-            return;
-        }
     }
 
     // --- Kein Kontakt zur begehbaren Flaeche --------------------------------
