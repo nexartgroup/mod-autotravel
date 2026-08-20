@@ -172,6 +172,23 @@ AutoTravel.NodeSearchRadius = 800
 #        Default: 300
 AutoTravel.NodeMinDistance = 300
 
+#    AutoTravel.HeuristicWeight
+#        Gewicht der Restentfernungs-Schaetzung bei der Routensuche (A*).
+#            1.0 = kuerzester Weg garantiert (Standard)
+#            >1  = sucht schneller, kann einen etwas laengeren Weg liefern
+#        Auf einem Testgitter: 3000 Yards Strecke, 3559 gepruefte Knoten bei
+#        reinem Dijkstra, 3119 bei w=1.0, 107 bei w=1.6 -- bei gleicher
+#        Weglaenge. Erhoehen lohnt also erst bei sehr langen Strecken.
+#        Default: 1.0
+AutoTravel.HeuristicWeight = 1.0
+
+#    AutoTravel.FinalApproachTries
+#        Wie oft der exakte Zielpunkt noch angelaufen wird, nachdem der
+#        Ersatzpunkt erreicht ist. Danach meldet AutoTravel Ankunft und nennt
+#        die tatsaechliche Restentfernung.
+#        Default: 2
+AutoTravel.FinalApproachTries = 2
+
 #    AutoTravel.UseSpecialLinks
 #        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die
 #        Routensuche einbeziehen. Der Spieler muss sie selbst ausloesen.

@@ -92,6 +92,10 @@ void AutoTravelMgr::LoadConfig()
     ATConf.enable            = sConfigMgr->GetOption<bool>  ("AutoTravel.Enable", true);
     ATConf.arrivalDistance   = sConfigMgr->GetOption<float> ("AutoTravel.ArrivalDistance", 8.0f);
     ATConf.legDistance       = sConfigMgr->GetOption<float> ("AutoTravel.LegDistance", 15.0f);
+    ATConf.finalApproachTries = sConfigMgr->GetOption<uint32>("AutoTravel.FinalApproachTries", 2);
+    ATConf.heuristicWeight   = sConfigMgr->GetOption<float> ("AutoTravel.HeuristicWeight", 1.0f);
+    if (ATConf.heuristicWeight < 1.0f) ATConf.heuristicWeight = 1.0f;
+    if (ATConf.heuristicWeight > 3.0f) ATConf.heuristicWeight = 3.0f;
     ATConf.autoMount         = sConfigMgr->GetOption<bool>  ("AutoTravel.AutoMount", true);
     ATConf.mountMinDistance  = sConfigMgr->GetOption<float> ("AutoTravel.MountMinDistance", 150.0f);
     ATConf.pauseInCombat     = sConfigMgr->GetOption<bool>  ("AutoTravel.PauseInCombat", true);
@@ -946,6 +950,7 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.destY = leg.wy;
         s.destZ = leg.wz;
         s.approachOff = 0.0f;
+        s.finalTries = 0;
         return true;
     }
     return false;
@@ -1912,8 +1917,39 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     // Gemessen wird gegen das angeforderte Ziel, nicht gegen den
     // Annaeherungspunkt. Sonst meldet AutoTravel "angekommen", obwohl es in
     // Wahrheit an einer Ersatzstelle steht.
-    float dist = player->GetExactDist2d(s.reqX, s.reqY);
-    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
+    float dist    = player->GetExactDist2d(s.reqX, s.reqY);
+    float distApp = player->GetExactDist2d(s.destX, s.destY);
+
+    bool reached  = (dist <= radius);
+    bool nearOnly = false;
+
+    // Ist die gewuenschte Stelle nicht begehbar, laeuft AutoTravel einen
+    // Ersatzpunkt an. Wuerde die Ankunft weiterhin nur gegen das angeforderte
+    // Ziel messen, kaeme die Reise dort NIE an und liefe endlos im Repath --
+    // besonders bei kleinem Zielradius. Deshalb: am Ersatzpunkt angekommen,
+    // noch ein paar Anlaeufe auf den exakten Punkt, dann ehrlich melden,
+    // wie weit es tatsaechlich ist.
+    if (!reached && s.approachOff > 0.0f && distApp <= radius
+        && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
+    {
+        if (s.finalTries < ATConf.finalApproachTries)
+        {
+            ++s.finalTries;
+            char fb[160];
+            std::snprintf(fb, sizeof(fb), "Schlussanflug %u/%u auf den exakten Zielpunkt.",
+                          uint32(s.finalTries), ATConf.finalApproachTries);
+            Dbg(player, s, fb);
+            HaltMovement(player, s);
+            s.path.clear();
+            s.idx = 0;
+            s.state = AT_CALCULATE_PATH;
+            return;
+        }
+        reached  = true;
+        nearOnly = true;
+    }
+
+    if (reached && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
     {
         HaltMovement(player, s);
 
@@ -1965,7 +2001,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
         s.state = AT_ARRIVED;
         PushStatus(player, s);
-        Msg(player, "Ziel erreicht - " + s.destName + ".");
+        if (nearOnly)
+        {
+            char ab[224];
+            std::snprintf(ab, sizeof(ab),
+                          "Ziel erreicht - %s (%.0f yd entfernt, naeher ist dort "
+                          "nichts begehbar).", s.destName.c_str(), dist);
+            Msg(player, ab);
+        }
+        else
+            Msg(player, "Ziel erreicht - " + s.destName + ".");
         s.state = AT_IDLE;
         return;
     }

@@ -82,6 +82,8 @@ struct ATConfig
     bool  enable            = true;
     float arrivalDistance   = 8.0f;
     float legDistance       = 15.0f;   // Radius fuer Zwischenstuetzpunkte
+    uint32 finalApproachTries = 2;     // Anlaeufe auf den exakten Zielpunkt
+    float heuristicWeight   = 1.0f;    // A*: 1.0 = kuerzester Weg garantiert
     bool  autoMount         = true;
     float mountMinDistance  = 150.0f;
     bool  pauseInCombat     = true;
@@ -133,6 +135,7 @@ struct ATSession
     float   destY       = 0.0f;
     float   destZ       = 0.0f;
     float   approachOff = 0.0f;    // Abstand approach <-> requested
+    uint8   finalTries  = 0;       // Versuche fuer den Schlussanflug
     std::string destName;
 
     std::vector<ATLeg> route;

@@ -192,8 +192,31 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// Dijkstra
+// A* auf dem Reisegraphen
 // ---------------------------------------------------------------------------
+// Vorher lief hier Dijkstra: der breitet sich gleichmaessig in ALLE Richtungen
+// aus und sieht sich halb Azeroth an, bevor er ein Ziel 300 Yards weiter
+// findet. A* schaetzt zusaetzlich die Restentfernung und arbeitet damit
+// gerichtet auf das Ziel zu -- dasselbe Prinzip wie bei Kartendiensten.
+//
+//     f(n) = g(n)            + h(n)
+//            bisherige Kosten  Luftlinie zum Ziel
+//
+// Damit A* denselben Weg findet wie Dijkstra, muss die Schaetzung
+// ZULAESSIG sein: sie darf die echten Restkosten nie ueberschaetzen. Das ist
+// hier erfuellt, weil die Kantenkosten aus Weglaengen stammen und ein Weg
+// niemals kuerzer als die Luftlinie ist.
+//
+// Zwei Faelle brechen das und werden abgefangen:
+//
+//   1. Andere Karte -- eine Luftlinie zwischen zwei Karten ist bedeutungslos.
+//      Dort ist h = 0, A* verhaelt sich wie Dijkstra.
+//   2. Sonderverbindungen (Flug, Portal) tragen einen Aufschlag, sind also
+//      teurer als ihre Laenge. Das macht die Schaetzung nur vorsichtiger,
+//      nicht ungueltig.
+//
+// AutoTravel.HeuristicWeight > 1.0 sucht schneller, kann aber einen etwas
+// laengeren Weg liefern. Standard 1.0 = kuerzester Weg garantiert.
 
 bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*dz*/,
                                    std::vector<ATLeg>& out, std::string& note) const
@@ -224,24 +247,35 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         return false;
     }
 
-    // --- Suche -------------------------------------------------------------
-    std::unordered_map<uint32, float> dist;
+    ATNode const& goal = sNodes[endNode];
+    float const w = ATConf.heuristicWeight;
+
+    // Zulaessige Schaetzung der Restkosten
+    auto heuristic = [&](ATNode const& n) -> float
+    {
+        if (n.mapId != goal.mapId)
+            return 0.0f;                       // andere Karte: keine Aussage moeglich
+        return Dist2D(n.x, n.y, goal.x, goal.y) * w;
+    };
+
+    std::unordered_map<uint32, float> gScore;
     std::unordered_map<uint32, uint32> prev;
     std::unordered_map<uint32, uint8> prevType;
+    std::unordered_map<uint32, bool> closed;
 
-    typedef std::pair<float, uint32> QE;
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+    typedef std::pair<float, uint32> QE;        // (f, Knoten)
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> open;
 
-    dist[startNode] = 0.0f;
-    pq.push(QE(0.0f, startNode));
+    gScore[startNode] = 0.0f;
+    open.push(QE(heuristic(sNodes[startNode]), startNode));
 
-    uint32 visited = 0;
+    uint32 expanded = 0;
     bool found = false;
 
-    while (!pq.empty())
+    while (!open.empty())
     {
-        QE cur = pq.top();
-        pq.pop();
+        QE cur = open.top();
+        open.pop();
 
         if (cur.second == endNode)
         {
@@ -249,12 +283,17 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             break;
         }
 
-        auto dIt = dist.find(cur.second);
-        if (dIt == dist.end() || cur.first > dIt->second + 0.01f)
+        if (closed[cur.second])
             continue;
+        closed[cur.second] = true;
 
-        if (++visited > 40000)
+        if (++expanded > 40000)
             break;
+
+        auto gIt = gScore.find(cur.second);
+        if (gIt == gScore.end())
+            continue;
+        float g = gIt->second;
 
         auto lIt = sLinks.find(cur.second);
         if (lIt == sLinks.end())
@@ -262,14 +301,17 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
         for (ATNodeLink const& l : lIt->second)
         {
-            float nd = cur.first + l.cost;
-            auto old = dist.find(l.to);
-            if (old == dist.end() || nd < old->second)
+            if (closed[l.to])
+                continue;
+
+            float ng = g + l.cost;
+            auto old = gScore.find(l.to);
+            if (old == gScore.end() || ng < old->second)
             {
-                dist[l.to] = nd;
-                prev[l.to] = cur.second;
+                gScore[l.to]   = ng;
+                prev[l.to]     = cur.second;
                 prevType[l.to] = l.type;
-                pq.push(QE(nd, l.to));
+                open.push(QE(ng + heuristic(sNodes[l.to]), l.to));
             }
         }
     }
@@ -343,9 +385,10 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         out.push_back(leg);
     }
 
-    char b[192];
-    std::snprintf(b, sizeof(b), "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
-                  uint32(out.size()), dStart, dEnd);
+    char b[224];
+    std::snprintf(b, sizeof(b),
+                  "%u Knoten, %u geprueft, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
+                  uint32(out.size()), expanded, dStart, dEnd);
     note = b;
     return true;
 }
