@@ -49,6 +49,7 @@ char const* ATStateName(ATState s)
         case AT_COMBAT_PAUSED:  return "PAUSED - COMBAT";
         case AT_MOUNTING:       return "MOUNTING";
         case AT_WAIT_FLIGHT:    return "WARTE AUF FLUG";
+        case AT_PLAYER_PAUSED:  return "PAUSED - SPIELER";
         case AT_ARRIVED:        return "ARRIVED";
         case AT_FAILED:         return "FAILED";
     }
@@ -887,10 +888,12 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     bool wasDebug = s.debug;
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
+    int8 keepControl = s.controlOverride;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
+    s.controlOverride = keepControl;
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
     s.route    = it->second;
@@ -1078,10 +1081,12 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     bool wasDebug = s.debug;
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
+    int8 keepControl = s.controlOverride;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
+    s.controlOverride = keepControl;
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
 
@@ -1120,6 +1125,46 @@ void AutoTravelMgr::Stop(Player* player, std::string const& reason, bool silent)
     if (!silent)
         Msg(player, reason.empty() ? "Reise gestoppt." : reason);
     _sessions.erase(it);
+}
+
+// Der Spieler will selbst handeln: Bewegung anhalten und die Steuerung
+// zurueckgeben. Ohne das laesst sich waehrend der Fahrt keine Ausruestung
+// wechseln, kein Zauber wirken und nicht ausweichen.
+void AutoTravelMgr::SetPlayerPause(Player* player, bool on)
+{
+    auto it = _sessions.find(player->GetGUID());
+    if (it == _sessions.end())
+        return;
+
+    ATSession& s = it->second;
+    if (s.playerPaused == on)
+        return;
+
+    s.playerPaused = on;
+
+    if (on)
+    {
+        HaltMovement(player, s);
+        s.path.clear();
+        s.idx = 0;
+        s.state = AT_PLAYER_PAUSED;
+        Msg(player, "Spielervorrang - Reise angehalten, Steuerung liegt bei dir.");
+    }
+    else
+    {
+        // Von der aktuellen Position neu rechnen: waehrend der Pause kann der
+        // Spieler ein Stueck gelaufen sein oder ausgewichen haben.
+        s.repathAttempts = 0;
+        s.offMeshHits    = 0;
+        s.stuckTimer     = 0;
+        s.mountTried     = false;
+        s.lastX = player->GetPositionX();
+        s.lastY = player->GetPositionY();
+        s.lastZ = player->GetPositionZ();
+        s.state = AT_CALCULATE_PATH;
+        Msg(player, "Spielervorrang beendet - neuer Weg von der aktuellen Position.");
+    }
+    PushStatus(player, s);
 }
 
 void AutoTravelMgr::Repath(Player* player)
@@ -1185,6 +1230,17 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         s.arrivalOverride = v;
         Msg(player, "Arrival Distance = " + value);
     }
+    else if (key == "control")
+    {
+        int v = atoi(value.c_str());
+        s.controlOverride = int8((v < 0) ? -1 : (v ? 1 : 0));
+        Dbg(player, s, std::string("Steuerungsuebernahme: ") +
+            (s.controlOverride < 0 ? "laut Konfiguration"
+                                   : (s.controlOverride ? "an" : "aus")));
+        // Sofort wirksam machen, wenn gerade gefahren wird.
+        if (s.controlOverride == 0 && s.controlTaken)
+            ReleaseControl(player, s);
+    }
     else if (key == "grace")
     {
         float v = float(atof(value.c_str()));
@@ -1199,7 +1255,8 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
     else
         Msg(player, "Unbekannte Option: " + key);
 
-    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0 && !s.debug)
+    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0
+        && s.controlOverride < 0 && !s.debug)
         _sessions.erase(player->GetGUID());
 }
 
@@ -1282,10 +1339,16 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     if (chunk.size() < 2)
         return;
 
-    if (ATConf.takeClientControl && !s.controlTaken)
+    bool takeControl = (s.controlOverride < 0) ? ATConf.takeClientControl
+                                               : (s.controlOverride == 1);
+    if (takeControl && !s.controlTaken)
     {
         player->SetClientControl(player, false);
         s.controlTaken = true;
+    }
+    else if (!takeControl && s.controlTaken)
+    {
+        ReleaseControl(player, s);
     }
 
     // Ein haengengebliebenes Fall-Flag laesst den Charakter bis zum naechsten
@@ -1676,6 +1739,15 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     if (player->GetVehicle())
     {
         HaltMovement(player, s);
+        return;
+    }
+
+    // --- Spielervorrang -----------------------------------------------------
+    if (s.playerPaused)
+    {
+        if (s.controlTaken)
+            ReleaseControl(player, s);
+        s.state = AT_PLAYER_PAUSED;
         return;
     }
 

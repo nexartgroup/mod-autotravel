@@ -20,6 +20,7 @@ enum ATState : uint8
     AT_COMBAT_PAUSED,
     AT_MOUNTING,
     AT_WAIT_FLIGHT,
+    AT_PLAYER_PAUSED,
     AT_ARRIVED,
     AT_FAILED
 };
@@ -131,6 +132,8 @@ struct ATSession
     // arrival tolerance override (0 = use global)
     float   arrivalOverride = 0.0f;
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
+    int8    controlOverride = -1;     // -1 = Konfiguration, 0 = aus, 1 = an
+    bool    playerPaused    = false;  // Spieler hat Vorrang angefordert
 
     uint32  underwaterTimer = 0;
     bool    swimming        = false;
@@ -188,6 +191,7 @@ public:
     void Repath(Player* player);
     void PrintStatus(Player* player);
     void SetOption(Player* player, std::string const& key, std::string const& value);
+    void SetPlayerPause(Player* player, bool on);
     void SetDebug(Player* player, bool on);
 
     bool IsActive(Player* player) const;

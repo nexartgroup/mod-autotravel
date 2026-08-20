@@ -138,6 +138,13 @@ public:
             return true;
         }
 
+        if (cmd == "pause")
+        {
+            bool on = (a.size() > 1) ? (atoi(a[1].c_str()) != 0) : true;
+            sAutoTravel->SetPlayerPause(player, on);
+            return true;
+        }
+
         if (cmd == "nodes")
         {
             sAutoTravel->NodeInfo(player);
