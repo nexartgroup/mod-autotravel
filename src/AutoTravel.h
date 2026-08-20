@@ -84,7 +84,9 @@ struct ATConfig
     float stuckMinDistance  = 3.0f;
     uint32 maxRepathAttempts = 8;
     bool  resumeAfterDeath  = false;
-    bool  takeClientControl = true;
+    bool  takeClientControl = false;   // Standard: der Spieler behaelt die Steuerung
+    bool  steerDetect       = true;    // eigene Steuereingaben erkennen
+    uint32 steerPauseMs     = 8000;    // danach uebernimmt die Reise wieder
     uint32 chunkPoints      = 12;
     bool  swim              = true;
     float swimSurfaceOffset = 1.2f;    // wie tief unter der Oberflaeche
@@ -133,7 +135,13 @@ struct ATSession
     float   arrivalOverride = 0.0f;
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
     int8    controlOverride = -1;     // -1 = Konfiguration, 0 = aus, 1 = an
-    bool    playerPaused    = false;  // Spieler hat Vorrang angefordert
+    bool    playerPaused    = false;  // ausdruecklich angefordert (.at pause 1)
+    bool    inputPaused     = false;  // wegen eigener Steuerungseingaben
+    uint32  inputIdleMs     = 0;      // wie lange keine Eingabe mehr kam
+    uint32  inputWaitMs     = 0;      // 0 = Konfigurationswert
+    bool    pausedBySteer   = false;  // ausgeloest durch eigene Steuereingabe
+    uint32  steerIdle       = 0;      // wie lange schon keine Eingabe mehr
+    uint32  launchGuard     = 0;      // kurz nach dem Start keine Erkennung
 
     uint32  underwaterTimer = 0;
     bool    swimming        = false;
@@ -191,7 +199,7 @@ public:
     void Repath(Player* player);
     void PrintStatus(Player* player);
     void SetOption(Player* player, std::string const& key, std::string const& value);
-    void SetPlayerPause(Player* player, bool on);
+    void SetPlayerPause(Player* player, bool on, bool bySteer = false);
     void SetDebug(Player* player, bool on);
 
     bool IsActive(Player* player) const;
