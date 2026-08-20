@@ -172,6 +172,40 @@ AutoTravel.NodeSearchRadius = 800
 #        Default: 300
 AutoTravel.NodeMinDistance = 300
 
+#    AutoTravel.RouteProfile
+#        Standardprofil der Routenwahl. Der Spieler kann es ueberschreiben.
+#            0 = Korridor  Netz bevorzugen, Abkuerzung ab 1,6-facher Luftlinie
+#            1 = Kurz      moeglichst kurz, Netz fast egal
+#            2 = Schnell   Flug und Portal bevorzugt
+#            3 = Sicher    Netz stark bevorzugt, Wasser meiden
+#            4 = Zu Fuss   keine Sonderverbindungen
+#        Default: 0
+AutoTravel.RouteProfile = 0
+
+#    AutoTravel.StuckEdgePenalty
+#        Aufschlag auf eine Graphkante, auf der es haengengeblieben ist. Wird
+#        NICHT in die Datenbank geschrieben.
+#        Default: 300
+AutoTravel.StuckEdgePenalty = 300
+
+#    AutoTravel.PenaltyDecaySeconds
+#        Halbwertszeit dieses Aufschlags. Nach dieser Zeit ist er halbiert,
+#        nach dem Vierfachen ganz weg.
+#        Default: 900
+AutoTravel.PenaltyDecaySeconds = 900
+
+#    AutoTravel.RouteCacheSeconds
+#        Haltbarkeit zwischengespeicherter Routen.
+#        Default: 120
+AutoTravel.RouteCacheSeconds = 120
+
+#    AutoTravel.SimplifyTolerance
+#        Douglas-Peucker: Punkte, die weniger als so viele Yards von der
+#        Verbindungslinie ihrer Nachbarn abweichen, werden entfernt. Weniger
+#        Knicke im Spline, weniger Mikrokorrekturen. 0 = aus.
+#        Default: 1.5
+AutoTravel.SimplifyTolerance = 1.5
+
 #    AutoTravel.HeuristicWeight
 #        Gewicht der Restentfernungs-Schaetzung bei der Routensuche (A*).
 #            1.0 = kuerzester Weg garantiert (Standard)

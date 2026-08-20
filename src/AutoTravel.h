@@ -50,12 +50,43 @@ struct ATNode
     std::string name;
 };
 
+// Rohdaten der Kante. Die Kosten entstehen erst bei der Suche, weil sie vom
+// gewaehlten Routenprofil und von Laufzeitaufschlaegen abhaengen.
 struct ATNodeLink
 {
     uint32 to = 0;
     uint8  type = 0;
-    float  cost = 0.0f;
+    float  distance = 0.0f;
+    float  extra = 0.0f;
+    float  swim = 0.0f;
 };
+
+// Routenprofil: bestimmt, wie stark Korridore bevorzugt und Sonderwege
+// bestraft werden. Kein "ROADS", weil es in 3.3.5a keine Strassendaten gibt --
+// bevorzugt wird der Korridor des Reisegraphen.
+enum ATRouteProfile : uint8
+{
+    AT_PROFILE_KORRIDOR = 0,   // Standard: Korridor bevorzugen, Abkuerzung erlaubt
+    AT_PROFILE_KURZ     = 1,   // moeglichst kurz, Korridor egal
+    AT_PROFILE_SCHNELL  = 2,   // Flug und Portal bevorzugt
+    AT_PROFILE_SICHER   = 3,   // Korridor stark bevorzugt, Wasser meiden
+    AT_PROFILE_ZU_FUSS  = 4,   // keine Sonderverbindungen
+};
+
+char const* ATProfileName(ATRouteProfile p);
+bool ParseProfile(std::string const& in, uint32& out);
+
+struct ATProfileWeights
+{
+    float walk;        // Faktor auf Laufkanten
+    float special;     // Faktor auf Flug/Portal/Transport
+    float specialAdd;  // fester Aufschlag je Sonderverbindung
+    float swim;        // Faktor auf Schwimmanteile
+    float offroad;     // ab welchem Vielfachen der Luftlinie der Korridor
+                       // zugunsten des Direktwegs aufgegeben wird
+};
+
+ATProfileWeights const& ATWeights(ATRouteProfile p);
 
 // Ein Stuetzpunkt der Carbonite-Route. Zwischen zwei Stuetzpunkten sucht das
 // NavMesh den tatsaechlichen Weg -- Carbonite gibt nur die grobe Abfolge vor
@@ -70,6 +101,7 @@ struct ATLeg
     bool   resolved = false;
     std::string name;
 
+    uint32 nodeId   = 0;       // Knoten im Reisegraphen, 0 = kein Knoten
     uint8  linkType = 0;       // Art der Verbindung zum NAECHSTEN Punkt
     std::string nextName;      // Name des naechsten Punktes
 };
@@ -84,6 +116,11 @@ struct ATConfig
     float legDistance       = 15.0f;   // Radius fuer Zwischenstuetzpunkte
     uint32 finalApproachTries = 2;     // Anlaeufe auf den exakten Zielpunkt
     float heuristicWeight   = 1.0f;    // A*: 1.0 = kuerzester Weg garantiert
+    uint32 routeProfile     = 0;       // Standardprofil
+    uint32 routeCacheSec    = 120;     // Haltbarkeit zwischengespeicherter Routen
+    float stuckPenalty      = 300.0f;  // Aufschlag je Stuck auf einer Kante
+    float penaltyDecaySec   = 900.0f;  // Halbwertszeit dieses Aufschlags
+    float simplifyTolerance = 1.5f;    // Douglas-Peucker, Yards
     bool  autoMount         = true;
     float mountMinDistance  = 150.0f;
     bool  pauseInCombat     = true;
@@ -155,6 +192,9 @@ struct ATSession
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
     int8    controlOverride = -1;     // -1 = Konfiguration, 0 = aus, 1 = an
     ATControlOwner owner    = AT_OWNER_TRAVEL;
+    ATRouteProfile profile  = AT_PROFILE_KORRIDOR;
+    uint32  lastNodeA       = 0;      // zuletzt benutzte Kante, fuer Stuck-Aufschlag
+    uint32  lastNodeB       = 0;
     bool    playerPaused    = false;  // ausdruecklich angefordert (.at pause 1)
 
     uint32  underwaterTimer = 0;
@@ -188,6 +228,11 @@ public:
     bool BuildNodeRoute(Player* player, float dx, float dy, float dz,
                         std::vector<ATLeg>& out, std::string& note) const;
     void NodeInfo(Player* player);
+
+    // Laufzeitaufschlag fuer eine Kante, auf der es haengengeblieben ist.
+    // Bewusst NICHT in die Datenbank: er verfaellt von selbst.
+    void PenalizeEdge(uint32 from, uint32 to);
+    void ClearPenalties();
     size_t NodeCount() const;
     void Update(uint32 diff);
 
@@ -267,6 +312,7 @@ private:
     std::unordered_map<ObjectGuid, ATSession> _sessions;
     std::unordered_map<ObjectGuid, uint32> _tpCooldown;   // Unix-Zeit
     std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
+    float _lastRouteCost = 0.0f;
     uint32 _tick = 0;
 };
 

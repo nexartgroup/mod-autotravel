@@ -27,6 +27,17 @@
 
 ATConfig ATConf;
 
+// Profilname aus dem Client entgegennehmen
+bool ParseProfile(std::string const& in, uint32& out)
+{
+    if (in == "korridor" || in == "0") { out = AT_PROFILE_KORRIDOR; return true; }
+    if (in == "kurz"     || in == "1") { out = AT_PROFILE_KURZ;     return true; }
+    if (in == "schnell"  || in == "2") { out = AT_PROFILE_SCHNELL;  return true; }
+    if (in == "sicher"   || in == "3") { out = AT_PROFILE_SICHER;   return true; }
+    if (in == "zufuss"   || in == "4") { out = AT_PROFILE_ZU_FUSS;  return true; }
+    return false;
+}
+
 char const* ATOwnerName(ATControlOwner o)
 {
     return (o == AT_OWNER_PLAYER) ? "PLAYER" : "TRAVEL";
@@ -94,6 +105,12 @@ void AutoTravelMgr::LoadConfig()
     ATConf.legDistance       = sConfigMgr->GetOption<float> ("AutoTravel.LegDistance", 15.0f);
     ATConf.finalApproachTries = sConfigMgr->GetOption<uint32>("AutoTravel.FinalApproachTries", 2);
     ATConf.heuristicWeight   = sConfigMgr->GetOption<float> ("AutoTravel.HeuristicWeight", 1.0f);
+    ATConf.routeProfile      = sConfigMgr->GetOption<uint32>("AutoTravel.RouteProfile", 0);
+    ATConf.routeCacheSec     = sConfigMgr->GetOption<uint32>("AutoTravel.RouteCacheSeconds", 120);
+    ATConf.stuckPenalty      = sConfigMgr->GetOption<float> ("AutoTravel.StuckEdgePenalty", 300.0f);
+    ATConf.penaltyDecaySec   = sConfigMgr->GetOption<float> ("AutoTravel.PenaltyDecaySeconds", 900.0f);
+    ATConf.simplifyTolerance = sConfigMgr->GetOption<float> ("AutoTravel.SimplifyTolerance", 1.5f);
+    if (ATConf.routeProfile > 4) ATConf.routeProfile = 0;
     if (ATConf.heuristicWeight < 1.0f) ATConf.heuristicWeight = 1.0f;
     if (ATConf.heuristicWeight > 3.0f) ATConf.heuristicWeight = 3.0f;
     ATConf.autoMount         = sConfigMgr->GetOption<bool>  ("AutoTravel.AutoMount", true);
@@ -902,11 +919,15 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
     int8 keepControl = s.controlOverride;
+    ATRouteProfile keepProfile = s.profile;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
     s.controlOverride = keepControl;
+    s.profile         = keepProfile;
+    if (s.profile > AT_PROFILE_ZU_FUSS)
+        s.profile = ATRouteProfile(ATConf.routeProfile);
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
     s.route    = it->second;
@@ -951,6 +972,10 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.destZ = leg.wz;
         s.approachOff = 0.0f;
         s.finalTries = 0;
+
+        // Kante merken, damit ein Stuck der richtigen Verbindung angelastet wird
+        s.lastNodeA = (s.legIdx > 0) ? s.route[s.legIdx - 1].nodeId : 0;
+        s.lastNodeB = leg.nodeId;
         return true;
     }
     return false;
@@ -975,8 +1000,8 @@ void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
         last.resolved = true;
     }
 
-    float d = player->GetExactDist2d(last.wx, last.wy);
-    if (d < ATConf.nodeMinDistance)
+    float direct = player->GetExactDist2d(last.wx, last.wy);
+    if (direct < ATConf.nodeMinDistance)
         return;                       // kurze Strecke: direkt pathen
 
     std::vector<ATLeg> nodeLegs;
@@ -985,6 +1010,27 @@ void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
     {
         Dbg(player, s, "Knotenroute nicht nutzbar (" + note + ") - benutze Carbonite-Stuetzpunkte.");
         return;
+    }
+
+    // Kernentscheidung aus Abschnitt 5 der Spezifikation: der Korridor ist
+    // eine Empfehlung, keine Pflicht. Kostet er unverhaeltnismaessig viel mehr
+    // als die Luftlinie, wird querfeldein gelaufen.
+    //
+    //     Korridorkosten > Luftlinie * offroad   ->  Direktweg
+    //
+    // Bei Profil "Korridor" liegt offroad bei 1.6: bis zum 1,6-fachen bleibt
+    // die Route im Netz, darueber wird abgekuerzt. "Kurz" setzt 1.05 und geht
+    // damit fast immer direkt, "Sicher" 2.4 und bleibt fast immer im Netz.
+    ATProfileWeights const& pw = ATWeights(s.profile);
+    if (direct > 1.0f && _lastRouteCost > direct * pw.offroad)
+    {
+        char cb[224];
+        std::snprintf(cb, sizeof(cb),
+                      "Korridor kostet %.0f bei %.0f yd Luftlinie (Grenze %.0f) - "
+                      "Abkuerzung querfeldein.",
+                      _lastRouteCost, direct, direct * pw.offroad);
+        Dbg(player, s, cb);
+        return;                       // Direktweg: NavMesh macht den Rest
     }
 
     nodeLegs.push_back(last);
@@ -1100,11 +1146,15 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
     int8 keepControl = s.controlOverride;
+    ATRouteProfile keepProfile = s.profile;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
     s.controlOverride = keepControl;
+    s.profile         = keepProfile;
+    if (s.profile > AT_PROFILE_ZU_FUSS)
+        s.profile = ATRouteProfile(ATConf.routeProfile);
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
 
@@ -1250,6 +1300,17 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         s.arrivalOverride = v;
         Msg(player, "Arrival Distance = " + value);
     }
+    else if (key == "profil" || key == "profile")
+    {
+        uint32 v = 0;
+        if (!ParseProfile(value, v))
+        {
+            Msg(player, "Profil: korridor | kurz | schnell | sicher | zufuss");
+            return;
+        }
+        s.profile = ATRouteProfile(v);
+        Msg(player, std::string("Routenprofil: ") + ATProfileName(s.profile));
+    }
     else if (key == "control")
     {
         int v = atoi(value.c_str());
@@ -1278,6 +1339,70 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
     if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0
         && s.controlOverride < 0 && !s.debug)
         _sessions.erase(player->GetGUID());
+}
+
+// ---------------------------------------------------------------------------
+// Pfadvereinfachung (Douglas-Peucker)
+// ---------------------------------------------------------------------------
+// Der NavMesh-Pfad enthaelt viele Punkte, die auf einer Geraden liegen. Jeder
+// davon ist ein Knick im Spline und damit eine Mikrokorrektur in der
+// Bewegung. Entfernt werden nur Punkte, die weniger als die Toleranz von der
+// Verbindungslinie ihrer Nachbarn abweichen -- die Linienfuehrung aendert sich
+// also um hoechstens diesen Betrag und bleibt damit im begehbaren Korridor.
+
+namespace
+{
+    float PerpDist(G3D::Vector3 const& p, G3D::Vector3 const& a, G3D::Vector3 const& b)
+    {
+        float dx = b.x - a.x, dy = b.y - a.y;
+        float len2 = dx * dx + dy * dy;
+        if (len2 < 0.0001f)
+            return std::sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y));
+        float t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+        t = std::max(0.0f, std::min(1.0f, t));
+        float px = a.x + t * dx, py = a.y + t * dy;
+        return std::sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py));
+    }
+
+    void Simplify(Movement::PointsArray const& in, size_t first, size_t last,
+                  float tol, std::vector<bool>& keep)
+    {
+        if (last <= first + 1)
+            return;
+
+        float worst = 0.0f;
+        size_t idx = first;
+        for (size_t i = first + 1; i < last; ++i)
+        {
+            float d = PerpDist(in[i], in[first], in[last]);
+            if (d > worst) { worst = d; idx = i; }
+        }
+
+        if (worst <= tol)
+            return;                       // alles dazwischen ist entbehrlich
+
+        keep[idx] = true;
+        Simplify(in, first, idx, tol, keep);
+        Simplify(in, idx, last, tol, keep);
+    }
+
+    Movement::PointsArray SimplifyPath(Movement::PointsArray const& in, float tol)
+    {
+        if (in.size() < 3 || tol <= 0.0f)
+            return in;
+
+        std::vector<bool> keep(in.size(), false);
+        keep.front() = true;
+        keep.back()  = true;
+        Simplify(in, 0, in.size() - 1, tol, keep);
+
+        Movement::PointsArray out;
+        out.reserve(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+            if (keep[i])
+                out.push_back(in[i]);
+        return out;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,7 +1655,16 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 }
                 s.destZ = zc[i];
                 s.lastPathType = type;
-                s.path = pts;
+
+                size_t rawCount = pts.size();
+                s.path = SimplifyPath(pts, ATConf.simplifyTolerance);
+                if (s.path.size() < rawCount)
+                {
+                    char sb[160];
+                    std::snprintf(sb, sizeof(sb), "Pfad geglaettet: %u -> %u Punkte",
+                                  uint32(rawCount), uint32(s.path.size()));
+                    Dbg(player, s, sb);
+                }
                 s.idx = 1;
                 s.pathIncomplete = incomplete;
 
@@ -2188,6 +2322,13 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                     if (moved < ATConf.stuckMinDistance)
                     {
+                        // Die Kante, auf der es klemmt, wird fuer eine Weile
+                        // teurer. Nicht dauerhaft und nicht in der Datenbank:
+                        // ein einmaliger Ausrutscher soll die Karte nicht
+                        // verderben, deshalb klingt der Aufschlag ab.
+                        if (s.lastNodeA && s.lastNodeB)
+                            PenalizeEdge(s.lastNodeA, s.lastNodeB);
+
                         ++s.repathAttempts;
                         char buf[160];
                         std::snprintf(buf, sizeof(buf),
