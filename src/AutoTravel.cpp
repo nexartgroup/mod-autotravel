@@ -27,6 +27,11 @@
 
 ATConfig ATConf;
 
+char const* ATOwnerName(ATControlOwner o)
+{
+    return (o == AT_OWNER_PLAYER) ? "PLAYER" : "TRAVEL";
+}
+
 char const* LinkTypeNameFor(uint8 t)
 {
     switch (t)
@@ -113,6 +118,8 @@ void AutoTravelMgr::LoadConfig()
     ATConf.useSpecialLinks   = sConfigMgr->GetOption<bool>  ("AutoTravel.UseSpecialLinks", true);
     ATConf.specialLinkCost   = sConfigMgr->GetOption<float> ("AutoTravel.SpecialLinkCost", 400.0f);
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
+    ATConf.teleportSecurity  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportSecurity", 2);
+    if (ATConf.teleportSecurity > 3) ATConf.teleportSecurity = 3;
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
     ATConf.debug             = sConfigMgr->GetOption<bool>  ("AutoTravel.Debug", false);
@@ -152,17 +159,19 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession const& s)
         return;
 
     float dist = std::sqrt(
-        (player->GetPositionX() - s.destX) * (player->GetPositionX() - s.destX) +
-        (player->GetPositionY() - s.destY) * (player->GetPositionY() - s.destY));
+        (player->GetPositionX() - s.reqX) * (player->GetPositionX() - s.reqX) +
+        (player->GetPositionY() - s.reqY) * (player->GetPositionY() - s.reqY));
 
     char buf[512];
-    std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u",
+    std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u|%s|%.0f",
                   ATStateName(s.state),
                   dist,
                   s.destName.empty() ? "-" : s.destName.c_str(),
                   player->IsMounted() ? 1u : 0u,
                   uint32(s.path.size()),
-                  s.repathAttempts);
+                  s.repathAttempts,
+                  ATOwnerName(s.owner),
+                  s.approachOff);
 
     ChatHandler(player->GetSession()).SendSysMessage(buf);
 }
@@ -930,9 +939,13 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
             leg.resolved = true;
         }
 
-        s.destX = leg.wx;
+        s.reqX  = leg.wx;      // was erreicht werden soll
+        s.reqY  = leg.wy;
+        s.reqZ  = leg.wz;
+        s.destX = leg.wx;      // was angelaufen wird (kann noch wandern)
         s.destY = leg.wy;
         s.destZ = leg.wz;
+        s.approachOff = 0.0f;
         return true;
     }
     return false;
@@ -1148,6 +1161,7 @@ void AutoTravelMgr::SetPlayerPause(Player* player, bool on)
         s.path.clear();
         s.idx = 0;
         s.state = AT_PLAYER_PAUSED;
+        s.owner = AT_OWNER_PLAYER;
         Msg(player, "Spielervorrang - Reise angehalten, Steuerung liegt bei dir.");
     }
     else
@@ -1162,6 +1176,7 @@ void AutoTravelMgr::SetPlayerPause(Player* player, bool on)
         s.lastY = player->GetPositionY();
         s.lastZ = player->GetPositionZ();
         s.state = AT_CALCULATE_PATH;
+        s.owner = AT_OWNER_TRAVEL;
         Msg(player, "Spielervorrang beendet - neuer Weg von der aktuellen Position.");
     }
     PushStatus(player, s);
@@ -1452,6 +1467,13 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z, bool stra
 
 bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 {
+    // Jeder neue Anlauf beginnt wieder beim angeforderten Ziel. Sonst wandert
+    // der Annaeherungspunkt ueber mehrere Versuche immer weiter weg.
+    s.destX = s.reqX;
+    s.destY = s.reqY;
+    s.destZ = s.reqZ;
+    s.approachOff = 0.0f;
+
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
     float pz = player->GetPositionZ();
@@ -1538,9 +1560,12 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                               "Ziel um %.0f yd versetzt (urspruengliche Stelle nicht begehbar).",
                               RINGS[r]);
                 Dbg(player, s, b);
+                // Nur der Annaeherungspunkt wandert - das angeforderte Ziel
+                // bleibt stehen und entscheidet weiterhin ueber die Ankunft.
                 s.destX = x;
                 s.destY = y;
                 s.destZ = z;
+                s.approachOff = RINGS[r];
                 s.path = pts;
                 s.idx = 1;
                 s.pathIncomplete = incomplete;
@@ -1884,7 +1909,10 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     bool lastLeg = (s.legIdx + 1 >= s.route.size());
     float radius = lastLeg ? ArrivalDist(s) : ATConf.legDistance;
 
-    float dist = player->GetExactDist2d(s.destX, s.destY);
+    // Gemessen wird gegen das angeforderte Ziel, nicht gegen den
+    // Annaeherungspunkt. Sonst meldet AutoTravel "angekommen", obwohl es in
+    // Wahrheit an einer Ersatzstelle steht.
+    float dist = player->GetExactDist2d(s.reqX, s.reqY);
     if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
     {
         HaltMovement(player, s);

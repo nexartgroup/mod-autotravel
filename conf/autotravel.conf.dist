@@ -190,6 +190,14 @@ AutoTravel.SpecialLinkCost = 400
 #        Default: 1
 AutoTravel.AllowTeleport = 1
 
+#    AutoTravel.TeleportSecurity
+#        Ab welcher Kontostufe ".at tp" erlaubt ist.
+#            0 = jeder Spieler   1 = Moderator   2 = GM   3 = Administrator
+#        Der Teleport umgeht jede Wegfindung und nimmt beliebige Zielkoordinaten
+#        entgegen. Auf 0 kann sich damit jeder Spieler ueberallhin versetzen.
+#        Default: 2
+AutoTravel.TeleportSecurity = 2
+
 #    AutoTravel.TeleportMinDistance
 #        Unter dieser Entfernung wird der Teleport abgelehnt (0 = keine Grenze).
 #        Sinnvoll, damit kurze Strecken gelaufen statt gesprungen werden.

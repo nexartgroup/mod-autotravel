@@ -25,6 +25,14 @@ enum ATState : uint8
     AT_FAILED
 };
 
+enum ATControlOwner : uint8
+{
+    AT_OWNER_TRAVEL = 0,   // AutoTravel bewegt den Charakter
+    AT_OWNER_PLAYER = 1,   // der Mensch hat die Steuerung
+};
+
+char const* ATOwnerName(ATControlOwner o);
+
 enum ATLegFlags : uint8
 {
     AT_LEG_NORMAL  = 0,
@@ -100,6 +108,7 @@ struct ATConfig
     bool  useSpecialLinks   = true;
     float specialLinkCost   = 400.0f;
     bool  allowTeleport     = true;
+    uint32 teleportSecurity = 2;       // 0=Spieler 1=Moderator 2=GM 3=Admin
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;
     bool  debug             = false;
@@ -112,9 +121,18 @@ struct ATSession
     ATState state       = AT_IDLE;
 
     uint32  mapId       = 0;
-    float   destX       = 0.0f;    // aktuelles Etappenziel
+
+    // Angefordertes Ziel: bleibt unveraendert und entscheidet ueber ANKUNFT.
+    float   reqX        = 0.0f;
+    float   reqY        = 0.0f;
+    float   reqZ        = 0.0f;
+
+    // Punkt, den die Wegfindung tatsaechlich anlaeuft. Weicht ab, wenn die
+    // gewuenschte Stelle nicht begehbar ist. Darf NIE die Ankunft definieren.
+    float   destX       = 0.0f;
     float   destY       = 0.0f;
     float   destZ       = 0.0f;
+    float   approachOff = 0.0f;    // Abstand approach <-> requested
     std::string destName;
 
     std::vector<ATLeg> route;
@@ -133,6 +151,7 @@ struct ATSession
     float   arrivalOverride = 0.0f;
     uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
     int8    controlOverride = -1;     // -1 = Konfiguration, 0 = aus, 1 = an
+    ATControlOwner owner    = AT_OWNER_TRAVEL;
     bool    playerPaused    = false;  // ausdruecklich angefordert (.at pause 1)
 
     uint32  underwaterTimer = 0;
