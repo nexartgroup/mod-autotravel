@@ -604,113 +604,87 @@ std::vector<float> AutoTravelMgr::FindGroundPlanes(
         return planes;
 
     Map* map = player->GetMap();
+
+    if (!map)
+        return planes;
+
     uint32 phase = player->GetPhaseMask();
 
     /*
-     * Wir suchen mehrere Kollisions-/Bodenebenen am selben X/Y.
+     * Wir suchen nur in unmittelbarer Naehe der erwarteten
+     * Laufhoehe.
      *
-     * GetHeight() sucht von probeZ nach unten. Nachdem eine Ebene
-     * gefunden wurde, starten wir die nächste Suche knapp darunter.
-     *
-     * Beispiel:
-     *
-     *   Z = 8.0   <- Oberseite Torbogen
-     *   Z = 0.0   <- Boden
-     *
-     * Suche 1:
-     *   probeZ = 20
-     *   -> 8
-     *
-     * Suche 2:
-     *   probeZ = 7.9
-     *   -> 0
-     *
-     * Dadurch können mehrere Ebenen erkannt werden.
+     * Eine Flaeche 20, 30 oder 50 Yards unter dem Charakter
+     * ist fuer die Torbogen-Erkennung nicht interessant.
      */
-
-    constexpr float SEARCH_TOP_MARGIN = 20.0f;
-    constexpr float SEARCH_DISTANCE = 250.0f;
+    constexpr float SEARCH_ABOVE = 12.0f;
+    constexpr float SEARCH_BELOW = 6.0f;
 
     /*
-     * Mindestabstand zwischen zwei erkannten Ebenen.
-     *
-     * Dieser Wert verhindert, dass dieselbe Kollisionsfläche
-     * aufgrund kleiner numerischer Unterschiede mehrfach erscheint.
+     * Abstand, mit dem wir unterhalb einer gefundenen Flaeche
+     * erneut suchen.
      */
-    constexpr float MIN_PLANE_DISTANCE = 0.35f;
+    constexpr float PLANE_EPSILON = 0.35f;
 
     /*
-     * Maximale Anzahl Ebenen.
-     *
-     * Mehr als vier übereinanderliegende relevante Flächen sind
-     * für einen normalen Laufweg praktisch nicht sinnvoll.
+     * Erste Suche.
      */
-    constexpr uint32 MAX_PLANES = 4;
-
     float searchZ =
-        std::max(
-            probeZ,
-            player->GetPositionZ()) +
-        SEARCH_TOP_MARGIN;
+        probeZ + SEARCH_ABOVE;
 
-    for (uint32 i = 0; i < MAX_PLANES; ++i)
+    float first =
+        map->GetHeight(
+            phase,
+            x,
+            y,
+            searchZ,
+            true,
+            SEARCH_ABOVE + SEARCH_BELOW);
+
+    if (first <= INVALID_HEIGHT)
+        return planes;
+
+    /*
+     * Nur eine Flaeche akzeptieren, die tatsaechlich in unserem
+     * erwarteten Hoehenbereich liegt.
+     */
+    if (first < probeZ - SEARCH_BELOW ||
+        first > probeZ + SEARCH_ABOVE)
     {
-        float ground =
-            map->GetHeight(
-                phase,
-                x,
-                y,
-                searchZ,
-                true,
-                SEARCH_DISTANCE);
-
-        if (ground <= INVALID_HEIGHT)
-            break;
-
-        /*
-         * Prüfen, ob wir diese Ebene bereits kennen.
-         */
-        bool duplicate = false;
-
-        for (float existing : planes)
-        {
-            if (std::fabs(existing - ground) <
-                MIN_PLANE_DISTANCE)
-            {
-                duplicate = true;
-                break;
-            }
-        }
-
-        if (!duplicate)
-            planes.push_back(ground);
-
-        /*
-         * Die nächste Suche muss unterhalb der gerade gefundenen
-         * Ebene beginnen, sonst liefert GetHeight() wieder dieselbe
-         * Fläche.
-         */
-        searchZ =
-            ground -
-            MIN_PLANE_DISTANCE;
+        return planes;
     }
 
+    planes.push_back(first);
+
     /*
-     * Höchste Ebene zuerst.
+     * Zweite Ebene suchen.
      *
-     * Das ist die natürliche Reihenfolge von GetHeight():
-     * obere Fläche -> darunterliegende Fläche -> usw.
+     * Wichtig:
+     * Wir suchen nur noch innerhalb von SEARCH_BELOW unterhalb
+     * der ersten Ebene.
      */
-    std::sort(
-        planes.begin(),
-        planes.end(),
-        [](float a, float b)
-        {
-            return a > b;
-        });
+    float secondSearchZ =
+        first - PLANE_EPSILON;
+
+    float second =
+        map->GetHeight(
+            phase,
+            x,
+            y,
+            secondSearchZ,
+            true,
+            SEARCH_BELOW);
+
+    if (second > INVALID_HEIGHT &&
+        second < first - PLANE_EPSILON &&
+        second >= probeZ - SEARCH_BELOW)
+    {
+        planes.push_back(second);
+    }
 
     return planes;
 }
+
 float AutoTravelMgr::SelectGroundPlane(
     std::vector<float> const& planes,
     float referenceZ,
@@ -1671,9 +1645,7 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
                     player,
                     x,
                     y,
-                    std::max(
-                        current.z,
-                        target.z));
+                    current.z);
 
             float ground =
                 SelectGroundPlane(
@@ -1912,6 +1884,32 @@ bool AutoTravelMgr::TryPathBetween(
 
     typeOut = uint32(gen.GetPathType());
     out = gen.GetPath();
+        if (ATConf.debug)
+    {
+        char b[256];
+
+        std::snprintf(
+            b,
+            sizeof(b),
+            "PathGenerator: Start %.1f/%.1f/%.1f -> "
+            "Ziel %.1f/%.1f/%.1f | built=%u type=0x%X "
+            "(%s) Punkte=%u",
+            startX,
+            startY,
+            startZ,
+            destX,
+            destY,
+            destZ,
+            built ? 1u : 0u,
+            typeOut,
+            PathTypeName(typeOut).c_str(),
+            uint32(out.size()));
+
+        Dbg(
+            player,
+            _sessions.at(player->GetGUID()),
+            b);
+    }
 
     if (!built || out.size() < 2)
         return false;
@@ -1953,50 +1951,28 @@ bool AutoTravelMgr::TryPathBetween(
     {
         G3D::Vector3& p = out[i];
 
-                /*
-         * Auch bei der PathGenerator-Prüfung dürfen wir nicht blind
-         * die oberste VMap-Fläche verwenden.
+        /*
+         * WICHTIG:
          *
-         * Gerade bei Torbögen kann dort eine zweite Fläche über dem
-         * tatsächlich begehbaren Boden liegen.
+         * TryPathBetween() prueft den vom PathGenerator gelieferten
+         * NavMesh-Pfad.
+         *
+         * Hier KEINE Multi-Plane-Erkennung verwenden.
+         *
+         * Ein Torbogen kann mehrere VMap-Flaechen unter derselben
+         * X/Y-Position besitzen. Diese Information ist fuer die
+         * Terrain-Spline-Erzeugung in LaunchChunk() interessant,
+         * darf aber nicht den NavMesh-Pfad selbst umdeuten.
          */
-        std::vector<float> planes =
-            FindGroundPlanes(
-                player,
-                p.x,
-                p.y,
-                p.z);
-
-        float referenceZ =
-            (i == 0)
-                ? startZ
-                : out[i - 1].z;
-
-        float horizontalDistance =
-            0.0f;
-
-        if (i > 0)
-        {
-            float dx =
-                p.x -
-                out[i - 1].x;
-
-            float dy =
-                p.y -
-                out[i - 1].y;
-
-            horizontalDistance =
-                std::sqrt(
-                    dx * dx +
-                    dy * dy);
-        }
 
         float ground =
-            SelectGroundPlane(
-                planes,
-                referenceZ,
-                p.z,
-                horizontalDistance);
+            map->GetHeight(
+                phase,
+                p.x,
+                p.y,
+                p.z + 5.0f,
+                true,
+                200.0f);
 
         if (ground <= INVALID_HEIGHT)
         {
@@ -2010,24 +1986,10 @@ bool AutoTravelMgr::TryPathBetween(
         if (ground <= INVALID_HEIGHT)
             return false;
 
-        /*
-         * Der NavMesh-Punkt darf geringfuegig ueber der Oberflaeche liegen.
-         *
-         * Liegt er deutlich darunter, ist der Pfad fuer unsere Bewegung
-         * ungeeignet.
-         */
         if (p.z < ground - 5.0f)
             return false;
 
-        /*
-         * Ein NavMesh-Punkt darf etwas über der Oberfläche liegen,
-         * aber ein großer positiver Abstand ist verdächtig.
-         *
-         * Insbesondere verhindert dies, dass eine über dem Boden
-         * liegende Torbogenfläche als normaler Laufpunkt akzeptiert
-         * wird.
-         */
-        if (p.z > ground + 4.0f)
+        if (p.z > ground + 8.0f)
             return false;
     }
 
