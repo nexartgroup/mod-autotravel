@@ -138,6 +138,66 @@ AutoTravel.TakeClientControl = 1
 AutoTravel.ChunkPoints = 12
 
 ########################################
+# Natuerliche Navigation
+########################################
+#
+# Die normale AzerothCore-Navigation entscheidet, welche Wege
+# begehbar sind. Diese Optionen entscheiden, welchen begehbaren
+# Weg AutoTravel bevorzugt.
+#
+# Ziel:
+#   - kurze Wege bleiben bevorzugt
+#   - sanfte Steigungen sind billig
+#   - steile Hänge werden teuer
+#   - lange Berganstiege werden stark bestraft
+#   - ein Weg um den Berg kann dadurch einen etwas kuerzeren
+#     direkten Bergweg schlagen
+#
+# Default: 1
+AutoTravel.NaturalPathing = 1
+
+# Ab dieser Steigung beginnt die Strafe.
+# 0.15 = ca. 15% Steigung.
+AutoTravel.SlopeStart = 0.15
+
+# Ab hier wird die Steigung deutlich staerker bestraft.
+AutoTravel.SlopeStrong = 0.25
+
+# Sehr steile Hänge.
+AutoTravel.SlopeExtreme = 0.35
+
+AutoTravel.SlopePenalty = 5.0
+AutoTravel.SteepSlopePenalty = 10.0
+AutoTravel.ExtremeSlopePenalty = 30.0
+
+# Hoehengewinn wird ueber ein Fenster betrachtet.
+# Dadurch erkennt der Bot einen langen Berganstieg,
+# auch wenn einzelne PathGenerator-Segmente relativ flach sind.
+AutoTravel.ElevationWindow = 40.0
+
+AutoTravel.ElevationGainStart = 8.0
+AutoTravel.ElevationGainStrong = 15.0
+AutoTravel.ElevationGainExtreme = 25.0
+
+AutoTravel.ElevationPenalty = 5.0
+AutoTravel.StrongElevationPenalty = 20.0
+AutoTravel.ExtremeElevationPenalty = 60.0
+
+# Unnatuerlich starke Richtungswechsel werden ebenfalls
+# leicht bestraft.
+AutoTravel.TurnPenaltyStart = 35.0
+AutoTravel.TurnPenaltyStrong = 70.0
+AutoTravel.TurnPenaltyExtreme = 110.0
+
+AutoTravel.TurnPenalty = 2.0
+AutoTravel.StrongTurnPenalty = 5.0
+AutoTravel.ExtremeTurnPenalty = 12.0
+
+# Ein unvollstaendiger Pfad darf nur dann gewinnen,
+# wenn es keinen vernuenftigen vollstaendigen Pfad gibt.
+AutoTravel.IncompletePathPenalty = 10000.0
+
+########################################
 # Reiseknoten von mod-playerbots
 ########################################
 #

@@ -98,6 +98,27 @@ void AutoTravelMgr::LoadConfig()
     ATConf.resumeAfterDeath  = sConfigMgr->GetOption<bool>  ("AutoTravel.ResumeAfterDeath", false);
     ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", true);
     ATConf.chunkPoints       = sConfigMgr->GetOption<uint32>("AutoTravel.ChunkPoints", 12);
+    ATConf.naturalPathing    = sConfigMgr->GetOption<bool>("AutoTravel.NaturalPathing", true);
+    ATConf.slopeStart        = sConfigMgr->GetOption<float>("AutoTravel.SlopeStart", 0.15f);
+    ATConf.slopeStrong       = sConfigMgr->GetOption<float>("AutoTravel.SlopeStrong", 0.25f);
+    ATConf.slopeExtreme      = sConfigMgr->GetOption<float>("AutoTravel.SlopeExtreme", 0.35f);
+    ATConf.slopePenalty      = sConfigMgr->GetOption<float>("AutoTravel.SlopePenalty", 5.0f);
+    ATConf.steepSlopePenalty = sConfigMgr->GetOption<float>("AutoTravel.SteepSlopePenalty", 10.0f);
+    ATConf.extremeSlopePenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeSlopePenalty", 30.0f);
+    ATConf.elevationWindow = sConfigMgr->GetOption<float>("AutoTravel.ElevationWindow", 40.0f);
+    ATConf.elevationGainStart = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStart", 8.0f);
+    ATConf.elevationGainStrong = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStrong", 15.0f);
+    ATConf.elevationGainExtreme = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainExtreme", 25.0f);
+    ATConf.elevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ElevationPenalty", 5.0f);
+    ATConf.strongElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.StrongElevationPenalty", 20.0f);
+    ATConf.extremeElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeElevationPenalty", 60.0f);
+    ATConf.turnPenaltyStart = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyStart", 35.0f);
+    ATConf.turnPenaltyStrong = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyStrong", 70.0f);
+    ATConf.turnPenaltyExtreme = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyExtreme", 110.0f);
+    ATConf.turnPenalty = sConfigMgr->GetOption<float>("AutoTravel.TurnPenalty", 2.0f);
+    ATConf.strongTurnPenalty = sConfigMgr->GetOption<float>("AutoTravel.StrongTurnPenalty", 5.0f);
+    ATConf.extremeTurnPenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeTurnPenalty", 12.0f);
+    ATConf.incompletePathPenalty = sConfigMgr->GetOption<float>("AutoTravel.IncompletePathPenalty", 10000.0f);
     ATConf.swim              = sConfigMgr->GetOption<bool>  ("AutoTravel.Swim", true);
     ATConf.swimSurfaceOffset = sConfigMgr->GetOption<float> ("AutoTravel.SwimSurfaceOffset", 1.2f);
     ATConf.minSwimDepth      = sConfigMgr->GetOption<float> ("AutoTravel.MinSwimDepth", 2.0f);
@@ -1384,6 +1405,234 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z, bool stra
 //      (das Ziel liegt dann z. B. im Fels oder auf einem Dach)
 //
 // Der erste Treffer gewinnt und wird als neues Ziel uebernommen.
+float AutoTravelMgr::PathDistance(Movement::PointsArray const& path) const
+{
+    if (path.size() < 2)
+        return 0.0f;
+
+    float distance = 0.0f;
+
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        float dx = path[i].x - path[i - 1].x;
+        float dy = path[i].y - path[i - 1].y;
+
+        distance += std::sqrt(dx * dx + dy * dy);
+    }
+
+    return distance;
+}
+
+float AutoTravelMgr::ScoreNaturalPath(
+    Player* /*player*/,
+    Movement::PointsArray const& path,
+    bool incomplete) const
+{
+    if (path.size() < 2)
+        return 1.0e30f;
+
+    /*
+     * Base cost is always actual horizontal travel distance.
+     *
+     * This is important:
+     *
+     *     500 yd flat route
+     *
+     * must still normally beat:
+     *
+     *     1500 yd detour
+     *
+     * merely because the latter is flatter.
+     */
+    float score = PathDistance(path);
+
+    if (incomplete)
+        score += ATConf.incompletePathPenalty;
+
+    /*
+     * -------------------------------------------------------------
+     * SLOPE
+     * -------------------------------------------------------------
+     *
+     * A tiny incline is normal walking and receives essentially no
+     * penalty.
+     *
+     * Once the slope becomes significant, the cost increases.
+     */
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        float dx = path[i].x - path[i - 1].x;
+        float dy = path[i].y - path[i - 1].y;
+        float dz = std::fabs(path[i].z - path[i - 1].z);
+
+        float horizontal = std::sqrt(dx * dx + dy * dy);
+
+        if (horizontal < 0.01f)
+            continue;
+
+        float slope = dz / horizontal;
+
+        if (slope > ATConf.slopeStart)
+        {
+            float excess = slope - ATConf.slopeStart;
+
+            score += horizontal *
+                     excess *
+                     ATConf.slopePenalty;
+        }
+
+        if (slope > ATConf.slopeStrong)
+        {
+            float excess = slope - ATConf.slopeStrong;
+
+            score += horizontal *
+                     excess *
+                     ATConf.steepSlopePenalty;
+        }
+
+        if (slope > ATConf.slopeExtreme)
+        {
+            float excess = slope - ATConf.slopeExtreme;
+
+            score += horizontal *
+                     excess *
+                     ATConf.extremeSlopePenalty;
+        }
+    }
+
+    /*
+     * -------------------------------------------------------------
+     * SUSTAINED ELEVATION CHANGE
+     * -------------------------------------------------------------
+     *
+     * This is the important mountain detector.
+     *
+     * Looking only at individual path segments isn't sufficient.
+     * A mountain path can consist of many individually reasonable
+     * slopes.
+     *
+     * Instead, look at approximately N yards of path at a time and
+     * calculate how much vertical terrain the character has to
+     * traverse.
+     */
+    float windowDistance = std::max(5.0f, ATConf.elevationWindow);
+
+    for (size_t start = 0; start < path.size(); ++start)
+    {
+        float travelled = 0.0f;
+        size_t end = start + 1;
+
+        float minZ = path[start].z;
+        float maxZ = path[start].z;
+
+        while (end < path.size() && travelled < windowDistance)
+        {
+            float dx = path[end].x - path[end - 1].x;
+            float dy = path[end].y - path[end - 1].y;
+
+            travelled += std::sqrt(dx * dx + dy * dy);
+
+            minZ = std::min(minZ, path[end].z);
+            maxZ = std::max(maxZ, path[end].z);
+
+            ++end;
+        }
+
+        if (travelled < 5.0f)
+            continue;
+
+        float elevationGain = maxZ - minZ;
+
+        if (elevationGain > ATConf.elevationGainStart)
+        {
+            float excess =
+                elevationGain - ATConf.elevationGainStart;
+
+            score += travelled *
+                     excess *
+                     ATConf.elevationPenalty;
+        }
+
+        if (elevationGain > ATConf.elevationGainStrong)
+        {
+            float excess =
+                elevationGain - ATConf.elevationGainStrong;
+
+            score += travelled *
+                     excess *
+                     ATConf.strongElevationPenalty;
+        }
+
+        if (elevationGain > ATConf.elevationGainExtreme)
+        {
+            float excess =
+                elevationGain - ATConf.elevationGainExtreme;
+
+            score += travelled *
+                     excess *
+                     ATConf.extremeElevationPenalty;
+        }
+    }
+
+    /*
+     * -------------------------------------------------------------
+     * SHARP TURNS
+     * -------------------------------------------------------------
+     *
+     * Prefer a natural flowing route over an artificial route with
+     * lots of 90/180 degree corrections.
+     */
+    if (path.size() >= 3)
+    {
+        for (size_t i = 1; i + 1 < path.size(); ++i)
+        {
+            float ax = path[i].x - path[i - 1].x;
+            float ay = path[i].y - path[i - 1].y;
+
+            float bx = path[i + 1].x - path[i].x;
+            float by = path[i + 1].y - path[i].y;
+
+            float lenA = std::sqrt(ax * ax + ay * ay);
+            float lenB = std::sqrt(bx * bx + by * by);
+
+            if (lenA < 0.01f || lenB < 0.01f)
+                continue;
+
+            float dot = (ax * bx + ay * by) / (lenA * lenB);
+
+            dot = std::max(-1.0f, std::min(1.0f, dot));
+
+            float angle =
+                std::acos(dot) *
+                180.0f /
+                3.14159265358979323846f;
+
+            if (angle > ATConf.turnPenaltyStart)
+            {
+                score +=
+                    (angle - ATConf.turnPenaltyStart) *
+                    ATConf.turnPenalty;
+            }
+
+            if (angle > ATConf.turnPenaltyStrong)
+            {
+                score +=
+                    (angle - ATConf.turnPenaltyStrong) *
+                    ATConf.strongTurnPenalty;
+            }
+
+            if (angle > ATConf.turnPenaltyExtreme)
+            {
+                score +=
+                    (angle - ATConf.turnPenaltyExtreme) *
+                    ATConf.extremeTurnPenalty;
+            }
+        }
+    }
+
+    return score;
+}
+
 
 bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 {
@@ -1391,107 +1640,301 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     uint32 phase = player->GetPhaseMask();
     float pz = player->GetPositionZ();
 
-    // --- Hoehenkandidaten sammeln -----------------------------------------
     float zc[10];
     uint8 zn = 0;
+
     auto addZ = [&](float z)
     {
         if (z <= INVALID_HEIGHT || zn >= 10)
             return;
+
         for (uint8 i = 0; i < zn; ++i)
+        {
             if (std::fabs(zc[i] - z) < 1.5f)
                 return;
+        }
+
         zc[zn++] = z;
     };
 
-    // Nur echte Oberflaechen. Grosses Suchfenster, damit auch Gebaeudeboeden
-    // und Bruecken gefunden werden und nicht nur das Rohgelaende.
     addZ(s.destZ);
     addZ(BestGroundZ(player, s.destX, s.destY));
     addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f,   true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f,  true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f, true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f, true, 400.0f));
+    addZ(map->GetHeight(
+        phase, s.destX, s.destY,
+        pz + 5.0f, true, 400.0f));
 
-    uint32 type = 0;
-    bool incomplete = false;
-    Movement::PointsArray pts;
+    addZ(map->GetHeight(
+        phase, s.destX, s.destY,
+        pz + 40.0f, true, 400.0f));
 
-    // Zwei Pfadmodi:
-    //   geglaettet  - schoene Wege, aber FindSmoothPath scheitert oberhalb von
-    //                 MAX_POINT_PATH_LENGTH * SMOOTH_PATH_STEP_SIZE = 296 Yards
-    //   Eckpunkte   - findStraightPath liefert nur Wegecken statt 4-Yard-
-    //                 Schritten und schafft damit ein Vielfaches der Strecke
+    addZ(map->GetHeight(
+        phase, s.destX, s.destY,
+        pz + 120.0f, true, 400.0f));
+
+    addZ(map->GetHeight(
+        phase, s.destX, s.destY,
+        pz + 300.0f, true, 400.0f));
+
+    Movement::PointsArray bestPath;
+    uint32 bestType = PATHFIND_NOPATH;
+    bool bestIncomplete = false;
+    float bestScore = 1.0e30f;
+    float bestZ = s.destZ;
+
+    uint32 lastType = PATHFIND_NOPATH;
+
+    /*
+     * Evaluate every height candidate and both path representations.
+     *
+     * We deliberately DON'T return after the first valid path.
+     */
     for (uint8 pass = 0; pass < 2; ++pass)
     {
         bool straight = (pass == 1);
+
         for (uint8 i = 0; i < zn; ++i)
         {
-            if (TryPath(player, s.destX, s.destY, zc[i], straight, pts, type, incomplete))
-            {
-                if (std::fabs(zc[i] - s.destZ) > 1.5f)
-                {
-                    char b[160];
-                    std::snprintf(b, sizeof(b), "Zielhoehe korrigiert: %.2f -> %.2f", s.destZ, zc[i]);
-                    Dbg(player, s, b);
-                }
-                s.destZ = zc[i];
-                s.lastPathType = type;
-                s.path = pts;
-                s.idx = 1;
-                s.pathIncomplete = incomplete;
+            Movement::PointsArray candidate;
+            uint32 type = PATHFIND_NOPATH;
+            bool incomplete = false;
 
-                char b[192];
-                std::snprintf(b, sizeof(b), "Pfad ok (%s): type=0x%X (%s) points=%u",
-                              straight ? "Eckpunkte" : "geglaettet",
-                              type, PathTypeName(type).c_str(), uint32(pts.size()));
-                Dbg(player, s, b);
-                return true;
+            if (!TryPath(
+                    player,
+                    s.destX,
+                    s.destY,
+                    zc[i],
+                    straight,
+                    candidate,
+                    type,
+                    incomplete))
+            {
+                continue;
+            }
+
+            lastType = type;
+
+            float score;
+
+            if (ATConf.naturalPathing)
+            {
+                score = ScoreNaturalPath(
+                    player,
+                    candidate,
+                    incomplete);
+            }
+            else
+            {
+                score = PathDistance(candidate);
+
+                if (incomplete)
+                    score += ATConf.incompletePathPenalty;
+            }
+
+            /*
+             * Smooth paths are preferred when everything else is
+             * roughly equal.
+             */
+            if (!straight)
+                score -= 0.01f;
+
+            char debug[256];
+
+            std::snprintf(
+                debug,
+                sizeof(debug),
+                "Kandidat: %s Z=%.2f distance=%.1f score=%.1f "
+                "incomplete=%u points=%u",
+                straight ? "Eckpunkte" : "geglaettet",
+                zc[i],
+                PathDistance(candidate),
+                score,
+                incomplete ? 1u : 0u,
+                uint32(candidate.size()));
+
+            Dbg(player, s, debug);
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestPath = candidate;
+                bestType = type;
+                bestIncomplete = incomplete;
+                bestZ = zc[i];
             }
         }
     }
 
-    // --- Ring in der Umgebung ---------------------------------------------
-    static float const RINGS[2] = { 12.0f, 30.0f };
-    for (uint8 r = 0; r < 2; ++r)
+    /*
+     * -------------------------------------------------------------
+     * If no direct candidate worked, try nearby destinations.
+     * -------------------------------------------------------------
+     *
+     * This remains a fallback. We don't want the bot to move the
+     * destination just because another route has a better score.
+     */
+    if (bestPath.empty())
     {
-        for (uint8 a = 0; a < 8; ++a)
+        static float const RINGS[2] =
         {
-            float ang = float(a) * (6.28318531f / 8.0f);
-            float x = s.destX + std::cos(ang) * RINGS[r];
-            float y = s.destY + std::sin(ang) * RINGS[r];
-            float z = map->GetHeight(phase, x, y, MAX_HEIGHT);
-            if (z <= INVALID_HEIGHT)
-                continue;                 // dort gibt es keinen Boden
+            12.0f,
+            30.0f
+        };
 
-            if (TryPath(player, x, y, z, false, pts, type, incomplete) ||
-                TryPath(player, x, y, z, true,  pts, type, incomplete))
+        for (uint8 r = 0; r < 2; ++r)
+        {
+            for (uint8 a = 0; a < 8; ++a)
             {
-                char b[192];
-                std::snprintf(b, sizeof(b),
-                              "Ziel um %.0f yd versetzt (urspruengliche Stelle nicht begehbar).",
-                              RINGS[r]);
-                Dbg(player, s, b);
-                s.destX = x;
-                s.destY = y;
-                s.destZ = z;
-                s.path = pts;
-                s.idx = 1;
-                s.pathIncomplete = incomplete;
-                return true;
+                float ang =
+                    float(a) *
+                    (6.28318531f / 8.0f);
+
+                float x =
+                    s.destX +
+                    std::cos(ang) * RINGS[r];
+
+                float y =
+                    s.destY +
+                    std::sin(ang) * RINGS[r];
+
+                float z =
+                    map->GetHeight(
+                        phase,
+                        x,
+                        y,
+                        MAX_HEIGHT);
+
+                if (z <= INVALID_HEIGHT)
+                    continue;
+
+                for (uint8 pass = 0; pass < 2; ++pass)
+                {
+                    bool straight = (pass == 1);
+
+                    Movement::PointsArray candidate;
+                    uint32 type = PATHFIND_NOPATH;
+                    bool incomplete = false;
+
+                    if (!TryPath(
+                            player,
+                            x,
+                            y,
+                            z,
+                            straight,
+                            candidate,
+                            type,
+                            incomplete))
+                    {
+                        continue;
+                    }
+
+                    float score =
+                        ATConf.naturalPathing
+                            ? ScoreNaturalPath(
+                                  player,
+                                  candidate,
+                                  incomplete)
+                            : PathDistance(candidate);
+
+                    /*
+                     * Moving the actual destination is inherently
+                     * undesirable, so give these fallback paths a
+                     * substantial additional cost.
+                     */
+                    score += RINGS[r] * 100.0f;
+
+                    if (incomplete)
+                        score += ATConf.incompletePathPenalty;
+
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        bestPath = candidate;
+                        bestType = type;
+                        bestIncomplete = incomplete;
+                        bestZ = z;
+
+                        s.destX = x;
+                        s.destY = y;
+                        bestZ = z;
+
+                        char b[192];
+
+                        std::snprintf(
+                            b,
+                            sizeof(b),
+                            "Ziel um %.0f yd versetzt; "
+                            "natuerlicher Pfad score=%.1f.",
+                            RINGS[r],
+                            score);
+
+                        Dbg(player, s, b);
+                    }
+                }
             }
         }
     }
 
-    s.lastPathType = type;
+    if (!bestPath.empty())
+    {
+        if (std::fabs(bestZ - s.destZ) > 1.5f)
+        {
+            char b[160];
 
-    char buf[224];
-    std::snprintf(buf, sizeof(buf),
-                  "Kein Pfad. Letzter Typ 0x%X (%s), %u Hoehen und 16 Nachbarpunkte geprueft. "
-                  "Ziel %.1f / %.1f / %.1f",
-                  type, PathTypeName(type).c_str(), zn, s.destX, s.destY, s.destZ);
+            std::snprintf(
+                b,
+                sizeof(b),
+                "Zielhoehe korrigiert: %.2f -> %.2f",
+                s.destZ,
+                bestZ);
+
+            Dbg(player, s, b);
+        }
+
+        s.destZ = bestZ;
+        s.lastPathType = bestType;
+        s.path = bestPath;
+        s.idx = 1;
+        s.pathIncomplete = bestIncomplete;
+
+        char b[256];
+
+        std::snprintf(
+            b,
+            sizeof(b),
+            "Bester Pfad: score=%.1f distance=%.1f "
+            "type=0x%X (%s) points=%u incomplete=%u",
+            bestScore,
+            PathDistance(bestPath),
+            bestType,
+            PathTypeName(bestType).c_str(),
+            uint32(bestPath.size()),
+            bestIncomplete ? 1u : 0u);
+
+        Dbg(player, s, b);
+
+        return true;
+    }
+
+    s.lastPathType = lastType;
+
+    char buf[256];
+
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "Kein Pfad. Letzter Typ 0x%X (%s), "
+        "%u Hoehen und 16 Nachbarpunkte geprueft. "
+        "Ziel %.1f / %.1f / %.1f",
+        lastType,
+        PathTypeName(lastType).c_str(),
+        zn,
+        s.destX,
+        s.destY,
+        s.destZ);
+
     Dbg(player, s, buf);
+
     return false;
 }
 

@@ -72,7 +72,7 @@ struct ATConfig
 {
     bool  enable            = true;
     float arrivalDistance   = 8.0f;
-    float legDistance       = 15.0f;   // Radius fuer Zwischenstuetzpunkte
+    float legDistance       = 15.0f;
     bool  autoMount         = true;
     float mountMinDistance  = 150.0f;
     bool  pauseInCombat     = true;
@@ -86,12 +86,12 @@ struct ATConfig
     bool  takeClientControl = true;
     uint32 chunkPoints      = 12;
     bool  swim              = true;
-    float swimSurfaceOffset = 1.2f;    // wie tief unter der Oberflaeche
-    float minSwimDepth      = 2.0f;    // darunter ist es eine Pfuetze
-    uint32 maxUnderwaterMs  = 45000;   // Notbremse, falls doch getaucht wird
+    float swimSurfaceOffset = 1.2f;
+    float minSwimDepth      = 2.0f;
+    uint32 maxUnderwaterMs  = 45000;
     bool  rescueUnderMesh   = true;
-    float underMeshDepth    = 2.5f;    // ab so viel unter dem Boden gilt es als durchgefallen
-    float aboveMeshHeight   = 6.0f;    // ab so viel darueber gilt er als haengend/fallend
+    float underMeshDepth    = 2.5f;
+    float aboveMeshHeight   = 6.0f;
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
@@ -101,6 +101,40 @@ struct ATConfig
     bool  allowTeleport     = true;
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;
+
+    // Natural pathing.
+    // The pathfinder still decides what is walkable; these values only
+    // influence which valid path is preferred.
+    bool  naturalPathing            = true;
+    float slopeStart                = 0.15f;
+    float slopeStrong               = 0.25f;
+    float slopeExtreme              = 0.35f;
+    float slopePenalty              = 5.0f;
+    float steepSlopePenalty         = 10.0f;
+    float extremeSlopePenalty       = 30.0f;
+
+    // Penalize sustained elevation changes rather than individual small
+    // steps. This is what makes the bot prefer going around a mountain.
+    float elevationWindow           = 40.0f;
+    float elevationGainStart        = 8.0f;
+    float elevationGainStrong       = 15.0f;
+    float elevationGainExtreme      = 25.0f;
+    float elevationPenalty          = 5.0f;
+    float strongElevationPenalty    = 20.0f;
+    float extremeElevationPenalty   = 60.0f;
+
+    // Penalize unnecessarily sharp turns.
+    float turnPenaltyStart          = 35.0f;
+    float turnPenaltyStrong         = 70.0f;
+    float turnPenaltyExtreme        = 110.0f;
+    float turnPenalty               = 2.0f;
+    float strongTurnPenalty         = 5.0f;
+    float extremeTurnPenalty        = 12.0f;
+
+    // Incomplete paths are usable as a last resort, but should almost
+    // never beat a complete route.
+    float incompletePathPenalty     = 10000.0f;
+
     bool  debug             = false;
 };
 
@@ -202,7 +236,11 @@ private:
     bool AdvanceLeg(Player* player, ATSession& s);
     bool TryPath(Player* player, float x, float y, float z, bool straight,
                  Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const;
+    float ScoreNaturalPath(Player* player,
+                        Movement::PointsArray const& path,
+                        bool incomplete) const;
 
+    float PathDistance(Movement::PointsArray const& path) const;
     // Beste plausible Oberflaeche an x/y -- beruecksichtigt auch Gebaeude,
     // Bruecken und Stadtboeden, nicht nur das Rohgelaende.
     float BestGroundZ(Player* player, float x, float y) const;
