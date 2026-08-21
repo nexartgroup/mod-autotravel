@@ -1275,27 +1275,34 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
         return;
 
     /*
-     * MoveSpline simuliert keine echte Gravitation zwischen seinen Punkten.
+     * MoveSpline simuliert zwischen seinen Punkten keine normale
+     * Gravitation. Werden zwei weit auseinanderliegende NavMesh-Punkte
+     * direkt verbunden, kann der Charakter deshalb ueber Abhaenge
+     * "fliegen".
      *
-     * Wenn zwei NavMesh-Punkte weit auseinanderliegen und stark
-     * unterschiedliche Z-Hoehen besitzen, interpoliert der Spline die
-     * Hoehe direkt. Dadurch kann der Charakter ueber Abhaenge "fliegen".
+     * Wir verdichten den Pfad horizontal und projizieren jeden erzeugten
+     * Punkt auf die tatsaechliche Oberflaeche.
      *
-     * Deshalb wird der Pfad vor dem Launch horizontal verdichtet und jeder
-     * Zwischenpunkt auf die tatsaechliche begehbare Oberflaeche projiziert.
+     * WICHTIG:
      *
-     * 3.0 yd ist absichtlich klein genug, damit auch Bergkanten und
-     * Abhaenge nicht als grosse gerade Z-Linie interpoliert werden.
+     * terrainStep kommt aus ATConf und wird ueber
+     * AutoTravel.TerrainStep konfiguriert.
+     *
+     * Der aktuelle Git-Stand hatte hier noch einen hartcodierten Wert
+     * von 3.0f. Das wird hier bewusst entfernt.
      */
-    constexpr float TERRAIN_STEP = 3.0f;
+    float terrainStep =
+        std::max(0.5f, ATConf.terrainStep);
+
     constexpr float TERRAIN_OFFSET = 0.10f;
 
     /*
-     * Schutz gegen extrem viele Splinepunkte bei einem einzelnen Chunk.
-     * ChunkPoints begrenzt weiterhin die Anzahl der NavMesh-Quellpunkte.
+     * Kein kuenstliches Limit pro Chunk.
+     *
+     * ChunkPoints begrenzt weiterhin die Anzahl der PathGenerator-
+     * Quellpunkte. Die daraus entstehenden Terrainpunkte duerfen mehr
+     * sein, weil terrainStep genau dafuer gedacht ist.
      */
-    constexpr uint32 MAX_TERRAIN_POINTS = 96;
-
     Movement::PointsArray chunk;
 
     G3D::Vector3 current(
@@ -1312,40 +1319,50 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     uint32 phase = player->GetPhaseMask();
 
     while (s.idx < s.path.size() &&
-           sourcePoints < ATConf.chunkPoints &&
-           chunk.size() < MAX_TERRAIN_POINTS)
+           sourcePoints < ATConf.chunkPoints)
     {
-        G3D::Vector3 target = s.path[s.idx];
+        G3D::Vector3 target =
+            s.path[s.idx];
 
-        float dx = target.x - current.x;
-        float dy = target.y - current.y;
+        float dx =
+            target.x - current.x;
+
+        float dy =
+            target.y - current.y;
 
         float horizontal =
-            std::sqrt(dx * dx + dy * dy);
+            std::sqrt(
+                dx * dx +
+                dy * dy);
 
         /*
-         * Sehr kurze Segmente brauchen keine weitere Unterteilung.
+         * Anzahl der Terrainabschnitte.
+         *
+         * Beispiel:
+         *
+         * terrainStep = 3
+         * Segment = 12 yd
+         *
+         * => 4 Zwischenpunkte
          */
         uint32 steps =
             std::max<uint32>(
                 1,
-                uint32(std::ceil(
-                    horizontal /
-                    TERRAIN_STEP)));
+                uint32(
+                    std::ceil(
+                        horizontal /
+                        terrainStep)));
 
         /*
-         * Bei extrem langen Segmenten nicht mehr Punkte erzeugen als
-         * der Sicherheitsrahmen erlaubt.
+         * Jeder einzelne Abschnitt wird vollstaendig erzeugt.
+         *
+         * Wir kuerzen steps NICHT mehr anhand einer globalen
+         * Punktbegrenzung. Der alte Code konnte dadurch ein langes
+         * Segment mitten drin abbrechen und danach trotzdem s.idx
+         * erhoehen. Das konnte wieder einen Flug/Sprung erzeugen.
          */
-        if (steps > MAX_TERRAIN_POINTS - chunk.size())
-            steps = MAX_TERRAIN_POINTS - chunk.size();
-
-        if (steps == 0)
-            break;
-
         for (uint32 step = 1;
-             step <= steps &&
-             chunk.size() < MAX_TERRAIN_POINTS;
+             step <= steps;
              ++step)
         {
             float t =
@@ -1354,33 +1371,43 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
             float x =
                 current.x +
-                (target.x - current.x) * t;
+                (target.x - current.x) *
+                t;
 
             float y =
                 current.y +
-                (target.y - current.y) * t;
+                (target.y - current.y) *
+                t;
 
             /*
-             * Wichtig:
+             * Fuer die Hoehenabfrage nicht nur current.z verwenden.
              *
-             * Nicht target.z linear interpolieren.
+             * Bei einem starken Abstieg kann die Oberflaeche deutlich
+             * unter current.z liegen. Bei einem starken Aufstieg kann
+             * sie entsprechend deutlich darueber liegen.
              *
-             * Stattdessen die Oberflaeche an jedem Zwischenpunkt neu
-             * bestimmen. Dadurch folgt der Spline dem Gelaende.
+             * Deshalb wird die hoehere der beiden bekannten Hoehen als
+             * Startpunkt verwendet und ein grosszuegiges Suchfenster
+             * gegeben.
              */
+            float heightStart =
+                std::max(
+                    current.z,
+                    target.z) +
+                20.0f;
+
             float ground =
                 map->GetHeight(
                     phase,
                     x,
                     y,
-                    current.z + 20.0f,
+                    heightStart,
                     true,
                     200.0f);
 
             /*
-             * Falls die normale Abfrage nichts findet, BestGroundZ()
-             * benutzt mehrere realistische Hoehen und ist deshalb als
-             * robuster Fallback geeignet.
+             * Fallback fuer Stellen, an denen GetHeight() keinen Treffer
+             * liefert.
              */
             if (ground <= INVALID_HEIGHT)
             {
@@ -1395,6 +1422,11 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
             if (ground > INVALID_HEIGHT)
             {
+                /*
+                 * Der Charakter wird minimal ueber der Oberflaeche
+                 * gehalten, damit er nicht in die VMap/Map-Fläche
+                 * gedrueckt wird.
+                 */
                 z =
                     ground +
                     TERRAIN_OFFSET;
@@ -1402,19 +1434,23 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
             else
             {
                 /*
-                 * Letzter Fallback: nur wenn fuer diese Position gar keine
-                 * Hoeheninformation vorhanden ist, die NavMesh-Z interpolieren.
+                 * Nur wenn gar keine Bodenhoehe verfuegbar ist,
+                 * verwenden wir die NavMesh-Z-Interpolation als
+                 * Fallback.
+                 *
+                 * Dieser Fall sollte selten sein.
                  */
                 z =
                     current.z +
-                    (target.z - current.z) * t;
+                    (target.z - current.z) *
+                    t;
             }
 
             /*
-             * Wasser:
+             * Wasser weiterhin ueber TravelZ behandeln.
              *
-             * NavMesh-Punkte liegen im Wasser am Boden. TravelZ() hebt
-             * sie auf die konfigurierte Schwimmhoehe.
+             * Die Bodenprojektion bleibt fuer normales Terrain aktiv.
+             * Im Wasser darf TravelZ die Z-Hoehe nach oben verschieben.
              */
             float base =
                 (ground > INVALID_HEIGHT)
@@ -1441,8 +1477,22 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
                     z));
         }
 
-        current = target;
+        /*
+         * Der komplette Abschnitt bis zum NavMesh-Zielpunkt wurde jetzt
+         * erzeugt.
+         *
+         * WICHTIG:
+         *
+         * Nicht einfach current = target setzen.
+         * current muss die tatsaechlich erzeugte Terrainposition sein,
+         * damit das naechste Segment von der realen Z-Hoehe ausgeht.
+         */
+        current =
+            chunk.back();
 
+        /*
+         * Jetzt darf der PathGenerator-Punkt als verarbeitet gelten.
+         */
         ++s.idx;
         ++sourcePoints;
     }
@@ -1464,7 +1514,7 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     }
 
     /*
-     * Kein alter Falling-State darf den neuen Spline beeinflussen.
+     * Alte Falling-Flags nicht in den neuen Spline uebernehmen.
      */
     player->RemoveUnitMovementFlag(
         MOVEMENTFLAG_FALLING |
@@ -1475,7 +1525,8 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
         player->GetPositionZ());
 
     /*
-     * Schwimmflagge steuert Animation und Bewegung.
+     * Schwimmen nur aktivieren, wenn mindestens ein Punkt dieses
+     * Chunks eine Schwimmhoehe benoetigt.
      */
     if (water)
     {
@@ -1491,10 +1542,10 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     s.swimming = water;
 
     /*
-     * Jetzt bekommt MoveSpline bereits einen terrain-following Pfad.
+     * MoveSpline bekommt jetzt einen bereits terrain-following Pfad.
      *
-     * Die Z-Koordinate muss deshalb nicht mehr ueber grosse Distanzen
-     * interpoliert werden.
+     * Die grossen Z-Spruenge sind durch die vielen Zwischenpunkte
+     * beseitigt.
      */
     Movement::MoveSplineInit init(player);
 
@@ -1503,24 +1554,28 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     init.Launch();
 
     /*
-     * Fallbezug fuer den gerade gestarteten Abschnitt neu setzen.
+     * Fallbezug nach dem Launch aktualisieren.
      */
     player->SetFallInformation(
         0,
         player->GetPositionZ());
 
-    char buf[160];
+    char buf[192];
 
     std::snprintf(
         buf,
         sizeof(buf),
-        "Movement gestartet: %u Terrainpunkte "
-        "(Index %u/%u)",
+        "Movement gestartet: %u Terrainpunkte, "
+        "TerrainStep %.2f, Index %u/%u",
         uint32(chunk.size()),
+        terrainStep,
         uint32(s.idx),
         uint32(s.path.size()));
 
-    Dbg(player, s, buf);
+    Dbg(
+        player,
+        s,
+        buf);
 }
 
 // ---------------------------------------------------------------------------

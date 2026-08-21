@@ -288,6 +288,17 @@ AutoTravel.TeleportCooldownSec = 5
 #        Default: 0
 AutoTravel.Debug = 0
 
-# Maximale horizontale Distanz zwischen Terrain-Spline-Punkten.
-# Kleinere Werte folgen dem Gelaende genauer, erzeugen aber mehr Punkte.
+#    AutoTravel.TerrainStep
+#        Maximale horizontale Distanz zwischen den automatisch erzeugten
+#        Terrain-Splinepunkten.
+#
+#        Kleiner = genaueres Folgen des Gelaendes, aber mehr Splinepunkte
+#        und mehr Hoehenabfragen.
+#
+#        3.0 = guter Ausgangswert.
+#        2.0 = sehr genau.
+#        4.0 = weniger Punkte.
+#
+#        Minimum im Code: 0.5
+#        Default: 3.0
 AutoTravel.TerrainStep = 3.0
