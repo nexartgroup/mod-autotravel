@@ -450,15 +450,51 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     }
     std::reverse(chain.begin(), chain.end());
 
-    // Der Startknoten liegt oft hinter dem Spieler - dann ueberspringen.
-    if (chain.size() > 1)
+    // --- Umweg am Routenanfang abschneiden ---------------------------------
+    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wer ihn
+    // stur anlaeuft, rennt erst in die Gegenrichtung und dreht dann um -- genau
+    // das im Test beobachtete Verhalten.
+    //
+    // Geprueft wird der Umweg: kostet der Weg ueber den Knoten spuerbar mehr
+    // als der direkte Weg zum uebernaechsten, wird er uebersprungen. Der
+    // Vergleich laeuft in einer Schleife, weil manchmal mehrere Knoten hinter
+    // dem Spieler liegen.
+    //
+    //     ueber n0:  |Spieler->n0| + |n0->n1|
+    //     direkt:    |Spieler->n1|
+    //
+    // Uebersprungen wird nur, wenn der Umweg groesser als der Schwellwert ist
+    // UND der direkte Weg zum naechsten Knoten nicht laenger als die
+    // Suchreichweite ist -- sonst wuerde ein sinnvoller Einstieg entfallen.
     {
-        ATNode const& n0 = sNodes[chain[0]];
-        ATNode const& n1 = sNodes[chain[1]];
-        float toStart = Dist2D(player->GetPositionX(), player->GetPositionY(), n0.x, n0.y);
-        float toNext  = Dist2D(player->GetPositionX(), player->GetPositionY(), n1.x, n1.y);
-        if (toNext < toStart)
+        float px = player->GetPositionX();
+        float py = player->GetPositionY();
+        uint32 skipped = 0;
+
+        while (chain.size() > 1 && skipped < 4)
+        {
+            ATNode const& n0 = sNodes[chain[0]];
+            ATNode const& n1 = sNodes[chain[1]];
+
+            float viaN0  = Dist2D(px, py, n0.x, n0.y) + Dist2D(n0.x, n0.y, n1.x, n1.y);
+            float direct = Dist2D(px, py, n1.x, n1.y);
+
+            if (direct > ATConf.nodeSearchRadius * 1.5f)
+                break;                       // zu weit, Einstieg ueber n0 behalten
+            if (viaN0 <= direct * ATConf.skipDetourFactor)
+                break;                       // Umweg vertretbar
+
             chain.erase(chain.begin());
+            ++skipped;
+        }
+
+        if (skipped)
+        {
+            char sb[160];
+            std::snprintf(sb, sizeof(sb), "%u Knoten am Routenanfang uebersprungen (Umweg).",
+                          skipped);
+            LOG_DEBUG("module", "mod-autotravel: {}", sb);
+        }
     }
 
     // --- In Etappen umwandeln ---------------------------------------------

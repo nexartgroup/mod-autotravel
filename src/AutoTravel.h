@@ -120,7 +120,7 @@ struct ATConfig
     uint32 routeCacheSec    = 120;     // Haltbarkeit zwischengespeicherter Routen
     float stuckPenalty      = 300.0f;  // Aufschlag je Stuck auf einer Kante
     float penaltyDecaySec   = 900.0f;  // Halbwertszeit dieses Aufschlags
-    float simplifyTolerance = 1.5f;    // Douglas-Peucker, Yards
+    float simplifyTolerance = 0.7f;    // Douglas-Peucker, Yards
     bool  autoMount         = true;
     float mountMinDistance  = 150.0f;
     bool  pauseInCombat     = true;
@@ -139,11 +139,12 @@ struct ATConfig
     uint32 maxUnderwaterMs  = 45000;   // Notbremse, falls doch getaucht wird
     bool  rescueUnderMesh   = true;
     float underMeshDepth    = 2.5f;    // ab so viel unter dem Boden gilt es als durchgefallen
-    float aboveMeshHeight   = 6.0f;    // ab so viel darueber gilt er als haengend/fallend
+    float aboveMeshHeight   = 12.0f;    // ab so viel darueber gilt er als haengend/fallend
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
     float nodeMinDistance   = 300.0f;
+    float skipDetourFactor  = 1.25f;   // ab diesem Umwegfaktor Startknoten ueberspringen
     bool  useSpecialLinks   = true;
     float specialLinkCost   = 400.0f;
     bool  allowTeleport     = true;

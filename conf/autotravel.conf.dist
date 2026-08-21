@@ -60,8 +60,11 @@ AutoTravel.UnderMeshDepth = 2.5
 #        Ab so vielen Yards ueber der Reisehoehe gilt er als haengend oder
 #        fallend und wird nach unten auf die Flaeche gesetzt. Grosszuegiger als
 #        UnderMeshDepth, damit Spruenge und Rampen nicht ausloesen.
-#        Default: 6
-AutoTravel.AboveMeshHeight = 6
+#        Grosszuegiger als UnderMeshDepth, und waehrend laufender Bewegung
+#        gilt nochmals der doppelte Wert: auf huegeligem Gelaende ueberspannt
+#        der Spline regelmaessig eine Senke, ohne dass etwas kaputt ist.
+#        Default: 12
+AutoTravel.AboveMeshHeight = 12
 
 #    AutoTravel.LegDistance
 #        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
@@ -203,8 +206,12 @@ AutoTravel.RouteCacheSeconds = 120
 #        Douglas-Peucker: Punkte, die weniger als so viele Yards von der
 #        Verbindungslinie ihrer Nachbarn abweichen, werden entfernt. Weniger
 #        Knicke im Spline, weniger Mikrokorrekturen. 0 = aus.
-#        Default: 1.5
-AutoTravel.SimplifyTolerance = 1.5
+#        Gemessen wird DREIdimensional -- zweidimensional lagen die Punkte
+#        einer Huegelkuppe auf einer Geraden und wurden alle entfernt.
+#        Der Wert wird automatisch auf ein Drittel von UnderMeshDepth begrenzt,
+#        damit das Ausduennen nicht selbst ein "durchgefallen" ausloest.
+#        Default: 0.7
+AutoTravel.SimplifyTolerance = 0.7
 
 #    AutoTravel.HeuristicWeight
 #        Gewicht der Restentfernungs-Schaetzung bei der Routensuche (A*).
@@ -222,6 +229,14 @@ AutoTravel.HeuristicWeight = 1.0
 #        die tatsaechliche Restentfernung.
 #        Default: 2
 AutoTravel.FinalApproachTries = 2
+
+#    AutoTravel.SkipDetourFactor
+#        Der naechstgelegene Knoten liegt oft HINTER dem Spieler. Kostet der
+#        Weg ueber ihn mehr als dieses Vielfache des direkten Wegs zum
+#        uebernaechsten, wird er uebersprungen -- sonst laeuft der Charakter
+#        erst in die Gegenrichtung.
+#        Default: 1.25
+AutoTravel.SkipDetourFactor = 1.25
 
 #    AutoTravel.UseSpecialLinks
 #        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die

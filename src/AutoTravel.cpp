@@ -109,8 +109,23 @@ void AutoTravelMgr::LoadConfig()
     ATConf.routeCacheSec     = sConfigMgr->GetOption<uint32>("AutoTravel.RouteCacheSeconds", 120);
     ATConf.stuckPenalty      = sConfigMgr->GetOption<float> ("AutoTravel.StuckEdgePenalty", 300.0f);
     ATConf.penaltyDecaySec   = sConfigMgr->GetOption<float> ("AutoTravel.PenaltyDecaySeconds", 900.0f);
-    ATConf.simplifyTolerance = sConfigMgr->GetOption<float> ("AutoTravel.SimplifyTolerance", 1.5f);
+    ATConf.simplifyTolerance = sConfigMgr->GetOption<float> ("AutoTravel.SimplifyTolerance", 0.7f);
     if (ATConf.routeProfile > 4) ATConf.routeProfile = 0;
+
+    // Die Vereinfachung verschiebt die Linienfuehrung um bis zur Toleranz.
+    // Waere sie groesser als ein Drittel der Bodenschwelle, koennte allein
+    // das Ausduennen ein "durchgefallen" ausloesen -- die Korrektur wuerde
+    // also einen Fehler erzeugen, den sie danach behebt.
+    float const simplifyMax = ATConf.underMeshDepth / 3.0f;
+    if (ATConf.simplifyTolerance > simplifyMax)
+    {
+        LOG_INFO("server.loading",
+                 "mod-autotravel: SimplifyTolerance {:.2f} ist zu gross fuer "
+                 "UnderMeshDepth {:.2f} - begrenzt auf {:.2f}.",
+                 ATConf.simplifyTolerance, ATConf.underMeshDepth, simplifyMax);
+        ATConf.simplifyTolerance = simplifyMax;
+    }
+    if (ATConf.simplifyTolerance < 0.0f) ATConf.simplifyTolerance = 0.0f;
     if (ATConf.heuristicWeight < 1.0f) ATConf.heuristicWeight = 1.0f;
     if (ATConf.heuristicWeight > 3.0f) ATConf.heuristicWeight = 3.0f;
     ATConf.autoMount         = sConfigMgr->GetOption<bool>  ("AutoTravel.AutoMount", true);
@@ -131,11 +146,13 @@ void AutoTravelMgr::LoadConfig()
     ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
     ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
     ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
-    ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 6.0f);
+    ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 12.0f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
     ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
     ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
     ATConf.nodeMinDistance   = sConfigMgr->GetOption<float> ("AutoTravel.NodeMinDistance", 300.0f);
+    ATConf.skipDetourFactor  = sConfigMgr->GetOption<float> ("AutoTravel.SkipDetourFactor", 1.25f);
+    if (ATConf.skipDetourFactor < 1.0f) ATConf.skipDetourFactor = 1.0f;
     ATConf.useSpecialLinks   = sConfigMgr->GetOption<bool>  ("AutoTravel.UseSpecialLinks", true);
     ATConf.specialLinkCost   = sConfigMgr->GetOption<float> ("AutoTravel.SpecialLinkCost", 400.0f);
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
@@ -1352,16 +1369,25 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
 
 namespace
 {
+    // Der Abstand MUSS dreidimensional gerechnet werden. Zweidimensional
+    // liegen die Punkte einer Huegelkuppe in der Draufsicht auf einer Geraden
+    // und wurden deshalb allesamt entfernt -- der Spline schnitt danach durch
+    // den Huegel oder darueber hinweg. Genau daher kamen die vielen Meldungen
+    // "Kein Bodenkontakt ... in der Luft".
     float PerpDist(G3D::Vector3 const& p, G3D::Vector3 const& a, G3D::Vector3 const& b)
     {
-        float dx = b.x - a.x, dy = b.y - a.y;
-        float len2 = dx * dx + dy * dy;
+        float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+        float len2 = dx * dx + dy * dy + dz * dz;
         if (len2 < 0.0001f)
-            return std::sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y));
-        float t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+        {
+            float ex = p.x - a.x, ey = p.y - a.y, ez = p.z - a.z;
+            return std::sqrt(ex * ex + ey * ey + ez * ez);
+        }
+        float t = ((p.x - a.x) * dx + (p.y - a.y) * dy + (p.z - a.z) * dz) / len2;
         t = std::max(0.0f, std::min(1.0f, t));
-        float px = a.x + t * dx, py = a.y + t * dy;
-        return std::sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py));
+        float px = a.x + t * dx, py = a.y + t * dy, pz = a.z + t * dz;
+        float ex = p.x - px, ey = p.y - py, ez = p.z - pz;
+        return std::sqrt(ex * ex + ey * ey + ez * ez);
     }
 
     void Simplify(Movement::PointsArray const& in, size_t first, size_t last,
@@ -1933,15 +1959,19 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     }
 
     // --- Kein Kontakt zur begehbaren Flaeche --------------------------------
-    // Zwei Stoerungen mit demselben Bild: der Charakter huepft in der
-    // Fallanimation und laeuft dabei geradeaus weiter.
+    // Zwei sehr verschiedene Stoerungen, die vorher gleich behandelt wurden:
     //
-    //   zu tief  -> durch den Boden gefallen, kommt nie wieder hoch
-    //   zu hoch  -> haengt in der Luft und sinkt langsam ab
+    //   zu tief  -> durch den Boden gefallen. Kommt von selbst nicht zurueck,
+    //               also zuruecksetzen.
+    //   zu hoch  -> haengt in der Luft. Das passiert auf huegeligem Gelaende
+    //               aber auch voellig normal, waehrend der Spline eine Senke
+    //               ueberspannt. Hier war die alte Fassung viel zu scharf:
+    //               6 Yards Schwelle, drei Messungen, sofort Teleport.
     //
-    // Bezugsgroesse ist NICHT die rohe Bodenhoehe, sondern die Reisehoehe:
-    // beim Schwimmen ist das die Wasseroberflaeche, sonst der Boden. Ohne das
-    // waere jeder Schwimmzug ein Fehlalarm, weil der Seegrund weit unten liegt.
+    // Neu deshalb:
+    //   * waehrend laufender Bewegung gilt die doppelte Schwelle
+    //   * erst wird nur der Pfad neu berechnet, kein Teleport
+    //   * zurueckgesetzt wird nur, wenn auch das nichts bringt
     if (ATConf.rescueUnderMesh && s.state != AT_WAIT_FLIGHT && s.state != AT_COMBAT_PAUSED
         && !player->IsInFlight())
     {
@@ -1956,45 +1986,63 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
         float ref = (ground > INVALID_HEIGHT) ? TravelZ(player, px, py, ground) : INVALID_HEIGHT;
 
+        bool moving = !player->movespline->Finalized();
+        float aboveLimit = ATConf.aboveMeshHeight * (moving ? 2.0f : 1.0f);
+
         bool tooLow  = (ref > INVALID_HEIGHT) && (pz < ref - ATConf.underMeshDepth);
-        bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + ATConf.aboveMeshHeight);
+        bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + aboveLimit);
 
         if (tooLow || tooHigh)
+            ++s.offMeshHits;
+        else
+            s.offMeshHits = 0;
+
+        uint8 needed = tooLow ? 3 : 8;      // Schweben braucht laengere Bestaetigung
+
+        if (s.offMeshHits >= needed)
         {
-            // Mehrere Messungen hintereinander, damit ein Sprung, eine Rampe
-            // oder ein Punkt unter einer Bruecke nicht faelschlich ausloest.
-            if (++s.offMeshHits >= 3)
+            s.offMeshHits = 0;
+            ++s.rescueCount;
+
+            // Erster Anlauf bei Schweben: nur neu rechnen. Sehr oft liegt es
+            // an einem schlechten Pfadpunkt, nicht an der Position.
+            if (tooHigh && s.rescueCount <= 2)
             {
-                s.offMeshHits = 0;
-                ++s.rescueCount;
-
-                float target = ref + 0.5f;
-                HaltMovement(player, s);
-                player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
-                player->NearTeleportTo(px, py, target, player->GetOrientation());
-                player->SetFallInformation(0, target);
-
-                char b[224];
+                char b[192];
                 std::snprintf(b, sizeof(b),
-                              "Kein Bodenkontakt (%.1f statt %.1f, %s) - zurueckgesetzt "
-                              "und neu berechnet.",
-                              pz, target, tooLow ? "unter der Flaeche" : "in der Luft");
-                Msg(player, b);
-
+                              "Schwebt %.1f yd ueber dem Boden - Pfad wird neu berechnet.",
+                              pz - ref);
+                Dbg(player, s, b);
+                HaltMovement(player, s);
                 s.path.clear();
                 s.idx = 0;
                 s.state = AT_CALCULATE_PATH;
-
-                if (s.rescueCount >= 6)
-                {
-                    Msg(player, "Zu oft ohne Bodenkontakt - Navigation gestoppt.");
-                    s.state = AT_IDLE;
-                }
                 return;
             }
+
+            float target = ref + 0.5f;
+            HaltMovement(player, s);
+            player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
+            player->NearTeleportTo(px, py, target, player->GetOrientation());
+            player->SetFallInformation(0, target);
+
+            char b[224];
+            std::snprintf(b, sizeof(b),
+                          "Kein Bodenkontakt (%.1f statt %.1f, %s) - zurueckgesetzt.",
+                          pz, target, tooLow ? "unter der Flaeche" : "in der Luft");
+            Msg(player, b);
+
+            s.path.clear();
+            s.idx = 0;
+            s.state = AT_CALCULATE_PATH;
+
+            if (s.rescueCount >= 8)
+            {
+                Msg(player, "Zu oft ohne Bodenkontakt - Navigation gestoppt.");
+                s.state = AT_IDLE;
+            }
+            return;
         }
-        else
-            s.offMeshHits = 0;
     }
 
     // --- Untergetaucht --------------------------------------------------------
