@@ -19,6 +19,7 @@ enum ATState : uint8
     AT_COMBAT_PAUSED,
     AT_MOUNTING,
     AT_WAIT_FLIGHT,
+    AT_WAIT_CONNECTION,
     AT_ARRIVED,
     AT_FAILED
 };
@@ -28,6 +29,13 @@ enum ATLegFlags : uint8
     AT_LEG_NORMAL  = 0,
     AT_LEG_FLIGHT  = 1,
     AT_LEG_SPECIAL = 2,
+};
+
+enum ATLegPolicy : uint8
+{
+    AT_LEG_OPTIONAL = 0,
+    AT_LEG_REQUIRED  = 1,
+    AT_LEG_CONNECTION = 2
 };
 
 struct ATNode
@@ -47,14 +55,29 @@ struct ATNodeLink
 
 struct ATLeg
 {
+    // World map this leg belongs to.
+    //
+    // This is deliberately separate from uiMapId. uiMapId is the
+    // client/WorldMapArea coordinate identifier, while mapId is the
+    // actual AzerothCore world map.
+    uint32 mapId = 0;
+
     uint32 uiMapId = 0;
     float  nx = 0.0f, ny = 0.0f;
     uint8  flags = AT_LEG_NORMAL;
 
     float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
     bool   resolved = false;
+
+    // If true, wx/wy are valid but wz could not be resolved yet because
+    // the player is currently on another map.
+    bool   needsMapArrival = false;
+
+    // Required legs must not silently disappear after path failures.
+    uint8 policy = AT_LEG_OPTIONAL;
+
     std::string name;
-    uint8  linkType = 0;
+    uint8 linkType = 0;
     std::string nextName;
 };
 
@@ -97,7 +120,15 @@ struct ATConfig
     bool  allowTeleport     = true;
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;
+    // Special connection handling.
+    //
+    // A portal/transport/flight requires the player to perform the actual
+    // connection. AutoTravel waits for the resulting map/position change.
+    uint32 connectionTimeoutMs = 60000;
 
+    // Distance at which an expected connection destination is considered
+    // reached after a portal/transport/map transition.
+    float connectionArrivalDistance = 120.0f;
     /*
      * Natural navigation.
      *
@@ -199,6 +230,16 @@ struct ATSession
     ATState state       = AT_IDLE;
 
     uint32  mapId       = 0;
+    uint32  expectedMapId = 0;
+
+    // Map transition caused by a special connection is expected.
+    bool    waitingForMapChange = false;
+
+    // Map on which the player was standing when the connection started.
+    uint32  connectionStartMapId = 0;
+
+    // Connection timer.
+    uint32  connectionTimer = 0;
     float   destX       = 0.0f;
     float   destY       = 0.0f;
     float   destZ       = 0.0f;
@@ -245,8 +286,13 @@ public:
     void LoadMapAreas();
     void LoadTravelNodes();
 
-    bool BuildNodeRoute(Player* player, float dx, float dy, float dz,
-                        std::vector<ATLeg>& out, std::string& note) const;
+    bool BuildNodeRoute(Player* player,
+                    uint32 destinationMapId,
+                    float dx,
+                    float dy,
+                    float dz,
+                    std::vector<ATLeg>& out,
+                    std::string& note) const;
 
     void NodeInfo(Player* player);
     size_t NodeCount() const;
@@ -287,7 +333,8 @@ private:
     void ApplyNodeRouting(Player* player, ATSession& s);
     bool SetLegTarget(Player* player, ATSession& s);
     bool AdvanceLeg(Player* player, ATSession& s);
-
+    bool HandleConnectionTransition(Player* player, ATSession& s, uint32 diff);
+    bool IsCurrentLegConnection(ATSession const& s) const;
     bool TryPath(Player* player, float x, float y, float z, bool straight,
                  Movement::PointsArray& out, uint32& typeOut,
                  bool& incomplete) const;
@@ -355,10 +402,12 @@ private:
     uint32 PickGroundMount(Player* player) const;
 
     bool MapToWorld(Player* player, uint32 uiMapId,
-                    float nx, float ny,
-                    bool hasCalib, float pnx, float pny,
-                    float& outX, float& outY,
-                    std::string& err) const;
+                float nx, float ny,
+                bool hasCalib, float pnx, float pny,
+                float& outX, float& outY,
+                uint32& outMapId,
+                std::string& err,
+                bool allowOtherMap = false) const;
 
     bool ResolveWorld(Player* player, uint32 uiMapId,
                       float nx, float ny,
