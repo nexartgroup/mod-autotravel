@@ -323,6 +323,18 @@ private:
         float& score) const;
 
     float BestGroundZ(Player* player, float x, float y) const;
+    
+    std::vector<float> FindGroundPlanes(
+        Player* player,
+        float x,
+        float y,
+        float probeZ) const;
+
+    float SelectGroundPlane(
+        std::vector<float> const& planes,
+        float referenceZ,
+        float targetZ,
+        float horizontalDistance) const;
 
     bool WaterSurface(Player* player, float x, float y,
                       float probeZ, float& level) const;

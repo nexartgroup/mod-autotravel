@@ -24,6 +24,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <algorithm>
 
 ATConfig ATConf;
 
@@ -591,7 +592,266 @@ float AutoTravelMgr::BestGroundZ(Player* player, float x, float y) const
     return TravelZ(player, x, y, best);
 }
 
+std::vector<float> AutoTravelMgr::FindGroundPlanes(
+    Player* player,
+    float x,
+    float y,
+    float probeZ) const
+{
+    std::vector<float> planes;
 
+    if (!player)
+        return planes;
+
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+
+    /*
+     * Wir suchen mehrere Kollisions-/Bodenebenen am selben X/Y.
+     *
+     * GetHeight() sucht von probeZ nach unten. Nachdem eine Ebene
+     * gefunden wurde, starten wir die nächste Suche knapp darunter.
+     *
+     * Beispiel:
+     *
+     *   Z = 8.0   <- Oberseite Torbogen
+     *   Z = 0.0   <- Boden
+     *
+     * Suche 1:
+     *   probeZ = 20
+     *   -> 8
+     *
+     * Suche 2:
+     *   probeZ = 7.9
+     *   -> 0
+     *
+     * Dadurch können mehrere Ebenen erkannt werden.
+     */
+
+    constexpr float SEARCH_TOP_MARGIN = 20.0f;
+    constexpr float SEARCH_DISTANCE = 250.0f;
+
+    /*
+     * Mindestabstand zwischen zwei erkannten Ebenen.
+     *
+     * Dieser Wert verhindert, dass dieselbe Kollisionsfläche
+     * aufgrund kleiner numerischer Unterschiede mehrfach erscheint.
+     */
+    constexpr float MIN_PLANE_DISTANCE = 0.35f;
+
+    /*
+     * Maximale Anzahl Ebenen.
+     *
+     * Mehr als vier übereinanderliegende relevante Flächen sind
+     * für einen normalen Laufweg praktisch nicht sinnvoll.
+     */
+    constexpr uint32 MAX_PLANES = 4;
+
+    float searchZ =
+        std::max(
+            probeZ,
+            player->GetPositionZ()) +
+        SEARCH_TOP_MARGIN;
+
+    for (uint32 i = 0; i < MAX_PLANES; ++i)
+    {
+        float ground =
+            map->GetHeight(
+                phase,
+                x,
+                y,
+                searchZ,
+                true,
+                SEARCH_DISTANCE);
+
+        if (ground <= INVALID_HEIGHT)
+            break;
+
+        /*
+         * Prüfen, ob wir diese Ebene bereits kennen.
+         */
+        bool duplicate = false;
+
+        for (float existing : planes)
+        {
+            if (std::fabs(existing - ground) <
+                MIN_PLANE_DISTANCE)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if (!duplicate)
+            planes.push_back(ground);
+
+        /*
+         * Die nächste Suche muss unterhalb der gerade gefundenen
+         * Ebene beginnen, sonst liefert GetHeight() wieder dieselbe
+         * Fläche.
+         */
+        searchZ =
+            ground -
+            MIN_PLANE_DISTANCE;
+    }
+
+    /*
+     * Höchste Ebene zuerst.
+     *
+     * Das ist die natürliche Reihenfolge von GetHeight():
+     * obere Fläche -> darunterliegende Fläche -> usw.
+     */
+    std::sort(
+        planes.begin(),
+        planes.end(),
+        [](float a, float b)
+        {
+            return a > b;
+        });
+
+    return planes;
+}
+float AutoTravelMgr::SelectGroundPlane(
+    std::vector<float> const& planes,
+    float referenceZ,
+    float targetZ,
+    float horizontalDistance) const
+{
+    if (planes.empty())
+        return INVALID_HEIGHT;
+
+    /*
+     * Maximale vertikale Änderung, die wir bei einem einzelnen
+     * Terrain-Zwischenpunkt akzeptieren.
+     *
+     * Bei terrainStep = 3.0 bedeutet 1.5f ungefähr eine sehr
+     * deutliche Steigung, aber noch keinen Sprung auf eine
+     * darüberliegende Plattform.
+     */
+    constexpr float MAX_NORMAL_VERTICAL_CHANGE = 1.75f;
+
+    /*
+     * Wenn eine neue Ebene nur wenige Zentimeter entfernt ist,
+     * behandeln wir sie als dieselbe Oberfläche.
+     */
+    constexpr float SAME_PLANE_TOLERANCE = 0.75f;
+
+    /*
+     * Für echte Rampen darf die Bodenhöhe natürlich steigen.
+     * Wir erlauben deshalb einen größeren Anstieg, wenn der
+     * Zielpunkt ebenfalls höher liegt.
+     */
+    constexpr float MAX_TARGET_ASSISTED_CHANGE = 4.0f;
+
+    /*
+     * Die aktuelle Bodenhöhe ist die wichtigste Information.
+     *
+     * Wir suchen zuerst die Ebene, die am nächsten an referenceZ
+     * liegt.
+     */
+    float best = planes.front();
+    float bestScore = 1.0e30f;
+
+    for (float candidate : planes)
+    {
+        float delta =
+            candidate -
+            referenceZ;
+
+        float absDelta =
+            std::fabs(delta);
+
+        float score =
+            absDelta;
+
+        /*
+         * Ein Sprung nach oben ist deutlich verdächtiger als
+         * ein normaler kleiner Anstieg.
+         *
+         * Das ist genau der Schutz gegen:
+         *
+         *   Boden Z=0
+         *       ->
+         *   Torbogen Z=8
+         */
+        if (delta > MAX_NORMAL_VERTICAL_CHANGE)
+        {
+            /*
+             * Nur dann akzeptieren wir eine große positive
+             * Änderung, wenn der NavMesh-Zielpunkt ebenfalls
+             * deutlich höher liegt.
+             */
+            float targetGain =
+                targetZ -
+                referenceZ;
+
+            if (targetGain < delta - SAME_PLANE_TOLERANCE)
+            {
+                score +=
+                    1000.0f +
+                    (delta -
+                     MAX_NORMAL_VERTICAL_CHANGE) *
+                    100.0f;
+            }
+            else if (delta > MAX_TARGET_ASSISTED_CHANGE)
+            {
+                score +=
+                    100.0f +
+                    (delta -
+                     MAX_TARGET_ASSISTED_CHANGE) *
+                    20.0f;
+            }
+        }
+
+        /*
+         * Eine extrem große Z-Änderung bei sehr kleiner horizontaler
+         * Distanz ist praktisch immer eine andere Ebene und nicht
+         * eine normale Laufoberfläche.
+         */
+        if (horizontalDistance > 0.01f)
+        {
+            float slope =
+                absDelta /
+                horizontalDistance;
+
+            if (slope > 0.75f)
+            {
+                score +=
+                    (slope - 0.75f) *
+                    500.0f;
+            }
+        }
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            best = candidate;
+        }
+    }
+
+    /*
+     * Jetzt prüfen wir noch einmal, ob die beste Ebene überhaupt
+     * plausibel erreichbar ist.
+     *
+     * Ein Sprung von z.B. 0 -> 8 innerhalb von 3 Yards soll
+     * ausdrücklich NICHT als normale Bodenebene akzeptiert werden.
+     */
+    float delta =
+        best -
+        referenceZ;
+
+    if (delta > MAX_TARGET_ASSISTED_CHANGE)
+    {
+        float targetGain =
+            targetZ -
+            referenceZ;
+
+        if (targetGain < delta - SAME_PLANE_TOLERANCE)
+            return referenceZ;
+    }
+
+    return best;
+}
 // ---------------------------------------------------------------------------
 // Wasser
 // ---------------------------------------------------------------------------
@@ -1390,24 +1650,41 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
              * Startpunkt verwendet und ein grosszuegiges Suchfenster
              * gegeben.
              */
-            float heightStart =
-                std::max(
-                    current.z,
-                    target.z) +
-                20.0f;
-
-            float ground =
-                map->GetHeight(
-                    phase,
-                    x,
-                    y,
-                    heightStart,
-                    true,
-                    200.0f);
 
             /*
-             * Fallback fuer Stellen, an denen GetHeight() keinen Treffer
-             * liefert.
+             * Nicht mehr blind die erste GetHeight()-Fläche verwenden.
+             *
+             * An Torbögen können mehrere VMap-Flächen exakt unter
+             * demselben X/Y liegen:
+             *
+             *     Z=8  <- Torbogen
+             *     Z=0  <- Boden
+             *
+             * GetHeight() liefert normalerweise die zuerst gefundene
+             * Fläche. Deshalb suchen wir mehrere Ebenen und wählen
+             * anschließend die Ebene, die zur bisherigen Bodenhöhe
+             * passt.
+             */
+
+            std::vector<float> planes =
+                FindGroundPlanes(
+                    player,
+                    x,
+                    y,
+                    std::max(
+                        current.z,
+                        target.z));
+
+            float ground =
+                SelectGroundPlane(
+                    planes,
+                    current.z,
+                    target.z,
+                    horizontal);
+
+            /*
+             * Falls keine brauchbare Ebene gefunden wurde, benutzen
+             * wir weiterhin den bisherigen Fallback.
              */
             if (ground <= INVALID_HEIGHT)
             {
@@ -1676,14 +1953,50 @@ bool AutoTravelMgr::TryPathBetween(
     {
         G3D::Vector3& p = out[i];
 
-        float ground =
-            map->GetHeight(
-                phase,
+                /*
+         * Auch bei der PathGenerator-Prüfung dürfen wir nicht blind
+         * die oberste VMap-Fläche verwenden.
+         *
+         * Gerade bei Torbögen kann dort eine zweite Fläche über dem
+         * tatsächlich begehbaren Boden liegen.
+         */
+        std::vector<float> planes =
+            FindGroundPlanes(
+                player,
                 p.x,
                 p.y,
-                p.z + 5.0f,
-                true,
-                200.0f);
+                p.z);
+
+        float referenceZ =
+            (i == 0)
+                ? startZ
+                : out[i - 1].z;
+
+        float horizontalDistance =
+            0.0f;
+
+        if (i > 0)
+        {
+            float dx =
+                p.x -
+                out[i - 1].x;
+
+            float dy =
+                p.y -
+                out[i - 1].y;
+
+            horizontalDistance =
+                std::sqrt(
+                    dx * dx +
+                    dy * dy);
+        }
+
+        float ground =
+            SelectGroundPlane(
+                planes,
+                referenceZ,
+                p.z,
+                horizontalDistance);
 
         if (ground <= INVALID_HEIGHT)
         {
@@ -1707,13 +2020,14 @@ bool AutoTravelMgr::TryPathBetween(
             return false;
 
         /*
-         * Sehr grosse positive Abweichungen sind ebenfalls problematisch:
-         * MoveSpline wuerde ansonsten einen Flugabschnitt erzeugen.
+         * Ein NavMesh-Punkt darf etwas über der Oberfläche liegen,
+         * aber ein großer positiver Abstand ist verdächtig.
          *
-         * Die eigentliche Bewegung wird spaeter durch LaunchChunk()
-         * ohnehin auf das Terrain projiziert.
+         * Insbesondere verhindert dies, dass eine über dem Boden
+         * liegende Torbogenfläche als normaler Laufpunkt akzeptiert
+         * wird.
          */
-        if (p.z > ground + 8.0f)
+        if (p.z > ground + 4.0f)
             return false;
     }
 
