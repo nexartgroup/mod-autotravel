@@ -144,6 +144,7 @@ void AutoTravelMgr::LoadConfig()
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
     ATConf.debug             = sConfigMgr->GetOption<bool>  ("AutoTravel.Debug", false);
+    ATConf.terrainStep       = sConfigMgr->GetOption<float>("AutoTravel.TerrainStep", 3.0f);
 
     if (ATConf.arrivalDistance < 1.0f) ATConf.arrivalDistance = 1.0f;
     if (ATConf.legDistance     < 1.0f) ATConf.legDistance     = 1.0f;
@@ -1273,77 +1274,252 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     if (s.idx >= s.path.size())
         return;
 
+    /*
+     * MoveSpline simuliert keine echte Gravitation zwischen seinen Punkten.
+     *
+     * Wenn zwei NavMesh-Punkte weit auseinanderliegen und stark
+     * unterschiedliche Z-Hoehen besitzen, interpoliert der Spline die
+     * Hoehe direkt. Dadurch kann der Charakter ueber Abhaenge "fliegen".
+     *
+     * Deshalb wird der Pfad vor dem Launch horizontal verdichtet und jeder
+     * Zwischenpunkt auf die tatsaechliche begehbare Oberflaeche projiziert.
+     *
+     * 3.0 yd ist absichtlich klein genug, damit auch Bergkanten und
+     * Abhaenge nicht als grosse gerade Z-Linie interpoliert werden.
+     */
+    constexpr float TERRAIN_STEP = 3.0f;
+    constexpr float TERRAIN_OFFSET = 0.10f;
+
+    /*
+     * Schutz gegen extrem viele Splinepunkte bei einem einzelnen Chunk.
+     * ChunkPoints begrenzt weiterhin die Anzahl der NavMesh-Quellpunkte.
+     */
+    constexpr uint32 MAX_TERRAIN_POINTS = 96;
+
     Movement::PointsArray chunk;
-    chunk.push_back(G3D::Vector3(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ()));
+
+    G3D::Vector3 current(
+        player->GetPositionX(),
+        player->GetPositionY(),
+        player->GetPositionZ());
+
+    chunk.push_back(current);
+
+    bool water = false;
+    uint32 sourcePoints = 0;
 
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
-    bool water = false;
 
-    uint32 n = 0;
-    while (s.idx < s.path.size() && n < ATConf.chunkPoints)
+    while (s.idx < s.path.size() &&
+           sourcePoints < ATConf.chunkPoints &&
+           chunk.size() < MAX_TERRAIN_POINTS)
     {
-        G3D::Vector3 p = s.path[s.idx];
+        G3D::Vector3 target = s.path[s.idx];
 
-        // NavMesh-Punkte liegen nicht exakt auf der Oberflaeche. Bergab
-        // schneidet der Spline sonst durch das Gelaende (Charakter faellt
-        // durch den Boden) oder darueber (Charakter schwebt).
-        float g = map->GetHeight(phase, p.x, p.y, p.z + 2.0f);
-        if (g > INVALID_HEIGHT && std::fabs(g - p.z) < 6.0f)
-            p.z = g + 0.1f;
-        else if (g > INVALID_HEIGHT && g > p.z)
-            p.z = g + 0.1f;                 // Punkt lag unter dem Boden
+        float dx = target.x - current.x;
+        float dy = target.y - current.y;
 
-        // Steht dort Wasser, an die Oberflaeche legen statt ueber den Grund.
-        float base = (g > INVALID_HEIGHT) ? g : p.z;
-        float travel = TravelZ(player, p.x, p.y, base);
-        if (travel > p.z)
+        float horizontal =
+            std::sqrt(dx * dx + dy * dy);
+
+        /*
+         * Sehr kurze Segmente brauchen keine weitere Unterteilung.
+         */
+        uint32 steps =
+            std::max<uint32>(
+                1,
+                uint32(std::ceil(
+                    horizontal /
+                    TERRAIN_STEP)));
+
+        /*
+         * Bei extrem langen Segmenten nicht mehr Punkte erzeugen als
+         * der Sicherheitsrahmen erlaubt.
+         */
+        if (steps > MAX_TERRAIN_POINTS - chunk.size())
+            steps = MAX_TERRAIN_POINTS - chunk.size();
+
+        if (steps == 0)
+            break;
+
+        for (uint32 step = 1;
+             step <= steps &&
+             chunk.size() < MAX_TERRAIN_POINTS;
+             ++step)
         {
-            p.z = travel;
-            water = true;
+            float t =
+                float(step) /
+                float(steps);
+
+            float x =
+                current.x +
+                (target.x - current.x) * t;
+
+            float y =
+                current.y +
+                (target.y - current.y) * t;
+
+            /*
+             * Wichtig:
+             *
+             * Nicht target.z linear interpolieren.
+             *
+             * Stattdessen die Oberflaeche an jedem Zwischenpunkt neu
+             * bestimmen. Dadurch folgt der Spline dem Gelaende.
+             */
+            float ground =
+                map->GetHeight(
+                    phase,
+                    x,
+                    y,
+                    current.z + 20.0f,
+                    true,
+                    200.0f);
+
+            /*
+             * Falls die normale Abfrage nichts findet, BestGroundZ()
+             * benutzt mehrere realistische Hoehen und ist deshalb als
+             * robuster Fallback geeignet.
+             */
+            if (ground <= INVALID_HEIGHT)
+            {
+                ground =
+                    BestGroundZ(
+                        player,
+                        x,
+                        y);
+            }
+
+            float z;
+
+            if (ground > INVALID_HEIGHT)
+            {
+                z =
+                    ground +
+                    TERRAIN_OFFSET;
+            }
+            else
+            {
+                /*
+                 * Letzter Fallback: nur wenn fuer diese Position gar keine
+                 * Hoeheninformation vorhanden ist, die NavMesh-Z interpolieren.
+                 */
+                z =
+                    current.z +
+                    (target.z - current.z) * t;
+            }
+
+            /*
+             * Wasser:
+             *
+             * NavMesh-Punkte liegen im Wasser am Boden. TravelZ() hebt
+             * sie auf die konfigurierte Schwimmhoehe.
+             */
+            float base =
+                (ground > INVALID_HEIGHT)
+                    ? ground
+                    : z;
+
+            float travel =
+                TravelZ(
+                    player,
+                    x,
+                    y,
+                    base);
+
+            if (travel > z)
+            {
+                z = travel;
+                water = true;
+            }
+
+            chunk.push_back(
+                G3D::Vector3(
+                    x,
+                    y,
+                    z));
         }
 
-        chunk.push_back(p);
+        current = target;
+
         ++s.idx;
-        ++n;
+        ++sourcePoints;
     }
 
     if (chunk.size() < 2)
         return;
 
-    if (ATConf.takeClientControl && !s.controlTaken)
+    /*
+     * Serverkontrolle nur einmal pro Reise uebernehmen.
+     */
+    if (ATConf.takeClientControl &&
+        !s.controlTaken)
     {
-        player->SetClientControl(player, false);
+        player->SetClientControl(
+            player,
+            false);
+
         s.controlTaken = true;
     }
 
-    // Ein haengengebliebenes Fall-Flag laesst den Charakter bis zum naechsten
-    // Wegpunkt in der Fallanimation huepfen. Vor jedem Abschnitt zuruecksetzen.
-    player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
-    player->SetFallInformation(0, player->GetPositionZ());
+    /*
+     * Kein alter Falling-State darf den neuen Spline beeinflussen.
+     */
+    player->RemoveUnitMovementFlag(
+        MOVEMENTFLAG_FALLING |
+        MOVEMENTFLAG_FALLING_FAR);
 
-    // Schwimmflagge steuert Animation und Tempo des Splines.
+    player->SetFallInformation(
+        0,
+        player->GetPositionZ());
+
+    /*
+     * Schwimmflagge steuert Animation und Bewegung.
+     */
     if (water)
-        player->AddUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    {
+        player->AddUnitMovementFlag(
+            MOVEMENTFLAG_SWIMMING);
+    }
     else
-        player->RemoveUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    {
+        player->RemoveUnitMovementFlag(
+            MOVEMENTFLAG_SWIMMING);
+    }
+
     s.swimming = water;
 
+    /*
+     * Jetzt bekommt MoveSpline bereits einen terrain-following Pfad.
+     *
+     * Die Z-Koordinate muss deshalb nicht mehr ueber grosse Distanzen
+     * interpoliert werden.
+     */
     Movement::MoveSplineInit init(player);
+
     init.MovebyPath(chunk);
     init.SetWalk(false);
     init.Launch();
 
-    // Der Client zaehlt waehrend einer servergesteuerten Bewegung Fallzeit
-    // mit, wenn der Spline bergab durch die Luft schneidet. Beim Zurueckgeben
-    // der Kontrolle wird daraus Fallschaden, ohne dass der Charakter wirklich
-    // gefallen ist. Der Bezugspunkt wird deshalb bei jedem Abschnitt neu
-    // gesetzt.
-    player->SetFallInformation(0, player->GetPositionZ());
+    /*
+     * Fallbezug fuer den gerade gestarteten Abschnitt neu setzen.
+     */
+    player->SetFallInformation(
+        0,
+        player->GetPositionZ());
 
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "Movement gestartet: %u Punkte (Index %u/%u)",
-                  uint32(chunk.size()), uint32(s.idx), uint32(s.path.size()));
+    char buf[160];
+
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "Movement gestartet: %u Terrainpunkte "
+        "(Index %u/%u)",
+        uint32(chunk.size()),
+        uint32(s.idx),
+        uint32(s.path.size()));
+
     Dbg(player, s, buf);
 }
 
@@ -1429,19 +1605,61 @@ bool AutoTravelMgr::TryPathBetween(
 
     G3D::Vector3 const& last = out.back();
 
+        /*
+     * Nicht nur den letzten Punkt pruefen.
+     *
+     * Ein PathGenerator-Pfad kann zwischen Start und Ende grosse
+     * Hoehenspruenge enthalten. Der alte Code akzeptierte ihn trotzdem,
+     * solange nur der letzte Punkt auf dem Boden lag.
+     *
+     * Wir pruefen deshalb alle NavMesh-Punkte.
+     */
     Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
 
-    float ground =
-        map->GetHeight(
-            player->GetPhaseMask(),
-            last.x,
-            last.y,
-            last.z + 2.0f);
-
-    if (ground <= INVALID_HEIGHT ||
-        std::fabs(ground - last.z) > 5.0f)
+    for (size_t i = 0; i < out.size(); ++i)
     {
-        return false;
+        G3D::Vector3& p = out[i];
+
+        float ground =
+            map->GetHeight(
+                phase,
+                p.x,
+                p.y,
+                p.z + 5.0f,
+                true,
+                200.0f);
+
+        if (ground <= INVALID_HEIGHT)
+        {
+            ground =
+                BestGroundZ(
+                    player,
+                    p.x,
+                    p.y);
+        }
+
+        if (ground <= INVALID_HEIGHT)
+            return false;
+
+        /*
+         * Der NavMesh-Punkt darf geringfuegig ueber der Oberflaeche liegen.
+         *
+         * Liegt er deutlich darunter, ist der Pfad fuer unsere Bewegung
+         * ungeeignet.
+         */
+        if (p.z < ground - 5.0f)
+            return false;
+
+        /*
+         * Sehr grosse positive Abweichungen sind ebenfalls problematisch:
+         * MoveSpline wuerde ansonsten einen Flugabschnitt erzeugen.
+         *
+         * Die eigentliche Bewegung wird spaeter durch LaunchChunk()
+         * ohnehin auf das Terrain projiziert.
+         */
+        if (p.z > ground + 8.0f)
+            return false;
     }
 
     incomplete =

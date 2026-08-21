@@ -54,7 +54,7 @@ AutoTravel.RescueUnderMesh = 1
 #        Ab so vielen Yards unter der Reisehoehe gilt der Charakter als
 #        durchgefallen.
 #        Default: 2.5
-AutoTravel.UnderMeshDepth = 2.5
+AutoTravel.UnderMeshDepth = 6
 
 #    AutoTravel.AboveMeshHeight
 #        Ab so vielen Yards ueber der Reisehoehe gilt er als haengend oder
@@ -129,13 +129,13 @@ AutoTravel.ResumeAfterDeath = 0
 #        0 = nur Splines ohne Kontrollentzug. Sanfter, aber der Client kann
 #            gegensteuern und die Bewegung abbrechen.
 #        Default: 1
-AutoTravel.TakeClientControl = 1
+AutoTravel.TakeClientControl = 0
 
 #    AutoTravel.ChunkPoints
 #        Wie viele Pfadpunkte pro Spline gesendet werden. Kleiner = feiner
 #        reagierend, groesser = weniger Pakete.
 #        Default: 12
-AutoTravel.ChunkPoints = 12
+AutoTravel.ChunkPoints = 24
 
 ########################################
 # Natuerliche Navigation
@@ -154,20 +154,20 @@ AutoTravel.SlopeStrong = 0.25
 # Sehr steile Steigung.
 AutoTravel.SlopeExtreme = 0.35
 
-AutoTravel.SlopePenalty = 5.0
-AutoTravel.SteepSlopePenalty = 10.0
-AutoTravel.ExtremeSlopePenalty = 30.0
+AutoTravel.SlopePenalty = 7.0
+AutoTravel.SteepSlopePenalty = 15.0
+AutoTravel.ExtremeSlopePenalty = 60.0
 
 # Hoehengewinn wird ueber dieses Fenster bewertet.
-AutoTravel.ElevationWindow = 40.0
+AutoTravel.ElevationWindow = 10.0
 
-AutoTravel.ElevationGainStart = 8.0
-AutoTravel.ElevationGainStrong = 15.0
-AutoTravel.ElevationGainExtreme = 25.0
+AutoTravel.ElevationGainStart = 2.0
+AutoTravel.ElevationGainStrong = 4.0
+AutoTravel.ElevationGainExtreme = 6.0
 
 AutoTravel.ElevationPenalty = 5.0
 AutoTravel.StrongElevationPenalty = 20.0
-AutoTravel.ExtremeElevationPenalty = 60.0
+AutoTravel.ExtremeElevationPenalty = 80.0
 
 # Unnatuerliche starke Richtungswechsel.
 AutoTravel.TurnPenaltyStart = 35.0
@@ -192,10 +192,10 @@ AutoTravel.ContourProbing = 1
 
 # Ab diesem nachhaltigen Hoehengewinn wird ein Pfad als
 # moeglicher Berganstieg betrachtet.
-AutoTravel.ContourTriggerElevation = 15.0
+AutoTravel.ContourTriggerElevation = 8.0
 
 # Durchschnittliche Steigung, ab der Contour-Probing aktiviert wird.
-AutoTravel.ContourTriggerSlope = 0.20
+AutoTravel.ContourTriggerSlope = 0.1
 
 # Abstand der ersten beiden Suchrouten links/rechts.
 #
@@ -221,7 +221,7 @@ AutoTravel.ContourSecondProgress = 0.65
 # die direkte Luftstrecke, bevor er verworfen wird.
 #
 # 2.5 = maximal 250% der direkten Distanz.
-AutoTravel.ContourMaxDistanceFactor = 2.5
+AutoTravel.ContourMaxDistanceFactor = 5
 
 ########################################
 # Reiseknoten von mod-playerbots
@@ -252,7 +252,7 @@ AutoTravel.NodeSearchRadius = 800
 #        Erst ab dieser Zielentfernung wird der Knotengraph benutzt. Darunter
 #        pathet das NavMesh direkt, das ist genauer.
 #        Default: 300
-AutoTravel.NodeMinDistance = 300
+AutoTravel.NodeMinDistance = 800
 
 #    AutoTravel.UseSpecialLinks
 #        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die
@@ -287,3 +287,7 @@ AutoTravel.TeleportCooldownSec = 5
 #        Serverweiter Debug-Modus.
 #        Default: 0
 AutoTravel.Debug = 0
+
+# Maximale horizontale Distanz zwischen Terrain-Spline-Punkten.
+# Kleinere Werte folgen dem Gelaende genauer, erzeugen aber mehr Punkte.
+AutoTravel.TerrainStep = 3.0
