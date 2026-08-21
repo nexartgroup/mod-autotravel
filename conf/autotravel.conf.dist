@@ -140,39 +140,25 @@ AutoTravel.ChunkPoints = 12
 ########################################
 # Natuerliche Navigation
 ########################################
-#
-# Die normale AzerothCore-Navigation entscheidet, welche Wege
-# begehbar sind. Diese Optionen entscheiden, welchen begehbaren
-# Weg AutoTravel bevorzugt.
-#
-# Ziel:
-#   - kurze Wege bleiben bevorzugt
-#   - sanfte Steigungen sind billig
-#   - steile Hänge werden teuer
-#   - lange Berganstiege werden stark bestraft
-#   - ein Weg um den Berg kann dadurch einen etwas kuerzeren
-#     direkten Bergweg schlagen
-#
-# Default: 1
+
+# 1 = mehrere gueltige Wege bewerten.
+# 0 = normale PathGenerator-Auswahl.
 AutoTravel.NaturalPathing = 1
 
-# Ab dieser Steigung beginnt die Strafe.
-# 0.15 = ca. 15% Steigung.
+# Ab dieser Steigung beginnt eine zusaetzliche Strafe.
 AutoTravel.SlopeStart = 0.15
 
-# Ab hier wird die Steigung deutlich staerker bestraft.
+# Deutlich steilere Steigung.
 AutoTravel.SlopeStrong = 0.25
 
-# Sehr steile Hänge.
+# Sehr steile Steigung.
 AutoTravel.SlopeExtreme = 0.35
 
 AutoTravel.SlopePenalty = 5.0
 AutoTravel.SteepSlopePenalty = 10.0
 AutoTravel.ExtremeSlopePenalty = 30.0
 
-# Hoehengewinn wird ueber ein Fenster betrachtet.
-# Dadurch erkennt der Bot einen langen Berganstieg,
-# auch wenn einzelne PathGenerator-Segmente relativ flach sind.
+# Hoehengewinn wird ueber dieses Fenster bewertet.
 AutoTravel.ElevationWindow = 40.0
 
 AutoTravel.ElevationGainStart = 8.0
@@ -183,8 +169,7 @@ AutoTravel.ElevationPenalty = 5.0
 AutoTravel.StrongElevationPenalty = 20.0
 AutoTravel.ExtremeElevationPenalty = 60.0
 
-# Unnatuerlich starke Richtungswechsel werden ebenfalls
-# leicht bestraft.
+# Unnatuerliche starke Richtungswechsel.
 AutoTravel.TurnPenaltyStart = 35.0
 AutoTravel.TurnPenaltyStrong = 70.0
 AutoTravel.TurnPenaltyExtreme = 110.0
@@ -193,9 +178,50 @@ AutoTravel.TurnPenalty = 2.0
 AutoTravel.StrongTurnPenalty = 5.0
 AutoTravel.ExtremeTurnPenalty = 12.0
 
-# Ein unvollstaendiger Pfad darf nur dann gewinnen,
-# wenn es keinen vernuenftigen vollstaendigen Pfad gibt.
+# Unvollstaendige Wege werden nur als Notloesung akzeptiert.
 AutoTravel.IncompletePathPenalty = 10000.0
+
+
+########################################
+# Contour / Bergumfahrung
+########################################
+
+# Wenn 1, sucht AutoTravel bei einem erkannten Berganstieg
+# aktiv nach einem Weg links und rechts um den Berg.
+AutoTravel.ContourProbing = 1
+
+# Ab diesem nachhaltigen Hoehengewinn wird ein Pfad als
+# moeglicher Berganstieg betrachtet.
+AutoTravel.ContourTriggerElevation = 15.0
+
+# Durchschnittliche Steigung, ab der Contour-Probing aktiviert wird.
+AutoTravel.ContourTriggerSlope = 0.20
+
+# Abstand der ersten beiden Suchrouten links/rechts.
+#
+# Narrow:
+#   ca. 100 Yards neben der direkten Route
+#
+# Wide:
+#   ca. 180 Yards neben der direkten Route
+AutoTravel.ContourNarrowOffset = 100.0
+AutoTravel.ContourWideOffset = 180.0
+
+# Position der beiden Konturpunkte entlang A -> B.
+#
+# Beispiel:
+#
+# A ------------------------------ B
+#       ^              ^
+#      35%            65%
+AutoTravel.ContourFirstProgress = 0.35
+AutoTravel.ContourSecondProgress = 0.65
+
+# Ein Contour-Pfad darf maximal so viel laenger sein als
+# die direkte Luftstrecke, bevor er verworfen wird.
+#
+# 2.5 = maximal 250% der direkten Distanz.
+AutoTravel.ContourMaxDistanceFactor = 2.5
 
 ########################################
 # Reiseknoten von mod-playerbots

@@ -98,6 +98,14 @@ void AutoTravelMgr::LoadConfig()
     ATConf.resumeAfterDeath  = sConfigMgr->GetOption<bool>  ("AutoTravel.ResumeAfterDeath", false);
     ATConf.takeClientControl = sConfigMgr->GetOption<bool>  ("AutoTravel.TakeClientControl", true);
     ATConf.chunkPoints       = sConfigMgr->GetOption<uint32>("AutoTravel.ChunkPoints", 12);
+    ATConf.contourProbing = sConfigMgr->GetOption<bool>("AutoTravel.ContourProbing", true);
+    ATConf.contourTriggerElevation = sConfigMgr->GetOption<float>("AutoTravel.ContourTriggerElevation", 15.0f);
+    ATConf.contourTriggerSlope = sConfigMgr->GetOption<float>("AutoTravel.ContourTriggerSlope", 0.20f);
+    ATConf.contourNarrowOffset = sConfigMgr->GetOption<float>("AutoTravel.ContourNarrowOffset", 100.0f);
+    ATConf.contourWideOffset = sConfigMgr->GetOption<float>("AutoTravel.ContourWideOffset", 180.0f);
+    ATConf.contourFirstProgress = sConfigMgr->GetOption<float>("AutoTravel.ContourFirstProgress", 0.35f);
+    ATConf.contourSecondProgress = sConfigMgr->GetOption<float>("AutoTravel.ContourSecondProgress", 0.65f);
+    ATConf.contourMaxDistanceFactor = sConfigMgr->GetOption<float>("AutoTravel.ContourMaxDistanceFactor", 2.5f);
     ATConf.naturalPathing    = sConfigMgr->GetOption<bool>("AutoTravel.NaturalPathing", true);
     ATConf.slopeStart        = sConfigMgr->GetOption<float>("AutoTravel.SlopeStart", 0.15f);
     ATConf.slopeStrong       = sConfigMgr->GetOption<float>("AutoTravel.SlopeStrong", 0.25f);
@@ -1345,45 +1353,696 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
 
 // Ein einzelner Pathfinding-Versuch auf einen konkreten Punkt.
-bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z, bool straight,
-                            Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const
+bool AutoTravelMgr::TryPath(
+    Player* player,
+    float x,
+    float y,
+    float z,
+    bool straight,
+    Movement::PointsArray& out,
+    uint32& typeOut,
+    bool& incomplete) const
+{
+    return TryPathBetween(
+        player,
+        player->GetPositionX(),
+        player->GetPositionY(),
+        player->GetPositionZ(),
+        x,
+        y,
+        z,
+        straight,
+        out,
+        typeOut,
+        incomplete);
+}
+
+bool AutoTravelMgr::TryPathBetween(
+    Player* player,
+    float startX,
+    float startY,
+    float startZ,
+    float destX,
+    float destY,
+    float destZ,
+    bool straight,
+    Movement::PointsArray& out,
+    uint32& typeOut,
+    bool& incomplete) const
 {
     PathGenerator gen(player);
     gen.SetUseStraightPath(straight);
 
-    bool built = gen.CalculatePath(x, y, z, false);
+    bool built = gen.CalculatePath(
+        startX,
+        startY,
+        startZ,
+        destX,
+        destY,
+        destZ,
+        false);
+
     typeOut = uint32(gen.GetPathType());
+    out = gen.GetPath();
 
-    out = gen.GetPath();          // auch bei Misserfolg, fuer die Diagnose
-
-    if (!built || gen.GetPath().size() < 2)
+    if (!built || out.size() < 2)
         return false;
 
-    // Kein Polygon fuer Start oder Ziel gefunden.
     if (typeOut & PATHFIND_NOPATH)
         return false;
 
-    // Der Core konnte das NavMesh gar nicht benutzen (fehlende mmap-Kachel).
-    // Das Ergebnis waere eine Luftlinie quer durch Berge -- ablehnen.
     if (typeOut & PATHFIND_NOT_USING_PATH)
         return false;
 
-    // Reine Geradeauslinie ohne NavMesh nur ueber sehr kurze Distanz zulassen.
-    if ((typeOut & PATHFIND_SHORTCUT) && !(typeOut & PATHFIND_NORMAL))
+    if ((typeOut & PATHFIND_SHORTCUT) &&
+        !(typeOut & PATHFIND_NORMAL))
     {
-        if (player->GetExactDist2d(x, y) > 40.0f)
+        float dx = destX - startX;
+        float dy = destY - startY;
+
+        float distance =
+            std::sqrt(dx * dx + dy * dy);
+
+        if (distance > 40.0f)
             return false;
     }
 
-    // Der Endpunkt muss auf festem Boden liegen. Sonst laeuft der Charakter
-    // ins Leere und "erreicht" sein Ziel unter der Welt.
-    G3D::Vector3 const& last = gen.GetPath().back();
+    G3D::Vector3 const& last = out.back();
+
     Map* map = player->GetMap();
-    float ground = map->GetHeight(player->GetPhaseMask(), last.x, last.y, last.z + 2.0f);
-    if (ground <= INVALID_HEIGHT || std::fabs(ground - last.z) > 5.0f)
+
+    float ground =
+        map->GetHeight(
+            player->GetPhaseMask(),
+            last.x,
+            last.y,
+            last.z + 2.0f);
+
+    if (ground <= INVALID_HEIGHT ||
+        std::fabs(ground - last.z) > 5.0f)
+    {
+        return false;
+    }
+
+    incomplete =
+        (typeOut & PATHFIND_INCOMPLETE) != 0;
+
+    return true;
+}
+
+float AutoTravelMgr::PathDistance(
+    Movement::PointsArray const& path) const
+{
+    if (path.size() < 2)
+        return 0.0f;
+
+    float distance = 0.0f;
+
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        float dx =
+            path[i].x - path[i - 1].x;
+
+        float dy =
+            path[i].y - path[i - 1].y;
+
+        distance +=
+            std::sqrt(dx * dx + dy * dy);
+    }
+
+    return distance;
+}
+
+float AutoTravelMgr::ScoreNaturalPath(
+    Player* /*player*/,
+    Movement::PointsArray const& path,
+    bool incomplete) const
+{
+    if (path.size() < 2)
+        return 1.0e30f;
+
+    float score = PathDistance(path);
+
+    if (incomplete)
+        score += ATConf.incompletePathPenalty;
+
+    /*
+     * Individual slope penalty.
+     */
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        float dx =
+            path[i].x - path[i - 1].x;
+
+        float dy =
+            path[i].y - path[i - 1].y;
+
+        float dz =
+            std::fabs(
+                path[i].z - path[i - 1].z);
+
+        float horizontal =
+            std::sqrt(dx * dx + dy * dy);
+
+        if (horizontal < 0.01f)
+            continue;
+
+        float slope =
+            dz / horizontal;
+
+        if (slope > ATConf.slopeStart)
+        {
+            float excess =
+                slope - ATConf.slopeStart;
+
+            score +=
+                horizontal *
+                excess *
+                ATConf.slopePenalty;
+        }
+
+        if (slope > ATConf.slopeStrong)
+        {
+            float excess =
+                slope - ATConf.slopeStrong;
+
+            score +=
+                horizontal *
+                excess *
+                ATConf.steepSlopePenalty;
+        }
+
+        if (slope > ATConf.slopeExtreme)
+        {
+            float excess =
+                slope - ATConf.slopeExtreme;
+
+            score +=
+                horizontal *
+                excess *
+                ATConf.extremeSlopePenalty;
+        }
+    }
+
+    /*
+     * Sustained uphill movement.
+     *
+     * Unlike a simple slope calculation this catches a mountain
+     * consisting of many individually reasonable NavMesh segments.
+     */
+    float window =
+        std::max(5.0f, ATConf.elevationWindow);
+
+    for (size_t start = 0;
+         start < path.size();
+         ++start)
+    {
+        float travelled = 0.0f;
+        size_t end = start + 1;
+
+        float startZ = path[start].z;
+        float endZ = startZ;
+
+        while (end < path.size() &&
+               travelled < window)
+        {
+            float dx =
+                path[end].x -
+                path[end - 1].x;
+
+            float dy =
+                path[end].y -
+                path[end - 1].y;
+
+            travelled +=
+                std::sqrt(dx * dx + dy * dy);
+
+            endZ = path[end].z;
+
+            ++end;
+        }
+
+        if (travelled < 5.0f)
+            continue;
+
+        /*
+         * Only sustained uphill travel is a mountain climb.
+         * A downhill route should not be punished simply because
+         * the terrain contains a large height difference.
+         */
+        float gain = endZ - startZ;
+
+        if (gain <= ATConf.elevationGainStart)
+            continue;
+
+        float averageSlope =
+            gain / travelled;
+
+        if (averageSlope > ATConf.slopeStart)
+        {
+            score +=
+                travelled *
+                (gain - ATConf.elevationGainStart) *
+                ATConf.elevationPenalty;
+        }
+
+        if (gain > ATConf.elevationGainStrong)
+        {
+            score +=
+                travelled *
+                (gain - ATConf.elevationGainStrong) *
+                ATConf.strongElevationPenalty;
+        }
+
+        if (gain > ATConf.elevationGainExtreme)
+        {
+            score +=
+                travelled *
+                (gain - ATConf.elevationGainExtreme) *
+                ATConf.extremeElevationPenalty;
+        }
+    }
+
+    /*
+     * Sharp-turn penalty.
+     */
+    if (path.size() >= 3)
+    {
+        for (size_t i = 1;
+             i + 1 < path.size();
+             ++i)
+        {
+            float ax =
+                path[i].x -
+                path[i - 1].x;
+
+            float ay =
+                path[i].y -
+                path[i - 1].y;
+
+            float bx =
+                path[i + 1].x -
+                path[i].x;
+
+            float by =
+                path[i + 1].y -
+                path[i].y;
+
+            float lenA =
+                std::sqrt(ax * ax + ay * ay);
+
+            float lenB =
+                std::sqrt(bx * bx + by * by);
+
+            if (lenA < 0.01f ||
+                lenB < 0.01f)
+            {
+                continue;
+            }
+
+            float dot =
+                (ax * bx + ay * by) /
+                (lenA * lenB);
+
+            dot =
+                std::max(
+                    -1.0f,
+                    std::min(1.0f, dot));
+
+            float angle =
+                std::acos(dot) *
+                180.0f /
+                3.14159265358979323846f;
+
+            if (angle > ATConf.turnPenaltyStart)
+            {
+                score +=
+                    (angle -
+                     ATConf.turnPenaltyStart) *
+                    ATConf.turnPenalty;
+            }
+
+            if (angle > ATConf.turnPenaltyStrong)
+            {
+                score +=
+                    (angle -
+                     ATConf.turnPenaltyStrong) *
+                    ATConf.strongTurnPenalty;
+            }
+
+            if (angle > ATConf.turnPenaltyExtreme)
+            {
+                score +=
+                    (angle -
+                     ATConf.turnPenaltyExtreme) *
+                    ATConf.extremeTurnPenalty;
+            }
+        }
+    }
+
+    return score;
+}
+
+bool AutoTravelMgr::HasMountainClimb(
+    Movement::PointsArray const& path) const
+{
+    if (path.size() < 2)
         return false;
 
-    incomplete = (typeOut & PATHFIND_INCOMPLETE) != 0;
+    float window =
+        std::max(5.0f, ATConf.elevationWindow);
+
+    for (size_t start = 0;
+         start < path.size();
+         ++start)
+    {
+        float travelled = 0.0f;
+        size_t end = start + 1;
+
+        float startZ = path[start].z;
+        float endZ = startZ;
+
+        while (end < path.size() &&
+               travelled < window)
+        {
+            float dx =
+                path[end].x -
+                path[end - 1].x;
+
+            float dy =
+                path[end].y -
+                path[end - 1].y;
+
+            travelled +=
+                std::sqrt(dx * dx + dy * dy);
+
+            endZ = path[end].z;
+
+            ++end;
+        }
+
+        if (travelled < 10.0f)
+            continue;
+
+        float gain = endZ - startZ;
+
+        if (gain < ATConf.contourTriggerElevation)
+            continue;
+
+        float slope = gain / travelled;
+
+        if (slope >= ATConf.contourTriggerSlope)
+            return true;
+    }
+
+    return false;
+}
+
+bool AutoTravelMgr::BuildContourCandidate(
+    Player* player,
+    ATSession const& s,
+    float offset,
+    bool left,
+    Movement::PointsArray& out,
+    uint32& typeOut,
+    bool& incomplete,
+    float& score) const
+{
+    float startX = player->GetPositionX();
+    float startY = player->GetPositionY();
+    float startZ = player->GetPositionZ();
+
+    float dx = s.destX - startX;
+    float dy = s.destY - startY;
+
+    float distance =
+        std::sqrt(dx * dx + dy * dy);
+
+    if (distance < 20.0f)
+        return false;
+
+    /*
+     * Direction from A -> B.
+     */
+    float dirX = dx / distance;
+    float dirY = dy / distance;
+
+    /*
+     * Perpendicular vector.
+     *
+     * Left:
+     *     (-dirY, dirX)
+     *
+     * Right:
+     *     ( dirY,-dirX)
+     */
+    float sideX;
+    float sideY;
+
+    if (left)
+    {
+        sideX = -dirY;
+        sideY =  dirX;
+    }
+    else
+    {
+        sideX =  dirY;
+        sideY = -dirX;
+    }
+
+    float p1Progress =
+        std::max(
+            0.20f,
+            std::min(
+                0.80f,
+                ATConf.contourFirstProgress));
+
+    float p2Progress =
+        std::max(
+            p1Progress + 0.10f,
+            std::min(
+                0.90f,
+                ATConf.contourSecondProgress));
+
+    /*
+     * Two points on the same side of the route.
+     *
+     * This is significantly better than testing one side point:
+     *
+     *             mountain
+     *               /\
+     *              /  \
+     * A ----------P1  P2---------- B
+     *
+     * The path can now follow the side of the terrain instead
+     * of simply touching it once.
+     */
+    float p1X =
+        startX +
+        dx * p1Progress +
+        sideX * offset;
+
+    float p1Y =
+        startY +
+        dy * p1Progress +
+        sideY * offset;
+
+    float p2X =
+        startX +
+        dx * p2Progress +
+        sideX * offset;
+
+    float p2Y =
+        startY +
+        dy * p2Progress +
+        sideY * offset;
+
+    Map* map = player->GetMap();
+    uint32 phase = player->GetPhaseMask();
+
+    float p1Z =
+        BestGroundZ(player, p1X, p1Y);
+
+    float p2Z =
+        BestGroundZ(player, p2X, p2Y);
+
+    if (p1Z <= INVALID_HEIGHT ||
+        p2Z <= INVALID_HEIGHT)
+    {
+        return false;
+    }
+
+    /*
+     * Test both smooth and corner paths.
+     */
+    float bestScore = 1.0e30f;
+
+    Movement::PointsArray best;
+    uint32 bestType = PATHFIND_NOPATH;
+    bool bestIncomplete = false;
+
+    for (uint8 pass = 0; pass < 2; ++pass)
+    {
+        bool straight = (pass == 1);
+
+        Movement::PointsArray a;
+        Movement::PointsArray b;
+        Movement::PointsArray c;
+
+        uint32 typeA = PATHFIND_NOPATH;
+        uint32 typeB = PATHFIND_NOPATH;
+        uint32 typeC = PATHFIND_NOPATH;
+
+        bool incompleteA = false;
+        bool incompleteB = false;
+        bool incompleteC = false;
+
+        /*
+         * A -> P1
+         */
+        if (!TryPathBetween(
+                player,
+                startX,
+                startY,
+                startZ,
+                p1X,
+                p1Y,
+                p1Z,
+                straight,
+                a,
+                typeA,
+                incompleteA))
+        {
+            continue;
+        }
+
+        /*
+         * P1 -> P2
+         */
+        if (!TryPathBetween(
+                player,
+                p1X,
+                p1Y,
+                p1Z,
+                p2X,
+                p2Y,
+                p2Z,
+                straight,
+                b,
+                typeB,
+                incompleteB))
+        {
+            continue;
+        }
+
+        /*
+         * P2 -> B
+         */
+        if (!TryPathBetween(
+                player,
+                p2X,
+                p2Y,
+                p2Z,
+                s.destX,
+                s.destY,
+                s.destZ,
+                straight,
+                c,
+                typeC,
+                incompleteC))
+        {
+            continue;
+        }
+
+        Movement::PointsArray combined;
+
+        /*
+         * First segment includes its starting point.
+         */
+        for (auto const& p : a)
+            combined.push_back(p);
+
+        /*
+         * Don't duplicate P1.
+         */
+        for (size_t i = 1; i < b.size(); ++i)
+            combined.push_back(b[i]);
+
+        /*
+         * Don't duplicate P2.
+         */
+        for (size_t i = 1; i < c.size(); ++i)
+            combined.push_back(c[i]);
+
+        if (combined.size() < 2)
+            continue;
+
+        bool combinedIncomplete =
+            incompleteA ||
+            incompleteB ||
+            incompleteC;
+
+        float candidateScore =
+            ATConf.naturalPathing
+                ? ScoreNaturalPath(
+                      player,
+                      combined,
+                      combinedIncomplete)
+                : PathDistance(combined);
+
+        /*
+         * A contour route should not become a ridiculous detour.
+         */
+        float directDistance =
+            std::sqrt(dx * dx + dy * dy);
+
+        float candidateDistance =
+            PathDistance(combined);
+
+        if (candidateDistance >
+            directDistance *
+            ATConf.contourMaxDistanceFactor)
+        {
+            continue;
+        }
+
+        /*
+         * Slight preference for smooth path representation.
+         */
+        if (!straight)
+            candidateScore -= 0.01f;
+
+        /*
+         * Don't allow incomplete contour paths to win against
+         * complete direct paths.
+         */
+        if (combinedIncomplete)
+            candidateScore +=
+                ATConf.incompletePathPenalty;
+
+        if (candidateScore < bestScore)
+        {
+            bestScore = candidateScore;
+            best = combined;
+
+            bestType =
+                typeA |
+                typeB |
+                typeC;
+
+            bestIncomplete =
+                combinedIncomplete;
+        }
+    }
+
+    if (best.empty())
+        return false;
+
+    out = best;
+    typeOut = bestType;
+    incomplete = bestIncomplete;
+    score = bestScore;
+
     return true;
 }
 
@@ -1634,19 +2293,29 @@ float AutoTravelMgr::ScoreNaturalPath(
 }
 
 
-bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
+bool AutoTravelMgr::CalculatePath(
+    Player* player,
+    ATSession& s)
 {
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
     float pz = player->GetPositionZ();
 
+    /*
+     * -------------------------------------------------------------
+     * Height candidates at the actual destination
+     * -------------------------------------------------------------
+     */
     float zc[10];
     uint8 zn = 0;
 
     auto addZ = [&](float z)
     {
-        if (z <= INVALID_HEIGHT || zn >= 10)
+        if (z <= INVALID_HEIGHT ||
+            zn >= 10)
+        {
             return;
+        }
 
         for (uint8 i = 0; i < zn; ++i)
         {
@@ -1658,37 +2327,73 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     };
 
     addZ(s.destZ);
-    addZ(BestGroundZ(player, s.destX, s.destY));
-    addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
-    addZ(map->GetHeight(
-        phase, s.destX, s.destY,
-        pz + 5.0f, true, 400.0f));
 
-    addZ(map->GetHeight(
-        phase, s.destX, s.destY,
-        pz + 40.0f, true, 400.0f));
+    addZ(
+        BestGroundZ(
+            player,
+            s.destX,
+            s.destY));
 
-    addZ(map->GetHeight(
-        phase, s.destX, s.destY,
-        pz + 120.0f, true, 400.0f));
+    addZ(
+        map->GetHeight(
+            phase,
+            s.destX,
+            s.destY,
+            MAX_HEIGHT));
 
-    addZ(map->GetHeight(
-        phase, s.destX, s.destY,
-        pz + 300.0f, true, 400.0f));
+    addZ(
+        map->GetHeight(
+            phase,
+            s.destX,
+            s.destY,
+            pz + 5.0f,
+            true,
+            400.0f));
 
-    Movement::PointsArray bestPath;
-    uint32 bestType = PATHFIND_NOPATH;
-    bool bestIncomplete = false;
-    float bestScore = 1.0e30f;
-    float bestZ = s.destZ;
+    addZ(
+        map->GetHeight(
+            phase,
+            s.destX,
+            s.destY,
+            pz + 40.0f,
+            true,
+            400.0f));
 
-    uint32 lastType = PATHFIND_NOPATH;
+    addZ(
+        map->GetHeight(
+            phase,
+            s.destX,
+            s.destY,
+            pz + 120.0f,
+            true,
+            400.0f));
+
+    addZ(
+        map->GetHeight(
+            phase,
+            s.destX,
+            s.destY,
+            pz + 300.0f,
+            true,
+            400.0f));
 
     /*
-     * Evaluate every height candidate and both path representations.
+     * -------------------------------------------------------------
+     * Evaluate all direct candidates.
      *
-     * We deliberately DON'T return after the first valid path.
+     * IMPORTANT:
+     *
+     * The old code returned immediately after the first valid
+     * TryPath(). We deliberately do NOT do that anymore.
+     * -------------------------------------------------------------
      */
+    Movement::PointsArray bestPath;
+
+    uint32 bestType = PATHFIND_NOPATH;
+    bool bestIncomplete = false;
+
+    float bestScore = 1.0e30f;
+
     for (uint8 pass = 0; pass < 2; ++pass)
     {
         bool straight = (pass == 1);
@@ -1696,7 +2401,10 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         for (uint8 i = 0; i < zn; ++i)
         {
             Movement::PointsArray candidate;
-            uint32 type = PATHFIND_NOPATH;
+
+            uint32 type =
+                PATHFIND_NOPATH;
+
             bool incomplete = false;
 
             if (!TryPath(
@@ -1712,47 +2420,16 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 continue;
             }
 
-            lastType = type;
+            float score =
+                ATConf.naturalPathing
+                    ? ScoreNaturalPath(
+                          player,
+                          candidate,
+                          incomplete)
+                    : PathDistance(candidate);
 
-            float score;
-
-            if (ATConf.naturalPathing)
-            {
-                score = ScoreNaturalPath(
-                    player,
-                    candidate,
-                    incomplete);
-            }
-            else
-            {
-                score = PathDistance(candidate);
-
-                if (incomplete)
-                    score += ATConf.incompletePathPenalty;
-            }
-
-            /*
-             * Smooth paths are preferred when everything else is
-             * roughly equal.
-             */
             if (!straight)
                 score -= 0.01f;
-
-            char debug[256];
-
-            std::snprintf(
-                debug,
-                sizeof(debug),
-                "Kandidat: %s Z=%.2f distance=%.1f score=%.1f "
-                "incomplete=%u points=%u",
-                straight ? "Eckpunkte" : "geglaettet",
-                zc[i],
-                PathDistance(candidate),
-                score,
-                incomplete ? 1u : 0u,
-                uint32(candidate.size()));
-
-            Dbg(player, s, debug);
 
             if (score < bestScore)
             {
@@ -1760,138 +2437,141 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 bestPath = candidate;
                 bestType = type;
                 bestIncomplete = incomplete;
-                bestZ = zc[i];
+                s.destZ = zc[i];
+            }
+
+            char b[256];
+
+            std::snprintf(
+                b,
+                sizeof(b),
+                "Direktkandidat %s: Z=%.2f "
+                "Distanz=%.1f Score=%.1f "
+                "Incomplete=%u Punkte=%u",
+                straight
+                    ? "Eckpunkte"
+                    : "Geglaettet",
+                zc[i],
+                PathDistance(candidate),
+                score,
+                incomplete ? 1u : 0u,
+                uint32(candidate.size()));
+
+            Dbg(player, s, b);
+        }
+    }
+
+    /*
+     * -------------------------------------------------------------
+     * CONTOUR PROBING
+     * -------------------------------------------------------------
+     *
+     * Only activate this expensive search when the chosen route
+     * actually looks like a mountain climb.
+     */
+    if (ATConf.contourProbing &&
+        !bestPath.empty() &&
+        HasMountainClimb(bestPath))
+    {
+        Dbg(
+            player,
+            s,
+            "Berganstieg erkannt - "
+            "Contour-Probing wird gestartet.");
+
+        /*
+         * Four candidates:
+         *
+         *   LEFT  + narrow
+         *   LEFT  + wide
+         *   RIGHT + narrow
+         *   RIGHT + wide
+         *
+         * Each candidate contains TWO intermediate points.
+         *
+         * Therefore:
+         *
+         *   4 routes × 2 points = 8 probe points.
+         */
+        float offsets[2] =
+        {
+            ATConf.contourNarrowOffset,
+            ATConf.contourWideOffset
+        };
+
+        for (uint8 side = 0;
+             side < 2;
+             ++side)
+        {
+            bool left = (side == 0);
+
+            for (uint8 oi = 0;
+                 oi < 2;
+                 ++oi)
+            {
+                float contourScore = 1.0e30f;
+
+                Movement::PointsArray contourPath;
+
+                uint32 contourType =
+                    PATHFIND_NOPATH;
+
+                bool contourIncomplete = false;
+
+                if (!BuildContourCandidate(
+                        player,
+                        s,
+                        offsets[oi],
+                        left,
+                        contourPath,
+                        contourType,
+                        contourIncomplete,
+                        contourScore))
+                {
+                    continue;
+                }
+
+                char b[256];
+
+                std::snprintf(
+                    b,
+                    sizeof(b),
+                    "Contour %s %.0f yd: "
+                    "Distanz=%.1f Score=%.1f "
+                    "Punkte=%u",
+                    left ? "links" : "rechts",
+                    offsets[oi],
+                    PathDistance(contourPath),
+                    contourScore,
+                    uint32(contourPath.size()));
+
+                Dbg(player, s, b);
+
+                if (contourScore < bestScore)
+                {
+                    bestScore = contourScore;
+                    bestPath = contourPath;
+                    bestType = contourType;
+                    bestIncomplete = contourIncomplete;
+
+                    Dbg(
+                        player,
+                        s,
+                        left
+                            ? "Contour-Pfad links gewinnt."
+                            : "Contour-Pfad rechts gewinnt.");
+                }
             }
         }
     }
 
     /*
      * -------------------------------------------------------------
-     * If no direct candidate worked, try nearby destinations.
+     * Normal path / contour path found.
      * -------------------------------------------------------------
-     *
-     * This remains a fallback. We don't want the bot to move the
-     * destination just because another route has a better score.
      */
-    if (bestPath.empty())
-    {
-        static float const RINGS[2] =
-        {
-            12.0f,
-            30.0f
-        };
-
-        for (uint8 r = 0; r < 2; ++r)
-        {
-            for (uint8 a = 0; a < 8; ++a)
-            {
-                float ang =
-                    float(a) *
-                    (6.28318531f / 8.0f);
-
-                float x =
-                    s.destX +
-                    std::cos(ang) * RINGS[r];
-
-                float y =
-                    s.destY +
-                    std::sin(ang) * RINGS[r];
-
-                float z =
-                    map->GetHeight(
-                        phase,
-                        x,
-                        y,
-                        MAX_HEIGHT);
-
-                if (z <= INVALID_HEIGHT)
-                    continue;
-
-                for (uint8 pass = 0; pass < 2; ++pass)
-                {
-                    bool straight = (pass == 1);
-
-                    Movement::PointsArray candidate;
-                    uint32 type = PATHFIND_NOPATH;
-                    bool incomplete = false;
-
-                    if (!TryPath(
-                            player,
-                            x,
-                            y,
-                            z,
-                            straight,
-                            candidate,
-                            type,
-                            incomplete))
-                    {
-                        continue;
-                    }
-
-                    float score =
-                        ATConf.naturalPathing
-                            ? ScoreNaturalPath(
-                                  player,
-                                  candidate,
-                                  incomplete)
-                            : PathDistance(candidate);
-
-                    /*
-                     * Moving the actual destination is inherently
-                     * undesirable, so give these fallback paths a
-                     * substantial additional cost.
-                     */
-                    score += RINGS[r] * 100.0f;
-
-                    if (incomplete)
-                        score += ATConf.incompletePathPenalty;
-
-                    if (score < bestScore)
-                    {
-                        bestScore = score;
-                        bestPath = candidate;
-                        bestType = type;
-                        bestIncomplete = incomplete;
-                        bestZ = z;
-
-                        s.destX = x;
-                        s.destY = y;
-                        bestZ = z;
-
-                        char b[192];
-
-                        std::snprintf(
-                            b,
-                            sizeof(b),
-                            "Ziel um %.0f yd versetzt; "
-                            "natuerlicher Pfad score=%.1f.",
-                            RINGS[r],
-                            score);
-
-                        Dbg(player, s, b);
-                    }
-                }
-            }
-        }
-    }
-
     if (!bestPath.empty())
     {
-        if (std::fabs(bestZ - s.destZ) > 1.5f)
-        {
-            char b[160];
-
-            std::snprintf(
-                b,
-                sizeof(b),
-                "Zielhoehe korrigiert: %.2f -> %.2f",
-                s.destZ,
-                bestZ);
-
-            Dbg(player, s, b);
-        }
-
-        s.destZ = bestZ;
         s.lastPathType = bestType;
         s.path = bestPath;
         s.idx = 1;
@@ -1902,8 +2582,9 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         std::snprintf(
             b,
             sizeof(b),
-            "Bester Pfad: score=%.1f distance=%.1f "
-            "type=0x%X (%s) points=%u incomplete=%u",
+            "Bester Pfad: Score=%.1f "
+            "Distanz=%.1f Type=0x%X (%s) "
+            "Punkte=%u Incomplete=%u",
             bestScore,
             PathDistance(bestPath),
             bestType,
@@ -1916,7 +2597,112 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         return true;
     }
 
-    s.lastPathType = lastType;
+    /*
+     * -------------------------------------------------------------
+     * Original local fallback.
+     *
+     * This is only used if the actual destination isn't reachable.
+     * It is NOT part of contour probing.
+     * -------------------------------------------------------------
+     */
+    static float const RINGS[2] =
+    {
+        12.0f,
+        30.0f
+    };
+
+    Movement::PointsArray pts;
+
+    uint32 type = PATHFIND_NOPATH;
+    bool incomplete = false;
+
+    for (uint8 r = 0; r < 2; ++r)
+    {
+        for (uint8 a = 0; a < 8; ++a)
+        {
+            float ang =
+                float(a) *
+                (6.28318531f / 8.0f);
+
+            float x =
+                s.destX +
+                std::cos(ang) *
+                RINGS[r];
+
+            float y =
+                s.destY +
+                std::sin(ang) *
+                RINGS[r];
+
+            float z =
+                BestGroundZ(
+                    player,
+                    x,
+                    y);
+
+            if (z <= INVALID_HEIGHT)
+                continue;
+
+            Movement::PointsArray candidate;
+            uint32 candidateType =
+                PATHFIND_NOPATH;
+
+            bool candidateIncomplete =
+                false;
+
+            bool success =
+                TryPath(
+                    player,
+                    x,
+                    y,
+                    z,
+                    false,
+                    candidate,
+                    candidateType,
+                    candidateIncomplete);
+
+            if (!success)
+            {
+                success =
+                    TryPath(
+                        player,
+                        x,
+                        y,
+                        z,
+                        true,
+                        candidate,
+                        candidateType,
+                        candidateIncomplete);
+            }
+
+            if (!success)
+                continue;
+
+            char b[192];
+
+            std::snprintf(
+                b,
+                sizeof(b),
+                "Ziel um %.0f yd versetzt "
+                "(urspruengliche Stelle nicht begehbar).",
+                RINGS[r]);
+
+            Dbg(player, s, b);
+
+            s.destX = x;
+            s.destY = y;
+            s.destZ = z;
+
+            s.lastPathType = candidateType;
+            s.path = candidate;
+            s.idx = 1;
+            s.pathIncomplete = candidateIncomplete;
+
+            return true;
+        }
+    }
+
+    s.lastPathType = type;
 
     char buf[256];
 
@@ -1926,8 +2712,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         "Kein Pfad. Letzter Typ 0x%X (%s), "
         "%u Hoehen und 16 Nachbarpunkte geprueft. "
         "Ziel %.1f / %.1f / %.1f",
-        lastType,
-        PathTypeName(lastType).c_str(),
+        type,
+        PathTypeName(type).c_str(),
         zn,
         s.destX,
         s.destY,

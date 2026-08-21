@@ -4,7 +4,6 @@
 #include "Common.h"
 #include "ObjectGuid.h"
 #include "MoveSplineInitArgs.h"
-
 #include <string>
 #include <cstddef>
 #include <unordered_map>
@@ -27,12 +26,10 @@ enum ATState : uint8
 enum ATLegFlags : uint8
 {
     AT_LEG_NORMAL  = 0,
-    AT_LEG_FLIGHT  = 1,    // Carbonite-Abschnitt "F": Flugmeister
-    AT_LEG_SPECIAL = 2,    // TravelNode-Verbindung, die nicht gelaufen wird
+    AT_LEG_FLIGHT  = 1,
+    AT_LEG_SPECIAL = 2,
 };
 
-// Reiseknoten aus der Playerbot-Datenbank (playerbots_travelnode).
-// Die Koordinaten sind bereits Weltkoordinaten - keine Umrechnung noetig.
 struct ATNode
 {
     uint32 id = 0;
@@ -48,9 +45,6 @@ struct ATNodeLink
     float  cost = 0.0f;
 };
 
-// Ein Stuetzpunkt der Carbonite-Route. Zwischen zwei Stuetzpunkten sucht das
-// NavMesh den tatsaechlichen Weg -- Carbonite gibt nur die grobe Abfolge vor
-// (Zonenuebergang, Torbogen, Bruecke, Flugpunkt, Ziel).
 struct ATLeg
 {
     uint32 uiMapId = 0;
@@ -60,9 +54,8 @@ struct ATLeg
     float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
     bool   resolved = false;
     std::string name;
-
-    uint8  linkType = 0;       // Art der Verbindung zum NAECHSTEN Punkt
-    std::string nextName;      // Name des naechsten Punktes
+    uint8  linkType = 0;
+    std::string nextName;
 };
 
 char const* ATStateName(ATState s);
@@ -102,40 +95,97 @@ struct ATConfig
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;
 
-    // Natural pathing.
-    // The pathfinder still decides what is walkable; these values only
-    // influence which valid path is preferred.
-    bool  naturalPathing            = true;
-    float slopeStart                = 0.15f;
-    float slopeStrong               = 0.25f;
-    float slopeExtreme              = 0.35f;
-    float slopePenalty              = 5.0f;
-    float steepSlopePenalty         = 10.0f;
-    float extremeSlopePenalty       = 30.0f;
+    /*
+     * Natural navigation.
+     *
+     * Distance remains the base cost. Terrain preferences are
+     * additional costs, so a small hill is still preferable to
+     * an enormous detour.
+     */
+    bool  naturalPathing          = true;
 
-    // Penalize sustained elevation changes rather than individual small
-    // steps. This is what makes the bot prefer going around a mountain.
-    float elevationWindow           = 40.0f;
-    float elevationGainStart        = 8.0f;
-    float elevationGainStrong       = 15.0f;
-    float elevationGainExtreme      = 25.0f;
-    float elevationPenalty          = 5.0f;
-    float strongElevationPenalty    = 20.0f;
-    float extremeElevationPenalty   = 60.0f;
+    float slopeStart              = 0.15f;
+    float slopeStrong             = 0.25f;
+    float slopeExtreme            = 0.35f;
 
-    // Penalize unnecessarily sharp turns.
-    float turnPenaltyStart          = 35.0f;
-    float turnPenaltyStrong         = 70.0f;
-    float turnPenaltyExtreme        = 110.0f;
-    float turnPenalty               = 2.0f;
-    float strongTurnPenalty         = 5.0f;
-    float extremeTurnPenalty        = 12.0f;
+    float slopePenalty            = 5.0f;
+    float steepSlopePenalty       = 10.0f;
+    float extremeSlopePenalty     = 30.0f;
 
-    // Incomplete paths are usable as a last resort, but should almost
-    // never beat a complete route.
-    float incompletePathPenalty     = 10000.0f;
+    /*
+     * Sustained elevation change.
+     *
+     * This detects "we are climbing a mountain" rather than
+     * merely detecting individual small slopes.
+     */
+    float elevationWindow         = 40.0f;
+    float elevationGainStart      = 8.0f;
+    float elevationGainStrong     = 15.0f;
+    float elevationGainExtreme    = 25.0f;
 
-    bool  debug             = false;
+    float elevationPenalty        = 5.0f;
+    float strongElevationPenalty  = 20.0f;
+    float extremeElevationPenalty = 60.0f;
+
+    /*
+     * Natural turning.
+     */
+    float turnPenaltyStart        = 35.0f;
+    float turnPenaltyStrong       = 70.0f;
+    float turnPenaltyExtreme      = 110.0f;
+
+    float turnPenalty             = 2.0f;
+    float strongTurnPenalty       = 5.0f;
+    float extremeTurnPenalty      = 12.0f;
+
+    /*
+     * Incomplete paths are only a fallback.
+     */
+    float incompletePathPenalty   = 10000.0f;
+
+    /*
+     * Contour probing.
+     *
+     * When the selected route looks like a mountain climb, the
+     * bot searches for routes around it.
+     *
+     * Two probe points are used per contour candidate:
+     *
+     *       A
+     *        \
+     *         P1
+     *          \
+     *           P2
+     *            \
+     *             B
+     *
+     * Four candidates are tested:
+     *
+     *   left  / narrow
+     *   left  / wide
+     *   right / narrow
+     *   right / wide
+     *
+     * = 8 intermediate probe points in total.
+     */
+    bool  contourProbing             = true;
+
+    float contourTriggerElevation    = 15.0f;
+    float contourTriggerSlope        = 0.20f;
+
+    float contourNarrowOffset        = 100.0f;
+    float contourWideOffset          = 180.0f;
+
+    float contourFirstProgress       = 0.35f;
+    float contourSecondProgress      = 0.65f;
+
+    /*
+     * A contour route is allowed to be longer than the direct route,
+     * but only by this factor before terrain preference is considered.
+     */
+    float contourMaxDistanceFactor   = 2.5f;
+
+    bool  debug                      = false;
 };
 
 extern ATConfig ATConf;
@@ -145,7 +195,7 @@ struct ATSession
     ATState state       = AT_IDLE;
 
     uint32  mapId       = 0;
-    float   destX       = 0.0f;    // aktuelles Etappenziel
+    float   destX       = 0.0f;
     float   destY       = 0.0f;
     float   destZ       = 0.0f;
     std::string destName;
@@ -158,13 +208,11 @@ struct ATSession
     size_t  idx         = 0;
     bool    pathIncomplete = false;
     uint32  lastPathType   = 0;
-
     bool    controlTaken   = false;
     bool    debug          = false;
 
-    // arrival tolerance override (0 = use global)
     float   arrivalOverride = 0.0f;
-    uint32  graceOverride   = 0;      // ms, 0 = Konfigurationswert
+    uint32  graceOverride   = 0;
 
     uint32  underwaterTimer = 0;
     bool    swimming        = false;
@@ -172,11 +220,9 @@ struct ATSession
     float   lastOffMeshZ    = 0.0f;
     uint32  rescueCount     = 0;
 
-    // stuck tracking
     float   lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f;
     uint32  stuckTimer = 0;
 
-    // misc timers
     uint32  repathAttempts = 0;
     uint32  combatTimer    = 0;
     uint32  statusTimer    = 0;
@@ -193,9 +239,9 @@ public:
     void LoadMapAreas();
     void LoadTravelNodes();
 
-    // Route ueber den Playerbot-Knotengraphen. false = kein Weg gefunden.
     bool BuildNodeRoute(Player* player, float dx, float dy, float dz,
                         std::vector<ATLeg>& out, std::string& note) const;
+
     void NodeInfo(Player* player);
     size_t NodeCount() const;
     void Update(uint32 diff);
@@ -203,25 +249,26 @@ public:
     bool Start(Player* player, uint32 uiMapId, float nx, float ny,
                bool hasCalib, float pnx, float pny, std::string const& name);
 
-    // Routenaufbau: erst RouteAdd (ggf. mehrfach), dann RouteStart.
     void RouteAdd(Player* player, bool clearFirst, std::string const& packed);
     bool RouteStart(Player* player, std::string const& name);
+
     void Teleport(Player* player, uint32 uiMapId, float nx, float ny,
-                  bool hasCalib, float pnx, float pny, std::string const& name);
+                  bool hasCalib, float pnx, float pny,
+                  std::string const& name);
+
     void Resolve(Player* player, uint32 uiMapId, float nx, float ny,
                  bool hasCalib, float pnx, float pny);
 
-    // Lernt die Zuordnung Client-Karten-ID -> WorldMapArea-ID anhand der
-    // eigenen Position. Funktioniert auch, wenn das Ziel woanders liegt.
     void LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny);
 
-    // Ausfuehrliche Diagnose zu einem Ziel, ohne loszulaufen.
     void Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
                   bool hasCalib, float pnx, float pny);
+
     void Stop(Player* player, std::string const& reason, bool silent = false);
     void Repath(Player* player);
     void PrintStatus(Player* player);
-    void SetOption(Player* player, std::string const& key, std::string const& value);
+    void SetOption(Player* player, std::string const& key,
+                   std::string const& value);
     void SetDebug(Player* player, bool on);
 
     bool IsActive(Player* player) const;
@@ -234,23 +281,54 @@ private:
     void ApplyNodeRouting(Player* player, ATSession& s);
     bool SetLegTarget(Player* player, ATSession& s);
     bool AdvanceLeg(Player* player, ATSession& s);
+
     bool TryPath(Player* player, float x, float y, float z, bool straight,
-                 Movement::PointsArray& out, uint32& typeOut, bool& incomplete) const;
-    float ScoreNaturalPath(Player* player,
-                        Movement::PointsArray const& path,
-                        bool incomplete) const;
+                 Movement::PointsArray& out, uint32& typeOut,
+                 bool& incomplete) const;
+
+    /*
+     * Same PathGenerator, but with an explicit start position.
+     *
+     * This is what makes contour probing possible:
+     *
+     *   player -> probe1
+     *   probe1 -> probe2
+     *   probe2 -> destination
+     */
+    bool TryPathBetween(Player* player,
+                        float startX, float startY, float startZ,
+                        float destX, float destY, float destZ,
+                        bool straight,
+                        Movement::PointsArray& out,
+                        uint32& typeOut,
+                        bool& incomplete) const;
 
     float PathDistance(Movement::PointsArray const& path) const;
-    // Beste plausible Oberflaeche an x/y -- beruecksichtigt auch Gebaeude,
-    // Bruecken und Stadtboeden, nicht nur das Rohgelaende.
+
+    float ScoreNaturalPath(Player* player,
+                           Movement::PointsArray const& path,
+                           bool incomplete) const;
+
+    bool HasMountainClimb(Movement::PointsArray const& path) const;
+
+    bool BuildContourCandidate(
+        Player* player,
+        ATSession const& s,
+        float offset,
+        bool left,
+        Movement::PointsArray& out,
+        uint32& typeOut,
+        bool& incomplete,
+        float& score) const;
+
     float BestGroundZ(Player* player, float x, float y) const;
 
-    // Wasseroberflaeche an x/y. Rueckgabe false = kein nennenswertes Wasser.
-    bool  WaterSurface(Player* player, float x, float y, float probeZ, float& level) const;
+    bool WaterSurface(Player* player, float x, float y,
+                      float probeZ, float& level) const;
 
-    // Hoehe, auf der sich der Charakter dort bewegen soll: Boden, oder knapp
-    // unter der Wasseroberflaeche, wenn dort geschwommen wird.
-    float TravelZ(Player* player, float x, float y, float groundZ) const;
+    float TravelZ(Player* player, float x, float y,
+                  float groundZ) const;
+
     void LaunchChunk(Player* player, ATSession& s);
     void HaltMovement(Player* player, ATSession& s);
     void ReleaseControl(Player* player, ATSession& s);
@@ -258,27 +336,35 @@ private:
     bool TryMount(Player* player, ATSession& s);
     uint32 PickGroundMount(Player* player) const;
 
-    bool MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
+    bool MapToWorld(Player* player, uint32 uiMapId,
+                    float nx, float ny,
                     bool hasCalib, float pnx, float pny,
-                    float& outX, float& outY, std::string& err) const;
+                    float& outX, float& outY,
+                    std::string& err) const;
 
-    bool ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
+    bool ResolveWorld(Player* player, uint32 uiMapId,
+                      float nx, float ny,
                       bool hasCalib, float pnx, float pny,
-                      float& x, float& y, float& z, uint32& mapId,
+                      float& x, float& y, float& z,
+                      uint32& mapId,
                       std::string& err) const;
 
     void PushStatus(Player* player, ATSession const& s);
     void Msg(Player* player, std::string const& text) const;
-    void Dbg(Player* player, ATSession const& s, std::string const& text) const;
+    void Dbg(Player* player, ATSession const& s,
+             std::string const& text) const;
 
     float ArrivalDist(ATSession const& s) const
     {
-        return s.arrivalOverride > 0.0f ? s.arrivalOverride : ATConf.arrivalDistance;
+        return s.arrivalOverride > 0.0f
+            ? s.arrivalOverride
+            : ATConf.arrivalDistance;
     }
 
     std::unordered_map<ObjectGuid, ATSession> _sessions;
-    std::unordered_map<ObjectGuid, uint32> _tpCooldown;   // Unix-Zeit
+    std::unordered_map<ObjectGuid, uint32> _tpCooldown;
     std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
+
     uint32 _tick = 0;
 };
 
