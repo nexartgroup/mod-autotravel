@@ -186,6 +186,7 @@ struct ATConfig
     float contourMaxDistanceFactor   = 2.5f;
 
     bool  debug                      = false;
+    float terrainStep = 3.0f;
 };
 
 extern ATConfig ATConf;
