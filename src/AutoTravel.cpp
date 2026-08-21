@@ -114,13 +114,13 @@ void AutoTravelMgr::LoadConfig()
     ATConf.slopePenalty      = sConfigMgr->GetOption<float>("AutoTravel.SlopePenalty", 5.0f);
     ATConf.steepSlopePenalty = sConfigMgr->GetOption<float>("AutoTravel.SteepSlopePenalty", 10.0f);
     ATConf.extremeSlopePenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeSlopePenalty", 30.0f);
-    ATConf.elevationWindow = sConfigMgr->GetOption<float>("AutoTravel.ElevationWindow", 10.0f);
-    ATConf.elevationGainStart = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStart", 2.0f);
-    ATConf.elevationGainStrong = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStrong", 6.0f);
-    ATConf.elevationGainExtreme = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainExtreme", 8.0f);
-    ATConf.elevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ElevationPenalty", 5.0f);
-    ATConf.strongElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.StrongElevationPenalty", 20.0f);
-    ATConf.extremeElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeElevationPenalty", 80.0f);
+    ATConf.elevationWindow = sConfigMgr->GetOption<float>("AutoTravel.ElevationWindow", 40.0f);
+    ATConf.elevationGainStart = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStart", 4.0f);
+    ATConf.elevationGainStrong = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainStrong", 10.0f);
+    ATConf.elevationGainExtreme = sConfigMgr->GetOption<float>("AutoTravel.ElevationGainExtreme", 20.0f);
+    ATConf.elevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ElevationPenalty", 3.0f);
+    ATConf.strongElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.StrongElevationPenalty", 8.0f);
+    ATConf.extremeElevationPenalty = sConfigMgr->GetOption<float>("AutoTravel.ExtremeElevationPenalty", 20.0f);
     ATConf.turnPenaltyStart = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyStart", 35.0f);
     ATConf.turnPenaltyStrong = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyStrong", 70.0f);
     ATConf.turnPenaltyExtreme = sConfigMgr->GetOption<float>("AutoTravel.TurnPenaltyExtreme", 110.0f);
@@ -138,9 +138,13 @@ void AutoTravelMgr::LoadConfig()
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
     ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
     ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
+    ATConf.skipDetourFactor  = sConfigMgr->GetOption<float>("AutoTravel.SkipDetourFactor", 1.25f);
+    if (ATConf.skipDetourFactor < 1.0f) ATConf.skipDetourFactor = 1.0f;
     ATConf.nodeMinDistance   = sConfigMgr->GetOption<float> ("AutoTravel.NodeMinDistance", 300.0f);
     ATConf.useSpecialLinks   = sConfigMgr->GetOption<bool>  ("AutoTravel.UseSpecialLinks", true);
     ATConf.specialLinkCost   = sConfigMgr->GetOption<float> ("AutoTravel.SpecialLinkCost", 400.0f);
+    ATConf.teleportSecurity  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportSecurity", 2);
+    if (ATConf.teleportSecurity > 3) ATConf.teleportSecurity = 3;
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
@@ -2096,79 +2100,64 @@ float AutoTravelMgr::ScoreNaturalPath(
     /*
      * Sustained uphill movement.
      *
-     * Unlike a simple slope calculation this catches a mountain
-     * consisting of many individually reasonable NavMesh segments.
+     * Detects a mountain that consists of many individually harmless
+     * NavMesh segments.
+     *
+     * ACHTUNG - hier lagen zwei Fehler in der Vorfassung:
+     *
+     * 1. Das Fenster startete an JEDEM Punkt. Damit haing die Strafe an der
+     *    Punktdichte statt an der Geometrie: derselbe Hang kostete 0 bei
+     *    2-Yard-Abtastung und 1000 bei 20-Yard-Abtastung. Geglaettete Pfade
+     *    (etwa 4 Yard Schrittweite) bekamen also gar keine Bergstrafe --
+     *    ausgerechnet die, die normalerweise benutzt werden.
+     *
+     * 2. Das Fenster war mit 10 Yards zu kurz. Ueber 10 Yards steigt auch ein
+     *    langer Berg nur ein bis zwei Yards und blieb unter der Schwelle.
+     *
+     * Jetzt: Fenster fester Laenge (Standard 40 yd), gesetzt in festen
+     * Abstaenden entlang der STRECKE, nicht je Punkt. Die Strafe ist in Yards
+     * gerechnet und damit mit der Wegstrecke vergleichbar.
      */
-    float window =
-        std::max(5.0f, ATConf.elevationWindow);
+    float const window = std::max(10.0f, ATConf.elevationWindow);
+    float const stride = std::max(5.0f, window * 0.5f);
 
-    for (size_t start = 0;
-         start < path.size();
-         ++start)
     {
-        float travelled = 0.0f;
-        size_t end = start + 1;
-
-        float startZ = path[start].z;
-        float endZ = startZ;
-
-        while (end < path.size() &&
-               travelled < window)
+        // Kumulierte Streckenlaenge je Punkt, einmal vorab.
+        std::vector<float> along(path.size(), 0.0f);
+        for (size_t i = 1; i < path.size(); ++i)
         {
-            float dx =
-                path[end].x -
-                path[end - 1].x;
-
-            float dy =
-                path[end].y -
-                path[end - 1].y;
-
-            travelled +=
-                std::sqrt(dx * dx + dy * dy);
-
-            endZ = path[end].z;
-
-            ++end;
+            float dx = path[i].x - path[i - 1].x;
+            float dy = path[i].y - path[i - 1].y;
+            along[i] = along[i - 1] + std::sqrt(dx * dx + dy * dy);
         }
 
-        if (travelled < 5.0f)
-            continue;
+        float const total = along.back();
+        size_t startIdx = 0;
 
-        /*
-         * Only sustained uphill travel is a mountain climb.
-         * A downhill route should not be punished simply because
-         * the terrain contains a large height difference.
-         */
-        float gain = endZ - startZ;
-
-        if (gain <= ATConf.elevationGainStart)
-            continue;
-
-        float averageSlope =
-            gain / travelled;
-
-        if (averageSlope > ATConf.slopeStart)
+        for (float at = 0.0f; at + window <= total + 0.01f; at += stride)
         {
-            score +=
-                travelled *
-                (gain - ATConf.elevationGainStart) *
-                ATConf.elevationPenalty;
-        }
+            while (startIdx + 1 < path.size() && along[startIdx + 1] <= at)
+                ++startIdx;
 
-        if (gain > ATConf.elevationGainStrong)
-        {
-            score +=
-                travelled *
-                (gain - ATConf.elevationGainStrong) *
-                ATConf.strongElevationPenalty;
-        }
+            size_t endIdx = startIdx;
+            while (endIdx + 1 < path.size() && along[endIdx + 1] <= at + window)
+                ++endIdx;
 
-        if (gain > ATConf.elevationGainExtreme)
-        {
-            score +=
-                travelled *
-                (gain - ATConf.elevationGainExtreme) *
-                ATConf.extremeElevationPenalty;
+            if (endIdx <= startIdx)
+                continue;
+
+            // Nur Anstieg zaehlt. Bergab ist kein Kletterproblem.
+            float gain = path[endIdx].z - path[startIdx].z;
+            if (gain <= ATConf.elevationGainStart)
+                continue;
+
+            score += (gain - ATConf.elevationGainStart) * ATConf.elevationPenalty;
+
+            if (gain > ATConf.elevationGainStrong)
+                score += (gain - ATConf.elevationGainStrong) * ATConf.strongElevationPenalty;
+
+            if (gain > ATConf.elevationGainExtreme)
+                score += (gain - ATConf.elevationGainExtreme) * ATConf.extremeElevationPenalty;
         }
     }
 

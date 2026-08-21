@@ -61,7 +61,7 @@ AutoTravel.UnderMeshDepth = 6
 #        fallend und wird nach unten auf die Flaeche gesetzt. Grosszuegiger als
 #        UnderMeshDepth, damit Spruenge und Rampen nicht ausloesen.
 #        Default: 6
-AutoTravel.AboveMeshHeight = 6
+AutoTravel.AboveMeshHeight = 12
 
 #    AutoTravel.LegDistance
 #        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
@@ -159,15 +159,15 @@ AutoTravel.SteepSlopePenalty = 15.0
 AutoTravel.ExtremeSlopePenalty = 60.0
 
 # Hoehengewinn wird ueber dieses Fenster bewertet.
-AutoTravel.ElevationWindow = 10.0
+AutoTravel.ElevationWindow = 40.0
 
-AutoTravel.ElevationGainStart = 2.0
+AutoTravel.ElevationGainStart = 4.0
 AutoTravel.ElevationGainStrong = 4.0
 AutoTravel.ElevationGainExtreme = 6.0
 
-AutoTravel.ElevationPenalty = 5.0
-AutoTravel.StrongElevationPenalty = 20.0
-AutoTravel.ExtremeElevationPenalty = 80.0
+AutoTravel.ElevationPenalty = 3.0
+AutoTravel.StrongElevationPenalty = 8.0
+AutoTravel.ExtremeElevationPenalty = 20.0
 
 # Unnatuerliche starke Richtungswechsel.
 AutoTravel.TurnPenaltyStart = 35.0
@@ -302,3 +302,18 @@ AutoTravel.Debug = 0
 #        Minimum im Code: 0.5
 #        Default: 3.0
 AutoTravel.TerrainStep = 3.0
+#    AutoTravel.TeleportSecurity
+#        Ab welcher Kontostufe ".at tp" erlaubt ist.
+#            0 = jeder Spieler   1 = Moderator   2 = GM   3 = Administrator
+#        Der Teleport umgeht jede Wegfindung und nimmt beliebige Zielkoordinaten
+#        entgegen. Auf 0 kann sich damit jeder Spieler ueberallhin versetzen.
+#        Default: 2
+AutoTravel.TeleportSecurity = 2
+
+#    AutoTravel.SkipDetourFactor
+#        Der naechstgelegene Reiseknoten liegt oft HINTER dem Spieler. Kostet
+#        der Weg ueber ihn mehr als dieses Vielfache des direkten Wegs zum
+#        uebernaechsten, wird er uebersprungen -- sonst laeuft der Charakter
+#        erst in die Gegenrichtung.
+#        Default: 1.25
+AutoTravel.SkipDetourFactor = 1.25

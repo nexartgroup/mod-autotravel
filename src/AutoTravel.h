@@ -84,13 +84,15 @@ struct ATConfig
     uint32 maxUnderwaterMs  = 45000;
     bool  rescueUnderMesh   = true;
     float underMeshDepth    = 2.5f;
-    float aboveMeshHeight   = 6.0f;
+    float aboveMeshHeight   = 12.0f;
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
+    float skipDetourFactor  = 1.25f;   // ab diesem Umwegfaktor Startknoten ueberspringen
     float nodeMinDistance   = 300.0f;
     bool  useSpecialLinks   = true;
     float specialLinkCost   = 400.0f;
+    uint32 teleportSecurity = 2;       // 0=Spieler 1=Moderator 2=GM 3=Admin
     bool  allowTeleport     = true;
     float teleportMinDist   = 0.0f;
     uint32 teleportCooldown = 5;

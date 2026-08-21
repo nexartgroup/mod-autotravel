@@ -226,14 +226,29 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
     // --- Suche -------------------------------------------------------------
     std::unordered_map<uint32, float> dist;
+    std::unordered_map<uint32, bool> closed;
     std::unordered_map<uint32, uint32> prev;
     std::unordered_map<uint32, uint8> prevType;
 
     typedef std::pair<float, uint32> QE;
     std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
 
+    // A* statt reinem Dijkstra: die geschaetzte Restentfernung lenkt die Suche
+    // auf das Ziel zu. Die Schaetzung ist zulaessig (unterschaetzt nie), weil
+    // die Kantenkosten aus Weglaengen stammen und ein Weg nie kuerzer als die
+    // Luftlinie ist. Bei Knoten auf ANDEREN Karten ist eine Luftlinie
+    // bedeutungslos -- dort ist die Schaetzung 0, A* verhaelt sich wie Dijkstra.
+    ATNode const& goalNode = sNodes[endNode];
+    auto heuristic = [&](uint32 n) -> float
+    {
+        ATNode const& x = sNodes[n];
+        if (x.mapId != goalNode.mapId)
+            return 0.0f;
+        return Dist2D(x.x, x.y, goalNode.x, goalNode.y);
+    };
+
     dist[startNode] = 0.0f;
-    pq.push(QE(0.0f, startNode));
+    pq.push(QE(heuristic(startNode), startNode));
 
     uint32 visited = 0;
     bool found = false;
@@ -249,9 +264,13 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             break;
         }
 
+        // cur.first ist f = g + h. Verglichen werden muss gegen g.
         auto dIt = dist.find(cur.second);
-        if (dIt == dist.end() || cur.first > dIt->second + 0.01f)
+        if (dIt == dist.end())
             continue;
+        if (closed[cur.second])
+            continue;
+        closed[cur.second] = true;
 
         if (++visited > 40000)
             break;
@@ -262,14 +281,14 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
         for (ATNodeLink const& l : lIt->second)
         {
-            float nd = cur.first + l.cost;
+            float nd = dist[cur.second] + l.cost;
             auto old = dist.find(l.to);
             if (old == dist.end() || nd < old->second)
             {
                 dist[l.to] = nd;
                 prev[l.to] = cur.second;
                 prevType[l.to] = l.type;
-                pq.push(QE(nd, l.to));
+                pq.push(QE(nd + heuristic(l.to), l.to));
             }
         }
     }
@@ -303,15 +322,37 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     }
     std::reverse(chain.begin(), chain.end());
 
-    // Der Startknoten liegt oft hinter dem Spieler - dann ueberspringen.
-    if (chain.size() > 1)
+    // --- Umweg am Routenanfang abschneiden ---------------------------------
+    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wird er
+    // stur angelaufen, rennt der Charakter erst in die Gegenrichtung und dreht
+    // dann um. Verglichen wird deshalb der Umweg:
+    //
+    //     ueber n0:  |Spieler->n0| + |n0->n1|
+    //     direkt:    |Spieler->n1|
+    //
+    // Ist der Umweg groesser als SkipDetourFactor, faellt n0 weg. In einer
+    // Schleife, weil manchmal mehrere Knoten hinter dem Spieler liegen.
     {
-        ATNode const& n0 = sNodes[chain[0]];
-        ATNode const& n1 = sNodes[chain[1]];
-        float toStart = Dist2D(player->GetPositionX(), player->GetPositionY(), n0.x, n0.y);
-        float toNext  = Dist2D(player->GetPositionX(), player->GetPositionY(), n1.x, n1.y);
-        if (toNext < toStart)
+        float px = player->GetPositionX();
+        float py = player->GetPositionY();
+        uint32 skipped = 0;
+
+        while (chain.size() > 1 && skipped < 4)
+        {
+            ATNode const& n0 = sNodes[chain[0]];
+            ATNode const& n1 = sNodes[chain[1]];
+
+            float viaN0  = Dist2D(px, py, n0.x, n0.y) + Dist2D(n0.x, n0.y, n1.x, n1.y);
+            float direct = Dist2D(px, py, n1.x, n1.y);
+
+            if (direct > ATConf.nodeSearchRadius * 1.5f)
+                break;
+            if (viaN0 <= direct * ATConf.skipDetourFactor)
+                break;
+
             chain.erase(chain.begin());
+            ++skipped;
+        }
     }
 
     // --- In Etappen umwandeln ---------------------------------------------
