@@ -7,9 +7,6 @@
 #include "ScriptMgr.h"
 
 #include <cstdio>
-#include <cerrno>
-#include <cmath>
-#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -18,50 +15,6 @@ using namespace Acore::ChatCommands;
 
 namespace
 {
-    // ---- Gepruefte Umwandlung -------------------------------------------
-    // atoi/atof liefern bei Unsinn still eine 0. Da diese Werte aus einer
-    // Chatnachricht des Spielers stammen, wird jeder Wert geprueft und
-    // ungueltige Eingabe abgelehnt statt in eine 0 zu verwandeln.
-
-    bool ParseUInt(std::string const& in, uint32& out)
-    {
-        if (in.empty()) return false;
-        char* end = nullptr;
-        errno = 0;
-        unsigned long v = std::strtoul(in.c_str(), &end, 10);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0') return false;
-        if (v > 0xFFFFFFFFul) return false;
-        out = uint32(v);
-        return true;
-    }
-
-    bool ParseFloat(std::string const& in, float& out)
-    {
-        if (in.empty()) return false;
-        char* end = nullptr;
-        errno = 0;
-        double v = std::strtod(in.c_str(), &end);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0') return false;
-        if (!std::isfinite(v)) return false;          // NaN und inf abweisen
-        out = float(v);
-        return true;
-    }
-
-    bool ParseBool(std::string const& in, bool& out)
-    {
-        uint32 v = 0;
-        if (!ParseUInt(in, v) || v > 1) return false;
-        out = (v != 0);
-        return true;
-    }
-
-    // Normalisierte Kartenkoordinate: 0..1, endlich, nicht NaN
-    bool ParseNorm(std::string const& in, float& out)
-    {
-        if (!ParseFloat(in, out)) return false;
-        return out >= 0.0f && out <= 1.0f;
-    }
-
     std::vector<std::string> Split(std::string const& in)
     {
         std::vector<std::string> out;
@@ -135,40 +88,18 @@ public:
                 handler->SendSysMessage("[AT]M|Ungueltige Parameter.");
                 return true;
             }
-            uint32 uiMapId = 0;
-            float  nx = 0.0f, ny = 0.0f, pnx = 0.0f, pny = 0.0f;
-            bool   hasCalib = false;
-
-            if (!ParseUInt(a[1], uiMapId) || !uiMapId
-                || !ParseNorm(a[2], nx) || !ParseNorm(a[3], ny)
-                || !ParseBool(a[4], hasCalib)
-                || !ParseNorm(a[5], pnx) || !ParseNorm(a[6], pny))
-            {
-                handler->SendSysMessage("[AT]M|Ungueltige Parameter - Befehl abgewiesen.");
-                return true;
-            }
-
-            // Teleport ist eine Sonderbefugnis: er umgeht jede Wegfindung und
-            // laesst sich mit beliebigen Zielkoordinaten aufrufen. Ohne diese
-            // Pruefung koennte jeder Spieler ueberallhin springen.
-            if (cmd == "tp")
-            {
-                uint32 need = ATConf.teleportSecurity;
-                if (handler->GetSession()->GetSecurity() < AccountTypes(need))
-                {
-                    handler->SendSysMessage("[AT]M|Teleport ist dir nicht erlaubt.");
-                    return true;
-                }
-            }
+            uint32 uiMapId  = uint32(atoi(a[1].c_str()));
+            float  nx       = float(atof(a[2].c_str()));
+            float  ny       = float(atof(a[3].c_str()));
+            bool   hasCalib = atoi(a[4].c_str()) != 0;
+            float  pnx      = float(atof(a[5].c_str()));
+            float  pny      = float(atof(a[6].c_str()));
             if (a.size() >= 10)
             {
-                uint32 curMap = 0;
-                float  cnx = 0.0f, cny = 0.0f;
-                if (ParseUInt(a[7], curMap) && curMap
-                    && ParseNorm(a[8], cnx) && ParseNorm(a[9], cny))
-                {
-                    sAutoTravel->LearnMapId(player, curMap, cnx, cny);
-                }
+                uint32 curMap = uint32(atoi(a[7].c_str()));
+                float  cnx    = float(atof(a[8].c_str()));
+                float  cny    = float(atof(a[9].c_str()));
+                sAutoTravel->LearnMapId(player, curMap, cnx, cny);
             }
 
             std::string name = JoinFrom(a, 10);
@@ -188,9 +119,7 @@ public:
         {
             // .at route <0=neu|1=anhaengen> <map:nx:ny:flags> ...
             if (a.size() < 3) return true;
-            uint32 mode = 0;
-            if (!ParseUInt(a[1], mode)) return true;
-            bool clearFirst = (mode == 0);
+            bool clearFirst = (atoi(a[1].c_str()) == 0);
             sAutoTravel->RouteAdd(player, clearFirst, JoinFrom(a, 2));
             return true;
         }
@@ -200,27 +129,12 @@ public:
             // .at rstart <curMap> <cnx> <cny> <Name...>
             if (a.size() >= 4)
             {
-                uint32 curMap = 0;
-                float  cnx = 0.0f, cny = 0.0f;
-                if (ParseUInt(a[1], curMap) && curMap
-                    && ParseNorm(a[2], cnx) && ParseNorm(a[3], cny))
-                {
-                    sAutoTravel->LearnMapId(player, curMap, cnx, cny);
-                }
+                uint32 curMap = uint32(atoi(a[1].c_str()));
+                float  cnx    = float(atof(a[2].c_str()));
+                float  cny    = float(atof(a[3].c_str()));
+                sAutoTravel->LearnMapId(player, curMap, cnx, cny);
                 sAutoTravel->RouteStart(player, JoinFrom(a, 4));
             }
-            return true;
-        }
-
-        if (cmd == "pause")
-        {
-            bool on = true;
-            if (a.size() > 1 && !ParseBool(a[1], on))
-            {
-                handler->SendSysMessage("[AT]M|Ungueltiger Parameter.");
-                return true;
-            }
-            sAutoTravel->SetPlayerPause(player, on);
             return true;
         }
 
@@ -250,12 +164,7 @@ public:
 
         if (cmd == "debug")
         {
-            bool on = true;
-            if (a.size() > 1 && !ParseBool(a[1], on))
-            {
-                handler->SendSysMessage("[AT]M|Ungueltiger Parameter.");
-                return true;
-            }
+            bool on = a.size() > 1 ? atoi(a[1].c_str()) != 0 : true;
             sAutoTravel->SetDebug(player, on);
             return true;
         }

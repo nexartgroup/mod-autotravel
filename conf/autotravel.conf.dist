@@ -60,11 +60,8 @@ AutoTravel.UnderMeshDepth = 2.5
 #        Ab so vielen Yards ueber der Reisehoehe gilt er als haengend oder
 #        fallend und wird nach unten auf die Flaeche gesetzt. Grosszuegiger als
 #        UnderMeshDepth, damit Spruenge und Rampen nicht ausloesen.
-#        Grosszuegiger als UnderMeshDepth, und waehrend laufender Bewegung
-#        gilt nochmals der doppelte Wert: auf huegeligem Gelaende ueberspannt
-#        der Spline regelmaessig eine Senke, ohne dass etwas kaputt ist.
-#        Default: 12
-AutoTravel.AboveMeshHeight = 12
+#        Default: 6
+AutoTravel.AboveMeshHeight = 6
 
 #    AutoTravel.LegDistance
 #        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
@@ -129,14 +126,10 @@ AutoTravel.ResumeAfterDeath = 0
 #        1 = Server uebernimmt waehrend der Fahrt die Bewegungskontrolle
 #            (SetClientControl). Zuverlaessig, aber der Spieler kann waehrend
 #            der Fahrt nicht selbst steuern.
-#        0 = nur Splines ohne Kontrollentzug (STANDARD). Der Spieler behaelt
-#            WASD, Leertaste und Faehigkeiten. Zusammen mit SteerDetect
-#            ergibt das die uebliche Bedienung: du greifst ein, die Reise
-#            pausiert, nach der Wartezeit uebernimmt sie wieder.
-#        Das Addon kann diesen Wert pro Charakter ueberschreiben
-#        (".at set control 0|1"). Die Einstellung im Addon hat Vorrang.
-#        Default: 0
-AutoTravel.TakeClientControl = 0
+#        0 = nur Splines ohne Kontrollentzug. Sanfter, aber der Client kann
+#            gegensteuern und die Bewegung abbrechen.
+#        Default: 1
+AutoTravel.TakeClientControl = 1
 
 #    AutoTravel.ChunkPoints
 #        Wie viele Pfadpunkte pro Spline gesendet werden. Kleiner = feiner
@@ -175,69 +168,6 @@ AutoTravel.NodeSearchRadius = 800
 #        Default: 300
 AutoTravel.NodeMinDistance = 300
 
-#    AutoTravel.RouteProfile
-#        Standardprofil der Routenwahl. Der Spieler kann es ueberschreiben.
-#            0 = Korridor  Netz bevorzugen, Abkuerzung ab 1,6-facher Luftlinie
-#            1 = Kurz      moeglichst kurz, Netz fast egal
-#            2 = Schnell   Flug und Portal bevorzugt
-#            3 = Sicher    Netz stark bevorzugt, Wasser meiden
-#            4 = Zu Fuss   keine Sonderverbindungen
-#        Default: 0
-AutoTravel.RouteProfile = 0
-
-#    AutoTravel.StuckEdgePenalty
-#        Aufschlag auf eine Graphkante, auf der es haengengeblieben ist. Wird
-#        NICHT in die Datenbank geschrieben.
-#        Default: 300
-AutoTravel.StuckEdgePenalty = 300
-
-#    AutoTravel.PenaltyDecaySeconds
-#        Halbwertszeit dieses Aufschlags. Nach dieser Zeit ist er halbiert,
-#        nach dem Vierfachen ganz weg.
-#        Default: 900
-AutoTravel.PenaltyDecaySeconds = 900
-
-#    AutoTravel.RouteCacheSeconds
-#        Haltbarkeit zwischengespeicherter Routen.
-#        Default: 120
-AutoTravel.RouteCacheSeconds = 120
-
-#    AutoTravel.SimplifyTolerance
-#        Douglas-Peucker: Punkte, die weniger als so viele Yards von der
-#        Verbindungslinie ihrer Nachbarn abweichen, werden entfernt. Weniger
-#        Knicke im Spline, weniger Mikrokorrekturen. 0 = aus.
-#        Gemessen wird DREIdimensional -- zweidimensional lagen die Punkte
-#        einer Huegelkuppe auf einer Geraden und wurden alle entfernt.
-#        Der Wert wird automatisch auf ein Drittel von UnderMeshDepth begrenzt,
-#        damit das Ausduennen nicht selbst ein "durchgefallen" ausloest.
-#        Default: 0.7
-AutoTravel.SimplifyTolerance = 0.7
-
-#    AutoTravel.HeuristicWeight
-#        Gewicht der Restentfernungs-Schaetzung bei der Routensuche (A*).
-#            1.0 = kuerzester Weg garantiert (Standard)
-#            >1  = sucht schneller, kann einen etwas laengeren Weg liefern
-#        Auf einem Testgitter: 3000 Yards Strecke, 3559 gepruefte Knoten bei
-#        reinem Dijkstra, 3119 bei w=1.0, 107 bei w=1.6 -- bei gleicher
-#        Weglaenge. Erhoehen lohnt also erst bei sehr langen Strecken.
-#        Default: 1.0
-AutoTravel.HeuristicWeight = 1.0
-
-#    AutoTravel.FinalApproachTries
-#        Wie oft der exakte Zielpunkt noch angelaufen wird, nachdem der
-#        Ersatzpunkt erreicht ist. Danach meldet AutoTravel Ankunft und nennt
-#        die tatsaechliche Restentfernung.
-#        Default: 2
-AutoTravel.FinalApproachTries = 2
-
-#    AutoTravel.SkipDetourFactor
-#        Der naechstgelegene Knoten liegt oft HINTER dem Spieler. Kostet der
-#        Weg ueber ihn mehr als dieses Vielfache des direkten Wegs zum
-#        uebernaechsten, wird er uebersprungen -- sonst laeuft der Charakter
-#        erst in die Gegenrichtung.
-#        Default: 1.25
-AutoTravel.SkipDetourFactor = 1.25
-
 #    AutoTravel.UseSpecialLinks
 #        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die
 #        Routensuche einbeziehen. Der Spieler muss sie selbst ausloesen.
@@ -255,14 +185,6 @@ AutoTravel.SpecialLinkCost = 400
 #        funktioniert nur das Laufen.
 #        Default: 1
 AutoTravel.AllowTeleport = 1
-
-#    AutoTravel.TeleportSecurity
-#        Ab welcher Kontostufe ".at tp" erlaubt ist.
-#            0 = jeder Spieler   1 = Moderator   2 = GM   3 = Administrator
-#        Der Teleport umgeht jede Wegfindung und nimmt beliebige Zielkoordinaten
-#        entgegen. Auf 0 kann sich damit jeder Spieler ueberallhin versetzen.
-#        Default: 2
-AutoTravel.TeleportSecurity = 2
 
 #    AutoTravel.TeleportMinDistance
 #        Unter dieser Entfernung wird der Teleport abgelehnt (0 = keine Grenze).

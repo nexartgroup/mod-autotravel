@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <ctime>
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -37,70 +36,8 @@
 // Die Koordinaten sind bereits Weltkoordinaten. Fuer diese Etappen entfaellt
 // die gesamte Karten-ID-Umrechnung samt ihrer Fehlerquellen.
 
-// ---------------------------------------------------------------------------
-// Routenprofile
-// ---------------------------------------------------------------------------
-// Die Zahlen sind Startwerte und ausdruecklich zum Nachjustieren gedacht --
-// die Spezifikation verlangt Kalibrierung an echten Fahrten, nicht am
-// Schreibtisch.
-//
-// offroad ist der wichtigste Wert: er sagt, wie viel Umweg der Korridor kosten
-// darf, bevor querfeldein gewaehlt wird. 1.6 heisst: bis zum 1,6-fachen der
-// Luftlinie bleibt die Route im Korridor, darueber wird abgekuerzt.
-
-char const* ATProfileName(ATRouteProfile p)
-{
-    switch (p)
-    {
-        case AT_PROFILE_KURZ:    return "Kurz";
-        case AT_PROFILE_SCHNELL: return "Schnell";
-        case AT_PROFILE_SICHER:  return "Sicher";
-        case AT_PROFILE_ZU_FUSS: return "Zu Fuss";
-        default:                 return "Korridor";
-    }
-}
-
-ATProfileWeights const& ATWeights(ATRouteProfile p)
-{
-    //                                walk  special  specialAdd  swim  offroad
-    static ATProfileWeights const korridor { 0.80f,   1.00f,     400.0f, 1.40f, 1.60f };
-    static ATProfileWeights const kurz     { 1.00f,   1.00f,     600.0f, 1.10f, 1.05f };
-    static ATProfileWeights const schnell  { 1.00f,   0.35f,      80.0f, 1.30f, 1.30f };
-    static ATProfileWeights const sicher   { 0.70f,   1.10f,     500.0f, 3.00f, 2.40f };
-    static ATProfileWeights const zufuss   { 0.85f, 9999.0f,   99999.0f, 1.40f, 1.80f };
-
-    switch (p)
-    {
-        case AT_PROFILE_KURZ:    return kurz;
-        case AT_PROFILE_SCHNELL: return schnell;
-        case AT_PROFILE_SICHER:  return sicher;
-        case AT_PROFILE_ZU_FUSS: return zufuss;
-        default:                 return korridor;
-    }
-}
-
 namespace
 {
-    // Aufschlaege aus Stuck-Ereignissen. Sie verfallen mit der Zeit und werden
-    // nie in die Datenbank geschrieben -- ein einmaliger Ausrutscher soll die
-    // Karte nicht dauerhaft verderben.
-    struct ATPenalty { float value; uint32 when; };
-    std::unordered_map<uint64, ATPenalty> sPenalties;
-
-    inline uint64 EdgeKey(uint32 a, uint32 b) { return (uint64(a) << 32) | b; }
-
-    float PenaltyFor(uint32 a, uint32 b)
-    {
-        auto it = sPenalties.find(EdgeKey(a, b));
-        if (it == sPenalties.end())
-            return 0.0f;
-        float age = float(uint32(time(nullptr)) - it->second.when);
-        if (age >= ATConf.penaltyDecaySec * 4.0f)
-            return 0.0f;
-        // exponentielles Abklingen ueber die Halbwertszeit
-        return it->second.value * std::pow(0.5f, age / ATConf.penaltyDecaySec);
-    }
-
     std::unordered_map<uint32, ATNode> sNodes;
     std::unordered_map<uint32, std::vector<ATNodeLink>> sLinks;
     bool sNodesLoaded = false;
@@ -173,7 +110,7 @@ void AutoTravelMgr::LoadTravelNodes()
         sNodes[n.id] = n;
     } while (res->NextRow());
 
-    sql = "SELECT node_id, to_node_id, type, distance, extra_cost, swim_distance FROM `" + db +
+    sql = "SELECT node_id, to_node_id, type, distance, extra_cost FROM `" + db +
           "`.`playerbots_travelnode_link`";
     QueryResult lres = WorldDatabase.Query(sql.c_str());
 
@@ -187,20 +124,27 @@ void AutoTravelMgr::LoadTravelNodes()
             Field* f = lres->Fetch();
             uint32 from = f[0].Get<uint32>();
             ATNodeLink l;
-            l.to       = f[1].Get<uint32>();
-            l.type     = f[2].Get<uint8>();
-            l.distance = f[3].Get<float>();
-            l.extra    = f[4].Get<float>();
-            l.swim     = f[5].Get<float>();
+            l.to   = f[1].Get<uint32>();
+            l.type = f[2].Get<uint8>();
+            float distance   = f[3].Get<float>();
+            float extra      = f[4].Get<float>();
 
             if (sNodes.find(from) == sNodes.end() || sNodes.find(l.to) == sNodes.end())
                 continue;
 
-            if (l.type != 1 && !ATConf.useSpecialLinks)
-                continue;
+            if (l.type != 1)
+            {
+                if (!ATConf.useSpecialLinks)
+                    continue;
+                // Sonderverbindungen kosten extra, damit sie nur benutzt
+                // werden, wenn sie wirklich viel Strecke sparen -- der Spieler
+                // muss dort schliesslich selbst taetig werden.
+                extra += ATConf.specialLinkCost;
+            }
 
-            if (l.distance <= 0.0f)
-                l.distance = 1.0f;
+            l.cost = distance + extra;
+            if (l.cost <= 0.0f)
+                l.cost = 1.0f;
 
             sLinks[from].push_back(l);
             ++linkCount;
@@ -248,69 +192,8 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// A* auf dem Reisegraphen
+// Dijkstra
 // ---------------------------------------------------------------------------
-// Vorher lief hier Dijkstra: der breitet sich gleichmaessig in ALLE Richtungen
-// aus und sieht sich halb Azeroth an, bevor er ein Ziel 300 Yards weiter
-// findet. A* schaetzt zusaetzlich die Restentfernung und arbeitet damit
-// gerichtet auf das Ziel zu -- dasselbe Prinzip wie bei Kartendiensten.
-//
-//     f(n) = g(n)            + h(n)
-//            bisherige Kosten  Luftlinie zum Ziel
-//
-// Damit A* denselben Weg findet wie Dijkstra, muss die Schaetzung
-// ZULAESSIG sein: sie darf die echten Restkosten nie ueberschaetzen. Das ist
-// hier erfuellt, weil die Kantenkosten aus Weglaengen stammen und ein Weg
-// niemals kuerzer als die Luftlinie ist.
-//
-// Zwei Faelle brechen das und werden abgefangen:
-//
-//   1. Andere Karte -- eine Luftlinie zwischen zwei Karten ist bedeutungslos.
-//      Dort ist h = 0, A* verhaelt sich wie Dijkstra.
-//   2. Sonderverbindungen (Flug, Portal) tragen einen Aufschlag, sind also
-//      teurer als ihre Laenge. Das macht die Schaetzung nur vorsichtiger,
-//      nicht ungueltig.
-//
-// AutoTravel.HeuristicWeight > 1.0 sucht schneller, kann aber einen etwas
-// laengeren Weg liefern. Standard 1.0 = kuerzester Weg garantiert.
-
-// Kosten einer Kante unter dem gewaehlten Profil.
-//
-//   Laufkante   : Strecke * walk  + Schwimmanteil * swim  + Aufschlaege
-//   Sonderkante : Strecke * special + fester Aufschlag
-//
-// Dazu der Laufzeitaufschlag aus Stuck-Ereignissen. Damit die Schaetzung von
-// A* zulaessig bleibt, darf keiner dieser Faktoren unter 1.0 fallen, ohne dass
-// die Heuristik entsprechend gedaempft wird -- siehe hMin unten.
-static float EdgeCost(ATNodeLink const& l, ATProfileWeights const& w)
-{
-    float c;
-    if (l.type == 1)
-    {
-        float ground = std::max(0.0f, l.distance - l.swim);
-        c = ground * w.walk + l.swim * w.swim;
-    }
-    else
-    {
-        c = l.distance * w.special + w.specialAdd;
-    }
-    return c + l.extra;
-}
-
-void AutoTravelMgr::PenalizeEdge(uint32 from, uint32 to)
-{
-    if (!from || !to) return;
-    ATPenalty& p = sPenalties[EdgeKey(from, to)];
-    p.value = std::min(p.value + ATConf.stuckPenalty, ATConf.stuckPenalty * 5.0f);
-    p.when  = uint32(time(nullptr));
-    LOG_DEBUG("module", "mod-autotravel: Kante {}->{} mit {:.0f} belastet.",
-              from, to, p.value);
-}
-
-void AutoTravelMgr::ClearPenalties()
-{
-    sPenalties.clear();
-}
 
 bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*dz*/,
                                    std::vector<ATLeg>& out, std::string& note) const
@@ -341,46 +224,24 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         return false;
     }
 
-    ATNode const& goal = sNodes[endNode];
-    float const w = ATConf.heuristicWeight;
-
-    ATRouteProfile profile = AT_PROFILE_KORRIDOR;
-    auto sit = _sessions.find(player->GetGUID());
-    if (sit != _sessions.end())
-        profile = sit->second.profile;
-    ATProfileWeights const& pw = ATWeights(profile);
-
-    // Kleinster Faktor, mit dem eine Strecke bewertet werden kann. Die
-    // Schaetzung muss damit gedaempft werden, sonst ueberschaetzt sie die
-    // Restkosten und A* verliert die Optimalitaet.
-    float const hMin = std::min(pw.walk, std::min(pw.special, 1.0f));
-
-    // Zulaessige Schaetzung der Restkosten
-    auto heuristic = [&](ATNode const& n) -> float
-    {
-        if (n.mapId != goal.mapId)
-            return 0.0f;                       // andere Karte: keine Aussage moeglich
-        return Dist2D(n.x, n.y, goal.x, goal.y) * hMin * w;
-    };
-
-    std::unordered_map<uint32, float> gScore;
+    // --- Suche -------------------------------------------------------------
+    std::unordered_map<uint32, float> dist;
     std::unordered_map<uint32, uint32> prev;
     std::unordered_map<uint32, uint8> prevType;
-    std::unordered_map<uint32, bool> closed;
 
-    typedef std::pair<float, uint32> QE;        // (f, Knoten)
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> open;
+    typedef std::pair<float, uint32> QE;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
 
-    gScore[startNode] = 0.0f;
-    open.push(QE(heuristic(sNodes[startNode]), startNode));
+    dist[startNode] = 0.0f;
+    pq.push(QE(0.0f, startNode));
 
-    uint32 expanded = 0;
+    uint32 visited = 0;
     bool found = false;
 
-    while (!open.empty())
+    while (!pq.empty())
     {
-        QE cur = open.top();
-        open.pop();
+        QE cur = pq.top();
+        pq.pop();
 
         if (cur.second == endNode)
         {
@@ -388,17 +249,12 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             break;
         }
 
-        if (closed[cur.second])
+        auto dIt = dist.find(cur.second);
+        if (dIt == dist.end() || cur.first > dIt->second + 0.01f)
             continue;
-        closed[cur.second] = true;
 
-        if (++expanded > 40000)
+        if (++visited > 40000)
             break;
-
-        auto gIt = gScore.find(cur.second);
-        if (gIt == gScore.end())
-            continue;
-        float g = gIt->second;
 
         auto lIt = sLinks.find(cur.second);
         if (lIt == sLinks.end())
@@ -406,17 +262,14 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
         for (ATNodeLink const& l : lIt->second)
         {
-            if (closed[l.to])
-                continue;
-
-            float ng = g + EdgeCost(l, pw) + PenaltyFor(cur.second, l.to);
-            auto old = gScore.find(l.to);
-            if (old == gScore.end() || ng < old->second)
+            float nd = cur.first + l.cost;
+            auto old = dist.find(l.to);
+            if (old == dist.end() || nd < old->second)
             {
-                gScore[l.to]   = ng;
-                prev[l.to]     = cur.second;
+                dist[l.to] = nd;
+                prev[l.to] = cur.second;
                 prevType[l.to] = l.type;
-                open.push(QE(ng + heuristic(sNodes[l.to]), l.to));
+                pq.push(QE(nd, l.to));
             }
         }
     }
@@ -450,51 +303,15 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     }
     std::reverse(chain.begin(), chain.end());
 
-    // --- Umweg am Routenanfang abschneiden ---------------------------------
-    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wer ihn
-    // stur anlaeuft, rennt erst in die Gegenrichtung und dreht dann um -- genau
-    // das im Test beobachtete Verhalten.
-    //
-    // Geprueft wird der Umweg: kostet der Weg ueber den Knoten spuerbar mehr
-    // als der direkte Weg zum uebernaechsten, wird er uebersprungen. Der
-    // Vergleich laeuft in einer Schleife, weil manchmal mehrere Knoten hinter
-    // dem Spieler liegen.
-    //
-    //     ueber n0:  |Spieler->n0| + |n0->n1|
-    //     direkt:    |Spieler->n1|
-    //
-    // Uebersprungen wird nur, wenn der Umweg groesser als der Schwellwert ist
-    // UND der direkte Weg zum naechsten Knoten nicht laenger als die
-    // Suchreichweite ist -- sonst wuerde ein sinnvoller Einstieg entfallen.
+    // Der Startknoten liegt oft hinter dem Spieler - dann ueberspringen.
+    if (chain.size() > 1)
     {
-        float px = player->GetPositionX();
-        float py = player->GetPositionY();
-        uint32 skipped = 0;
-
-        while (chain.size() > 1 && skipped < 4)
-        {
-            ATNode const& n0 = sNodes[chain[0]];
-            ATNode const& n1 = sNodes[chain[1]];
-
-            float viaN0  = Dist2D(px, py, n0.x, n0.y) + Dist2D(n0.x, n0.y, n1.x, n1.y);
-            float direct = Dist2D(px, py, n1.x, n1.y);
-
-            if (direct > ATConf.nodeSearchRadius * 1.5f)
-                break;                       // zu weit, Einstieg ueber n0 behalten
-            if (viaN0 <= direct * ATConf.skipDetourFactor)
-                break;                       // Umweg vertretbar
-
+        ATNode const& n0 = sNodes[chain[0]];
+        ATNode const& n1 = sNodes[chain[1]];
+        float toStart = Dist2D(player->GetPositionX(), player->GetPositionY(), n0.x, n0.y);
+        float toNext  = Dist2D(player->GetPositionX(), player->GetPositionY(), n1.x, n1.y);
+        if (toNext < toStart)
             chain.erase(chain.begin());
-            ++skipped;
-        }
-
-        if (skipped)
-        {
-            char sb[160];
-            std::snprintf(sb, sizeof(sb), "%u Knoten am Routenanfang uebersprungen (Umweg).",
-                          skipped);
-            LOG_DEBUG("module", "mod-autotravel: {}", sb);
-        }
     }
 
     // --- In Etappen umwandeln ---------------------------------------------
@@ -508,7 +325,6 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         leg.wz = n.z;
         leg.resolved = true;
         leg.name = n.name;
-        leg.nodeId = n.id;
 
         // Art der Verbindung zum naechsten Knoten
         if (i + 1 < chain.size())
@@ -527,16 +343,10 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         out.push_back(leg);
     }
 
-    float total = gScore[endNode];
-
-    char b[256];
-    std::snprintf(b, sizeof(b),
-                  "Profil %s: %u Knoten, %u geprueft, Kosten %.0f, Start %.0f yd, Ziel %.0f yd",
-                  ATProfileName(profile), uint32(out.size()), expanded, total, dStart, dEnd);
+    char b[192];
+    std::snprintf(b, sizeof(b), "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
+                  uint32(out.size()), dStart, dEnd);
     note = b;
-
-    // Fuer den Vergleich mit dem Direktweg (siehe ApplyNodeRouting)
-    const_cast<AutoTravelMgr*>(this)->_lastRouteCost = total;
     return true;
 }
 

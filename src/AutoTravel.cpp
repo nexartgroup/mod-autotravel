@@ -27,22 +27,6 @@
 
 ATConfig ATConf;
 
-// Profilname aus dem Client entgegennehmen
-bool ParseProfile(std::string const& in, uint32& out)
-{
-    if (in == "korridor" || in == "0") { out = AT_PROFILE_KORRIDOR; return true; }
-    if (in == "kurz"     || in == "1") { out = AT_PROFILE_KURZ;     return true; }
-    if (in == "schnell"  || in == "2") { out = AT_PROFILE_SCHNELL;  return true; }
-    if (in == "sicher"   || in == "3") { out = AT_PROFILE_SICHER;   return true; }
-    if (in == "zufuss"   || in == "4") { out = AT_PROFILE_ZU_FUSS;  return true; }
-    return false;
-}
-
-char const* ATOwnerName(ATControlOwner o)
-{
-    return (o == AT_OWNER_PLAYER) ? "PLAYER" : "TRAVEL";
-}
-
 char const* LinkTypeNameFor(uint8 t)
 {
     switch (t)
@@ -65,7 +49,6 @@ char const* ATStateName(ATState s)
         case AT_COMBAT_PAUSED:  return "PAUSED - COMBAT";
         case AT_MOUNTING:       return "MOUNTING";
         case AT_WAIT_FLIGHT:    return "WARTE AUF FLUG";
-        case AT_PLAYER_PAUSED:  return "PAUSED - SPIELER";
         case AT_ARRIVED:        return "ARRIVED";
         case AT_FAILED:         return "FAILED";
     }
@@ -103,31 +86,6 @@ void AutoTravelMgr::LoadConfig()
     ATConf.enable            = sConfigMgr->GetOption<bool>  ("AutoTravel.Enable", true);
     ATConf.arrivalDistance   = sConfigMgr->GetOption<float> ("AutoTravel.ArrivalDistance", 8.0f);
     ATConf.legDistance       = sConfigMgr->GetOption<float> ("AutoTravel.LegDistance", 15.0f);
-    ATConf.finalApproachTries = sConfigMgr->GetOption<uint32>("AutoTravel.FinalApproachTries", 2);
-    ATConf.heuristicWeight   = sConfigMgr->GetOption<float> ("AutoTravel.HeuristicWeight", 1.0f);
-    ATConf.routeProfile      = sConfigMgr->GetOption<uint32>("AutoTravel.RouteProfile", 0);
-    ATConf.routeCacheSec     = sConfigMgr->GetOption<uint32>("AutoTravel.RouteCacheSeconds", 120);
-    ATConf.stuckPenalty      = sConfigMgr->GetOption<float> ("AutoTravel.StuckEdgePenalty", 300.0f);
-    ATConf.penaltyDecaySec   = sConfigMgr->GetOption<float> ("AutoTravel.PenaltyDecaySeconds", 900.0f);
-    ATConf.simplifyTolerance = sConfigMgr->GetOption<float> ("AutoTravel.SimplifyTolerance", 0.7f);
-    if (ATConf.routeProfile > 4) ATConf.routeProfile = 0;
-
-    // Die Vereinfachung verschiebt die Linienfuehrung um bis zur Toleranz.
-    // Waere sie groesser als ein Drittel der Bodenschwelle, koennte allein
-    // das Ausduennen ein "durchgefallen" ausloesen -- die Korrektur wuerde
-    // also einen Fehler erzeugen, den sie danach behebt.
-    float const simplifyMax = ATConf.underMeshDepth / 3.0f;
-    if (ATConf.simplifyTolerance > simplifyMax)
-    {
-        LOG_INFO("server.loading",
-                 "mod-autotravel: SimplifyTolerance {:.2f} ist zu gross fuer "
-                 "UnderMeshDepth {:.2f} - begrenzt auf {:.2f}.",
-                 ATConf.simplifyTolerance, ATConf.underMeshDepth, simplifyMax);
-        ATConf.simplifyTolerance = simplifyMax;
-    }
-    if (ATConf.simplifyTolerance < 0.0f) ATConf.simplifyTolerance = 0.0f;
-    if (ATConf.heuristicWeight < 1.0f) ATConf.heuristicWeight = 1.0f;
-    if (ATConf.heuristicWeight > 3.0f) ATConf.heuristicWeight = 3.0f;
     ATConf.autoMount         = sConfigMgr->GetOption<bool>  ("AutoTravel.AutoMount", true);
     ATConf.mountMinDistance  = sConfigMgr->GetOption<float> ("AutoTravel.MountMinDistance", 150.0f);
     ATConf.pauseInCombat     = sConfigMgr->GetOption<bool>  ("AutoTravel.PauseInCombat", true);
@@ -146,18 +104,14 @@ void AutoTravelMgr::LoadConfig()
     ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
     ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
     ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
-    ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 12.0f);
+    ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 6.0f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
     ATConf.nodeDb            = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
     ATConf.nodeSearchRadius  = sConfigMgr->GetOption<float> ("AutoTravel.NodeSearchRadius", 800.0f);
     ATConf.nodeMinDistance   = sConfigMgr->GetOption<float> ("AutoTravel.NodeMinDistance", 300.0f);
-    ATConf.skipDetourFactor  = sConfigMgr->GetOption<float> ("AutoTravel.SkipDetourFactor", 1.25f);
-    if (ATConf.skipDetourFactor < 1.0f) ATConf.skipDetourFactor = 1.0f;
     ATConf.useSpecialLinks   = sConfigMgr->GetOption<bool>  ("AutoTravel.UseSpecialLinks", true);
     ATConf.specialLinkCost   = sConfigMgr->GetOption<float> ("AutoTravel.SpecialLinkCost", 400.0f);
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
-    ATConf.teleportSecurity  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportSecurity", 2);
-    if (ATConf.teleportSecurity > 3) ATConf.teleportSecurity = 3;
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
     ATConf.debug             = sConfigMgr->GetOption<bool>  ("AutoTravel.Debug", false);
@@ -197,19 +151,17 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession const& s)
         return;
 
     float dist = std::sqrt(
-        (player->GetPositionX() - s.reqX) * (player->GetPositionX() - s.reqX) +
-        (player->GetPositionY() - s.reqY) * (player->GetPositionY() - s.reqY));
+        (player->GetPositionX() - s.destX) * (player->GetPositionX() - s.destX) +
+        (player->GetPositionY() - s.destY) * (player->GetPositionY() - s.destY));
 
     char buf[512];
-    std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u|%s|%.0f",
+    std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u",
                   ATStateName(s.state),
                   dist,
                   s.destName.empty() ? "-" : s.destName.c_str(),
                   player->IsMounted() ? 1u : 0u,
                   uint32(s.path.size()),
-                  s.repathAttempts,
-                  ATOwnerName(s.owner),
-                  s.approachOff);
+                  s.repathAttempts);
 
     ChatHandler(player->GetSession()).SendSysMessage(buf);
 }
@@ -935,16 +887,10 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     bool wasDebug = s.debug;
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
-    int8 keepControl = s.controlOverride;
-    ATRouteProfile keepProfile = s.profile;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
-    s.controlOverride = keepControl;
-    s.profile         = keepProfile;
-    if (s.profile > AT_PROFILE_ZU_FUSS)
-        s.profile = ATRouteProfile(ATConf.routeProfile);
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
     s.route    = it->second;
@@ -981,18 +927,9 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
             leg.resolved = true;
         }
 
-        s.reqX  = leg.wx;      // was erreicht werden soll
-        s.reqY  = leg.wy;
-        s.reqZ  = leg.wz;
-        s.destX = leg.wx;      // was angelaufen wird (kann noch wandern)
+        s.destX = leg.wx;
         s.destY = leg.wy;
         s.destZ = leg.wz;
-        s.approachOff = 0.0f;
-        s.finalTries = 0;
-
-        // Kante merken, damit ein Stuck der richtigen Verbindung angelastet wird
-        s.lastNodeA = (s.legIdx > 0) ? s.route[s.legIdx - 1].nodeId : 0;
-        s.lastNodeB = leg.nodeId;
         return true;
     }
     return false;
@@ -1017,8 +954,8 @@ void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
         last.resolved = true;
     }
 
-    float direct = player->GetExactDist2d(last.wx, last.wy);
-    if (direct < ATConf.nodeMinDistance)
+    float d = player->GetExactDist2d(last.wx, last.wy);
+    if (d < ATConf.nodeMinDistance)
         return;                       // kurze Strecke: direkt pathen
 
     std::vector<ATLeg> nodeLegs;
@@ -1027,27 +964,6 @@ void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
     {
         Dbg(player, s, "Knotenroute nicht nutzbar (" + note + ") - benutze Carbonite-Stuetzpunkte.");
         return;
-    }
-
-    // Kernentscheidung aus Abschnitt 5 der Spezifikation: der Korridor ist
-    // eine Empfehlung, keine Pflicht. Kostet er unverhaeltnismaessig viel mehr
-    // als die Luftlinie, wird querfeldein gelaufen.
-    //
-    //     Korridorkosten > Luftlinie * offroad   ->  Direktweg
-    //
-    // Bei Profil "Korridor" liegt offroad bei 1.6: bis zum 1,6-fachen bleibt
-    // die Route im Netz, darueber wird abgekuerzt. "Kurz" setzt 1.05 und geht
-    // damit fast immer direkt, "Sicher" 2.4 und bleibt fast immer im Netz.
-    ATProfileWeights const& pw = ATWeights(s.profile);
-    if (direct > 1.0f && _lastRouteCost > direct * pw.offroad)
-    {
-        char cb[224];
-        std::snprintf(cb, sizeof(cb),
-                      "Korridor kostet %.0f bei %.0f yd Luftlinie (Grenze %.0f) - "
-                      "Abkuerzung querfeldein.",
-                      _lastRouteCost, direct, direct * pw.offroad);
-        Dbg(player, s, cb);
-        return;                       // Direktweg: NavMesh macht den Rest
     }
 
     nodeLegs.push_back(last);
@@ -1162,16 +1078,10 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     bool wasDebug = s.debug;
     uint32 keepGrace = s.graceOverride;
     float keepArrival = s.arrivalOverride;
-    int8 keepControl = s.controlOverride;
-    ATRouteProfile keepProfile = s.profile;
     s = ATSession();
     s.debug           = wasDebug;
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
-    s.controlOverride = keepControl;
-    s.profile         = keepProfile;
-    if (s.profile > AT_PROFILE_ZU_FUSS)
-        s.profile = ATRouteProfile(ATConf.routeProfile);
     s.mapId    = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
 
@@ -1210,48 +1120,6 @@ void AutoTravelMgr::Stop(Player* player, std::string const& reason, bool silent)
     if (!silent)
         Msg(player, reason.empty() ? "Reise gestoppt." : reason);
     _sessions.erase(it);
-}
-
-// Der Spieler will selbst handeln: Bewegung anhalten und die Steuerung
-// zurueckgeben. Ohne das laesst sich waehrend der Fahrt keine Ausruestung
-// wechseln, kein Zauber wirken und nicht ausweichen.
-void AutoTravelMgr::SetPlayerPause(Player* player, bool on)
-{
-    auto it = _sessions.find(player->GetGUID());
-    if (it == _sessions.end())
-        return;
-
-    ATSession& s = it->second;
-    if (s.playerPaused == on)
-        return;
-
-    s.playerPaused = on;
-
-    if (on)
-    {
-        HaltMovement(player, s);
-        s.path.clear();
-        s.idx = 0;
-        s.state = AT_PLAYER_PAUSED;
-        s.owner = AT_OWNER_PLAYER;
-        Msg(player, "Spielervorrang - Reise angehalten, Steuerung liegt bei dir.");
-    }
-    else
-    {
-        // Von der aktuellen Position neu rechnen: waehrend der Pause kann der
-        // Spieler ein Stueck gelaufen sein oder ausgewichen haben.
-        s.repathAttempts = 0;
-        s.offMeshHits    = 0;
-        s.stuckTimer     = 0;
-        s.mountTried     = false;
-        s.lastX = player->GetPositionX();
-        s.lastY = player->GetPositionY();
-        s.lastZ = player->GetPositionZ();
-        s.state = AT_CALCULATE_PATH;
-        s.owner = AT_OWNER_TRAVEL;
-        Msg(player, "Spielervorrang beendet - neuer Weg von der aktuellen Position.");
-    }
-    PushStatus(player, s);
 }
 
 void AutoTravelMgr::Repath(Player* player)
@@ -1317,28 +1185,6 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
         s.arrivalOverride = v;
         Msg(player, "Arrival Distance = " + value);
     }
-    else if (key == "profil" || key == "profile")
-    {
-        uint32 v = 0;
-        if (!ParseProfile(value, v))
-        {
-            Msg(player, "Profil: korridor | kurz | schnell | sicher | zufuss");
-            return;
-        }
-        s.profile = ATRouteProfile(v);
-        Msg(player, std::string("Routenprofil: ") + ATProfileName(s.profile));
-    }
-    else if (key == "control")
-    {
-        int v = atoi(value.c_str());
-        s.controlOverride = int8((v < 0) ? -1 : (v ? 1 : 0));
-        Dbg(player, s, std::string("Steuerungsuebernahme: ") +
-            (s.controlOverride < 0 ? "laut Konfiguration"
-                                   : (s.controlOverride ? "an" : "aus")));
-        // Sofort wirksam machen, wenn gerade gefahren wird.
-        if (s.controlOverride == 0 && s.controlTaken)
-            ReleaseControl(player, s);
-    }
     else if (key == "grace")
     {
         float v = float(atof(value.c_str()));
@@ -1353,82 +1199,8 @@ void AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
     else
         Msg(player, "Unbekannte Option: " + key);
 
-    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0
-        && s.controlOverride < 0 && !s.debug)
+    if (s.state == AT_IDLE && s.arrivalOverride <= 0.0f && s.graceOverride == 0 && !s.debug)
         _sessions.erase(player->GetGUID());
-}
-
-// ---------------------------------------------------------------------------
-// Pfadvereinfachung (Douglas-Peucker)
-// ---------------------------------------------------------------------------
-// Der NavMesh-Pfad enthaelt viele Punkte, die auf einer Geraden liegen. Jeder
-// davon ist ein Knick im Spline und damit eine Mikrokorrektur in der
-// Bewegung. Entfernt werden nur Punkte, die weniger als die Toleranz von der
-// Verbindungslinie ihrer Nachbarn abweichen -- die Linienfuehrung aendert sich
-// also um hoechstens diesen Betrag und bleibt damit im begehbaren Korridor.
-
-namespace
-{
-    // Der Abstand MUSS dreidimensional gerechnet werden. Zweidimensional
-    // liegen die Punkte einer Huegelkuppe in der Draufsicht auf einer Geraden
-    // und wurden deshalb allesamt entfernt -- der Spline schnitt danach durch
-    // den Huegel oder darueber hinweg. Genau daher kamen die vielen Meldungen
-    // "Kein Bodenkontakt ... in der Luft".
-    float PerpDist(G3D::Vector3 const& p, G3D::Vector3 const& a, G3D::Vector3 const& b)
-    {
-        float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
-        float len2 = dx * dx + dy * dy + dz * dz;
-        if (len2 < 0.0001f)
-        {
-            float ex = p.x - a.x, ey = p.y - a.y, ez = p.z - a.z;
-            return std::sqrt(ex * ex + ey * ey + ez * ez);
-        }
-        float t = ((p.x - a.x) * dx + (p.y - a.y) * dy + (p.z - a.z) * dz) / len2;
-        t = std::max(0.0f, std::min(1.0f, t));
-        float px = a.x + t * dx, py = a.y + t * dy, pz = a.z + t * dz;
-        float ex = p.x - px, ey = p.y - py, ez = p.z - pz;
-        return std::sqrt(ex * ex + ey * ey + ez * ez);
-    }
-
-    void Simplify(Movement::PointsArray const& in, size_t first, size_t last,
-                  float tol, std::vector<bool>& keep)
-    {
-        if (last <= first + 1)
-            return;
-
-        float worst = 0.0f;
-        size_t idx = first;
-        for (size_t i = first + 1; i < last; ++i)
-        {
-            float d = PerpDist(in[i], in[first], in[last]);
-            if (d > worst) { worst = d; idx = i; }
-        }
-
-        if (worst <= tol)
-            return;                       // alles dazwischen ist entbehrlich
-
-        keep[idx] = true;
-        Simplify(in, first, idx, tol, keep);
-        Simplify(in, idx, last, tol, keep);
-    }
-
-    Movement::PointsArray SimplifyPath(Movement::PointsArray const& in, float tol)
-    {
-        if (in.size() < 3 || tol <= 0.0f)
-            return in;
-
-        std::vector<bool> keep(in.size(), false);
-        keep.front() = true;
-        keep.back()  = true;
-        Simplify(in, 0, in.size() - 1, tol, keep);
-
-        Movement::PointsArray out;
-        out.reserve(in.size());
-        for (size_t i = 0; i < in.size(); ++i)
-            if (keep[i])
-                out.push_back(in[i]);
-        return out;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,16 +1282,10 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     if (chunk.size() < 2)
         return;
 
-    bool takeCtl = (s.controlOverride < 0) ? ATConf.takeClientControl
-                                           : (s.controlOverride == 1);
-    if (takeCtl && !s.controlTaken)
+    if (ATConf.takeClientControl && !s.controlTaken)
     {
         player->SetClientControl(player, false);
         s.controlTaken = true;
-    }
-    else if (!takeCtl && s.controlTaken)
-    {
-        ReleaseControl(player, s);
     }
 
     // Ein haengengebliebenes Fall-Flag laesst den Charakter bis zum naechsten
@@ -1538,8 +1304,6 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     init.MovebyPath(chunk);
     init.SetWalk(false);
     init.Launch();
-
-    // Kurz keine Steuererkennung: die Spline setzt selbst Bewegungsflaggen.
 
     // Der Client zaehlt waehrend einer servergesteuerten Bewegung Fallzeit
     // mit, wenn der Spline bergab durch die Luft schneidet. Beim Zurueckgeben
@@ -1623,13 +1387,6 @@ bool AutoTravelMgr::TryPath(Player* player, float x, float y, float z, bool stra
 
 bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 {
-    // Jeder neue Anlauf beginnt wieder beim angeforderten Ziel. Sonst wandert
-    // der Annaeherungspunkt ueber mehrere Versuche immer weiter weg.
-    s.destX = s.reqX;
-    s.destY = s.reqY;
-    s.destZ = s.reqZ;
-    s.approachOff = 0.0f;
-
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
     float pz = player->GetPositionZ();
@@ -1681,16 +1438,7 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 }
                 s.destZ = zc[i];
                 s.lastPathType = type;
-
-                size_t rawCount = pts.size();
-                s.path = SimplifyPath(pts, ATConf.simplifyTolerance);
-                if (s.path.size() < rawCount)
-                {
-                    char sb[160];
-                    std::snprintf(sb, sizeof(sb), "Pfad geglaettet: %u -> %u Punkte",
-                                  uint32(rawCount), uint32(s.path.size()));
-                    Dbg(player, s, sb);
-                }
+                s.path = pts;
                 s.idx = 1;
                 s.pathIncomplete = incomplete;
 
@@ -1725,12 +1473,9 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                               "Ziel um %.0f yd versetzt (urspruengliche Stelle nicht begehbar).",
                               RINGS[r]);
                 Dbg(player, s, b);
-                // Nur der Annaeherungspunkt wandert - das angeforderte Ziel
-                // bleibt stehen und entscheidet weiterhin ueber die Ankunft.
                 s.destX = x;
                 s.destY = y;
                 s.destZ = z;
-                s.approachOff = RINGS[r];
                 s.path = pts;
                 s.idx = 1;
                 s.pathIncomplete = incomplete;
@@ -1934,44 +1679,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
-    // --- Warum hier KEINE Steuerungserkennung steht --------------------------
-    // Naheliegend waere, die Bewegungsflaggen des Spielers auszuwerten. Das
-    // funktioniert nicht: MoveSplineInit::Launch() setzt MOVEMENTFLAG_FORWARD
-    // selbst, und zwar fuer die gesamte Dauer der Bewegung. Der Server sieht
-    // seine eigene Fahrt also nicht anders als einen laufenden Spieler und
-    // pausiert sich in einer Schleife selbst.
-    //
-    // Eine kurze Sperre nach dem Start hilft nicht, weil die Flagge dauerhaft
-    // gesetzt bleibt. Auch ein Abgleich mit der Spline-Sollposition traegt
-    // nicht: solange der Server die Kontrolle hat, kann der Client gar nicht
-    // abweichen, und ohne Kontrolle bewegt die Spline den Charakter nicht.
-    //
-    // Die Unterscheidung gehoert deshalb auf die Clientseite, wo bekannt ist,
-    // wer eine Aktion ausgeloest hat. Das Addon meldet sich mit ".at pause".
-
-    // --- Spielervorrang: ausdruecklich angefordert ---------------------------
-    if (s.playerPaused)
-    {
-        if (s.controlTaken)
-            ReleaseControl(player, s);
-        s.state = AT_PLAYER_PAUSED;
-        return;
-    }
-
     // --- Kein Kontakt zur begehbaren Flaeche --------------------------------
-    // Zwei sehr verschiedene Stoerungen, die vorher gleich behandelt wurden:
+    // Zwei Stoerungen mit demselben Bild: der Charakter huepft in der
+    // Fallanimation und laeuft dabei geradeaus weiter.
     //
-    //   zu tief  -> durch den Boden gefallen. Kommt von selbst nicht zurueck,
-    //               also zuruecksetzen.
-    //   zu hoch  -> haengt in der Luft. Das passiert auf huegeligem Gelaende
-    //               aber auch voellig normal, waehrend der Spline eine Senke
-    //               ueberspannt. Hier war die alte Fassung viel zu scharf:
-    //               6 Yards Schwelle, drei Messungen, sofort Teleport.
+    //   zu tief  -> durch den Boden gefallen, kommt nie wieder hoch
+    //   zu hoch  -> haengt in der Luft und sinkt langsam ab
     //
-    // Neu deshalb:
-    //   * waehrend laufender Bewegung gilt die doppelte Schwelle
-    //   * erst wird nur der Pfad neu berechnet, kein Teleport
-    //   * zurueckgesetzt wird nur, wenn auch das nichts bringt
+    // Bezugsgroesse ist NICHT die rohe Bodenhoehe, sondern die Reisehoehe:
+    // beim Schwimmen ist das die Wasseroberflaeche, sonst der Boden. Ohne das
+    // waere jeder Schwimmzug ein Fehlalarm, weil der Seegrund weit unten liegt.
     if (ATConf.rescueUnderMesh && s.state != AT_WAIT_FLIGHT && s.state != AT_COMBAT_PAUSED
         && !player->IsInFlight())
     {
@@ -1986,63 +1703,45 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
         float ref = (ground > INVALID_HEIGHT) ? TravelZ(player, px, py, ground) : INVALID_HEIGHT;
 
-        bool moving = !player->movespline->Finalized();
-        float aboveLimit = ATConf.aboveMeshHeight * (moving ? 2.0f : 1.0f);
-
         bool tooLow  = (ref > INVALID_HEIGHT) && (pz < ref - ATConf.underMeshDepth);
-        bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + aboveLimit);
+        bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + ATConf.aboveMeshHeight);
 
         if (tooLow || tooHigh)
-            ++s.offMeshHits;
-        else
-            s.offMeshHits = 0;
-
-        uint8 needed = tooLow ? 3 : 8;      // Schweben braucht laengere Bestaetigung
-
-        if (s.offMeshHits >= needed)
         {
-            s.offMeshHits = 0;
-            ++s.rescueCount;
-
-            // Erster Anlauf bei Schweben: nur neu rechnen. Sehr oft liegt es
-            // an einem schlechten Pfadpunkt, nicht an der Position.
-            if (tooHigh && s.rescueCount <= 2)
+            // Mehrere Messungen hintereinander, damit ein Sprung, eine Rampe
+            // oder ein Punkt unter einer Bruecke nicht faelschlich ausloest.
+            if (++s.offMeshHits >= 3)
             {
-                char b[192];
-                std::snprintf(b, sizeof(b),
-                              "Schwebt %.1f yd ueber dem Boden - Pfad wird neu berechnet.",
-                              pz - ref);
-                Dbg(player, s, b);
+                s.offMeshHits = 0;
+                ++s.rescueCount;
+
+                float target = ref + 0.5f;
                 HaltMovement(player, s);
+                player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
+                player->NearTeleportTo(px, py, target, player->GetOrientation());
+                player->SetFallInformation(0, target);
+
+                char b[224];
+                std::snprintf(b, sizeof(b),
+                              "Kein Bodenkontakt (%.1f statt %.1f, %s) - zurueckgesetzt "
+                              "und neu berechnet.",
+                              pz, target, tooLow ? "unter der Flaeche" : "in der Luft");
+                Msg(player, b);
+
                 s.path.clear();
                 s.idx = 0;
                 s.state = AT_CALCULATE_PATH;
+
+                if (s.rescueCount >= 6)
+                {
+                    Msg(player, "Zu oft ohne Bodenkontakt - Navigation gestoppt.");
+                    s.state = AT_IDLE;
+                }
                 return;
             }
-
-            float target = ref + 0.5f;
-            HaltMovement(player, s);
-            player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
-            player->NearTeleportTo(px, py, target, player->GetOrientation());
-            player->SetFallInformation(0, target);
-
-            char b[224];
-            std::snprintf(b, sizeof(b),
-                          "Kein Bodenkontakt (%.1f statt %.1f, %s) - zurueckgesetzt.",
-                          pz, target, tooLow ? "unter der Flaeche" : "in der Luft");
-            Msg(player, b);
-
-            s.path.clear();
-            s.idx = 0;
-            s.state = AT_CALCULATE_PATH;
-
-            if (s.rescueCount >= 8)
-            {
-                Msg(player, "Zu oft ohne Bodenkontakt - Navigation gestoppt.");
-                s.state = AT_IDLE;
-            }
-            return;
         }
+        else
+            s.offMeshHits = 0;
     }
 
     // --- Untergetaucht --------------------------------------------------------
@@ -2096,42 +1795,8 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     bool lastLeg = (s.legIdx + 1 >= s.route.size());
     float radius = lastLeg ? ArrivalDist(s) : ATConf.legDistance;
 
-    // Gemessen wird gegen das angeforderte Ziel, nicht gegen den
-    // Annaeherungspunkt. Sonst meldet AutoTravel "angekommen", obwohl es in
-    // Wahrheit an einer Ersatzstelle steht.
-    float dist    = player->GetExactDist2d(s.reqX, s.reqY);
-    float distApp = player->GetExactDist2d(s.destX, s.destY);
-
-    bool reached  = (dist <= radius);
-    bool nearOnly = false;
-
-    // Ist die gewuenschte Stelle nicht begehbar, laeuft AutoTravel einen
-    // Ersatzpunkt an. Wuerde die Ankunft weiterhin nur gegen das angeforderte
-    // Ziel messen, kaeme die Reise dort NIE an und liefe endlos im Repath --
-    // besonders bei kleinem Zielradius. Deshalb: am Ersatzpunkt angekommen,
-    // noch ein paar Anlaeufe auf den exakten Punkt, dann ehrlich melden,
-    // wie weit es tatsaechlich ist.
-    if (!reached && s.approachOff > 0.0f && distApp <= radius
-        && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
-    {
-        if (s.finalTries < ATConf.finalApproachTries)
-        {
-            ++s.finalTries;
-            char fb[160];
-            std::snprintf(fb, sizeof(fb), "Schlussanflug %u/%u auf den exakten Zielpunkt.",
-                          uint32(s.finalTries), ATConf.finalApproachTries);
-            Dbg(player, s, fb);
-            HaltMovement(player, s);
-            s.path.clear();
-            s.idx = 0;
-            s.state = AT_CALCULATE_PATH;
-            return;
-        }
-        reached  = true;
-        nearOnly = true;
-    }
-
-    if (reached && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
+    float dist = player->GetExactDist2d(s.destX, s.destY);
+    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_FLIGHT)
     {
         HaltMovement(player, s);
 
@@ -2183,16 +1848,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
         s.state = AT_ARRIVED;
         PushStatus(player, s);
-        if (nearOnly)
-        {
-            char ab[224];
-            std::snprintf(ab, sizeof(ab),
-                          "Ziel erreicht - %s (%.0f yd entfernt, naeher ist dort "
-                          "nichts begehbar).", s.destName.c_str(), dist);
-            Msg(player, ab);
-        }
-        else
-            Msg(player, "Ziel erreicht - " + s.destName + ".");
+        Msg(player, "Ziel erreicht - " + s.destName + ".");
         s.state = AT_IDLE;
         return;
     }
@@ -2370,13 +2026,6 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                     if (moved < ATConf.stuckMinDistance)
                     {
-                        // Die Kante, auf der es klemmt, wird fuer eine Weile
-                        // teurer. Nicht dauerhaft und nicht in der Datenbank:
-                        // ein einmaliger Ausrutscher soll die Karte nicht
-                        // verderben, deshalb klingt der Aufschlag ab.
-                        if (s.lastNodeA && s.lastNodeB)
-                            PenalizeEdge(s.lastNodeA, s.lastNodeB);
-
                         ++s.repathAttempts;
                         char buf[160];
                         std::snprintf(buf, sizeof(buf),
