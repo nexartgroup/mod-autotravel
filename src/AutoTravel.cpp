@@ -21,8 +21,6 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <cerrno>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -51,8 +49,7 @@ char const* ATStateName(ATState s)
         case AT_TRAVELING:      return "TRAVELING";
         case AT_COMBAT_PAUSED:  return "PAUSED - COMBAT";
         case AT_MOUNTING:       return "MOUNTING";
-        case AT_WAIT_FLIGHT:     return "WARTE AUF FLUG";
-        case AT_WAIT_CONNECTION: return "WARTE AUF VERBINDUNG";
+        case AT_WAIT_FLIGHT:    return "WARTE AUF FLUG";
         case AT_ARRIVED:        return "ARRIVED";
         case AT_FAILED:         return "FAILED";
     }
@@ -61,45 +58,6 @@ char const* ATStateName(ATState s)
 
 namespace
 {
-    bool ParseUIntStrict(std::string const& text, uint32& out)
-    {
-        if (text.empty())
-            return false;
-
-        errno = 0;
-
-        char* end = nullptr;
-        unsigned long value = std::strtoul(text.c_str(), &end, 10);
-
-        if (errno != 0 || !end || *end != '\0')
-            return false;
-
-        if (value > 0xFFFFFFFFul)
-            return false;
-
-        out = static_cast<uint32>(value);
-        return true;
-    }
-
-    bool ParseFloatStrict(std::string const& text, float& out)
-    {
-        if (text.empty())
-            return false;
-
-        errno = 0;
-
-        char* end = nullptr;
-        float value = std::strtof(text.c_str(), &end);
-
-        if (errno != 0 || !end || *end != '\0')
-            return false;
-
-        if (!std::isfinite(value))
-            return false;
-
-        out = value;
-        return true;
-    }
     std::string PathTypeName(uint32 t)
     {
         std::string out;
@@ -191,8 +149,6 @@ void AutoTravelMgr::LoadConfig()
     ATConf.allowTeleport     = sConfigMgr->GetOption<bool>  ("AutoTravel.AllowTeleport", true);
     ATConf.teleportMinDist   = sConfigMgr->GetOption<float> ("AutoTravel.TeleportMinDistance", 0.0f);
     ATConf.teleportCooldown  = sConfigMgr->GetOption<uint32>("AutoTravel.TeleportCooldownSec", 5);
-    ATConf.connectionTimeoutMs = sConfigMgr->GetOption<uint32>("AutoTravel.ConnectionTimeoutMs", 60000);
-    ATConf.connectionArrivalDistance = sConfigMgr->GetOption<float>("AutoTravel.ConnectionArrivalDistance", 120.0f);
     ATConf.debug             = sConfigMgr->GetOption<bool>  ("AutoTravel.Debug", false);
     ATConf.terrainStep       = sConfigMgr->GetOption<float>("AutoTravel.TerrainStep", 3.0f);
 
@@ -451,12 +407,8 @@ void AutoTravelMgr::LearnMapId(Player* player, uint32 clientMapId, float pnx, fl
 
 bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                bool hasCalib, float pnx, float pny,
-                               float& outX, float& outY,
-                               uint32& outMapId,
-                               std::string& err,
-                               bool allowOtherMap) const
+                               float& outX, float& outY, std::string& err) const
 {
-    outMapId = 0;
     if (!sATMapAreasLoaded)
     {
         err = "Serverseitig konnte WorldMapArea.dbc nicht geladen werden - siehe Serverlog.";
@@ -540,11 +492,11 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
             err = "Unbekannte Karten-ID " + std::to_string(uiMapId) + ".";
             return false;
         }
-        if (!allowOtherMap && it->second.mapId != player->GetMapId())
+        if (it->second.mapId != player->GetMapId())
         {
             err = "Das Ziel liegt auf einer anderen Karte (Map " +
-                std::to_string(it->second.mapId) +
-                ").";
+                  std::to_string(it->second.mapId) +
+                  "). Kontinentwechsel wird beim Laufen nicht unterstuetzt.";
             return false;
         }
         chosen = tryId;
@@ -591,7 +543,7 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
             }
         }
     }
-    outMapId = e.mapId;
+
     return true;
 }
 
@@ -927,8 +879,7 @@ float AutoTravelMgr::TravelZ(Player* player, float x, float y, float groundZ) co
 bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                  bool hasCalib, float pnx, float pny,
                                  float& x, float& y, float& z, uint32& mapId,
-                                 std::string& err,
-                                 bool allowOtherMap) const
+                                 std::string& err) const
 {
     if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f)
     {
@@ -936,30 +887,10 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
         return false;
     }
 
-    if (!MapToWorld(player,
-                uiMapId,
-                nx,
-                ny,
-                hasCalib,
-                pnx,
-                pny,
-                x,
-                y,
-                mapId,
-                err,
-                allowOtherMap))
-    {
+    if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err))
         return false;
-    }
 
-    // We can only query terrain from the map the player is currently on.
-    // For a destination on another map, Z will be resolved after the player
-    // arrives on that map.
-    if (mapId != player->GetMapId())
-    {
-        z = 0.0f;
-        return true;
-    }
+    mapId = player->GetMapId();
 
     z = BestGroundZ(player, x, y);
     if (z <= INVALID_HEIGHT)
@@ -1186,37 +1117,10 @@ void AutoTravelMgr::RouteAdd(Player* player, bool clearFirst, std::string const&
         if (a == std::string::npos || b == std::string::npos || c == std::string::npos)
             continue;
 
-        uint32 uiMapId = 0;
-        uint32 flags = 0;
-
-        float nx = 0.0f;
-        float ny = 0.0f;
-
-        if (!ParseUIntStrict(tok.substr(0, a), uiMapId) ||
-            !ParseFloatStrict(tok.substr(a + 1, b - a - 1), nx) ||
-            !ParseFloatStrict(tok.substr(b + 1, c - b - 1), ny) ||
-            !ParseUIntStrict(tok.substr(c + 1), flags))
-        {
-            Dbg(
-                player,
-                _sessions[player->GetGUID()],
-                "Routepunkt wegen ungueltiger Parameter verworfen.");
-
-            continue;
-        }
-
-        if (!uiMapId ||
-            nx < 0.0f || nx > 1.0f ||
-            ny < 0.0f || ny > 1.0f ||
-            flags > 255)
-        {
-            continue;
-        }
-a
-        leg.uiMapId = uiMapId;
-        leg.nx = nx;
-        leg.ny = ny;
-        leg.flags = uint8(flags);
+        leg.uiMapId = uint32(atoi(tok.substr(0, a).c_str()));
+        leg.nx      = float(atof(tok.substr(a + 1, b - a - 1).c_str()));
+        leg.ny      = float(atof(tok.substr(b + 1, c - b - 1).c_str()));
+        leg.flags   = uint8(atoi(tok.substr(c + 1).c_str()));
 
         if (!leg.uiMapId || leg.nx < 0.0f || leg.nx > 1.0f || leg.ny < 0.0f || leg.ny > 1.0f)
             continue;
@@ -1257,8 +1161,6 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     s.graceOverride   = keepGrace;
     s.arrivalOverride = keepArrival;
     s.mapId    = player->GetMapId();
-    s.expectedMapId = player->GetMapId();
-    s.connectionStartMapId = player->GetMapId();
     s.destName = name.empty() ? "Ziel" : name;
     s.route    = it->second;
     s.legIdx   = 0;
@@ -1281,86 +1183,24 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         {
             uint32 mapId = 0;
             std::string err;
-
-            if (!ResolveWorld(
-                    player,
-                    leg.uiMapId,
-                    leg.nx,
-                    leg.ny,
-                    false,
-                    0.0f,
-                    0.0f,
-                    leg.wx,
-                    leg.wy,
-                    leg.wz,
-                    mapId,
-                    err,
-                    true))
+            if (!ResolveWorld(player, leg.uiMapId, leg.nx, leg.ny, false, 0.0f, 0.0f,
+                              leg.wx, leg.wy, leg.wz, mapId, err))
             {
                 char b[224];
-
-                std::snprintf(
-                    b,
-                    sizeof(b),
-                    "Stuetzpunkt %u konnte nicht aufgeloest werden: %s",
-                    uint32(s.legIdx + 1),
-                    err.c_str());
-
+                std::snprintf(b, sizeof(b), "Stuetzpunkt %u uebersprungen: %s",
+                              uint32(s.legIdx + 1), err.c_str());
                 Dbg(player, s, b);
-
-                if (leg.policy == AT_LEG_REQUIRED ||
-                    leg.policy == AT_LEG_CONNECTION)
-                {
-                    Msg(
-                        player,
-                        "Erforderlicher Stuetzpunkt konnte nicht aufgeloest werden.");
-
-                    s.state = AT_FAILED;
-                    return false;
-                }
-
                 ++s.legIdx;
                 continue;
             }
-
-            leg.mapId = mapId;
             leg.resolved = true;
-            leg.needsMapArrival = (mapId != player->GetMapId());
-
-            if (leg.mapId == player->GetMapId())
-            {
-                float z = BestGroundZ(player, leg.wx, leg.wy);
-
-                if (z <= INVALID_HEIGHT)
-                {
-                    if (leg.policy == AT_LEG_REQUIRED ||
-                        leg.policy == AT_LEG_CONNECTION)
-                    {
-                        Msg(
-                            player,
-                            "Erforderlicher Stuetzpunkt hat keine gueltige Bodenhoehe.");
-
-                        s.state = AT_FAILED;
-                        return false;
-                    }
-
-                    ++s.legIdx;
-                    continue;
-                }
-
-                leg.wz = z;
-                leg.needsMapArrival = false;
-            }
         }
 
-        s.expectedMapId = leg.mapId;
         s.destX = leg.wx;
         s.destY = leg.wy;
         s.destZ = leg.wz;
-
         return true;
     }
-
     return false;
 }
 
@@ -1377,49 +1217,19 @@ void AutoTravelMgr::ApplyNodeRouting(Player* player, ATSession& s)
     {
         uint32 m = 0;
         std::string err;
-        if (!ResolveWorld(
-        player,
-        last.uiMapId,
-        last.nx,
-        last.ny,
-        false,
-        0.0f,
-        0.0f,
-        last.wx,
-        last.wy,
-        last.wz,
-        m,
-        err,
-        true))
-    {
-        return;
-    }
-
-    last.mapId = m;
-    last.resolved = true;
-    last.needsMapArrival = (m != player->GetMapId());
-    }
-
-    float d = 0.0f;
-
-    if (last.mapId == player->GetMapId())
-    {
-        d = player->GetExactDist2d(last.wx, last.wy);
-
-        if (d < ATConf.nodeMinDistance)
+        if (!ResolveWorld(player, last.uiMapId, last.nx, last.ny, false, 0.0f, 0.0f,
+                          last.wx, last.wy, last.wz, m, err))
             return;
+        last.resolved = true;
     }
+
+    float d = player->GetExactDist2d(last.wx, last.wy);
+    if (d < ATConf.nodeMinDistance)
+        return;                       // kurze Strecke: direkt pathen
 
     std::vector<ATLeg> nodeLegs;
     std::string note;
-    if (!BuildNodeRoute(
-        player,
-        last.mapId,
-        last.wx,
-        last.wy,
-        last.wz,
-        nodeLegs,
-        note))
+    if (!BuildNodeRoute(player, last.wx, last.wy, last.wz, nodeLegs, note))
     {
         Dbg(player, s, "Knotenroute nicht nutzbar (" + note + ") - benutze Carbonite-Stuetzpunkte.");
         return;
@@ -1474,16 +1284,10 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
 {
     ++s.legIdx;
-
     s.repathAttempts = 0;
     s.mountTried = false;
-
     s.path.clear();
     s.idx = 0;
-
-    s.waitingForMapChange = false;
-    s.connectionTimer = 0;
-    s.wasInFlight = false;
 
     if (s.legIdx >= s.route.size())
         return false;
@@ -1491,32 +1295,10 @@ bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
     if (!SetLegTarget(player, s))
         return false;
 
-    ATLeg const& leg = s.route[s.legIdx];
-
-    s.expectedMapId = leg.mapId;
-
-    char b[192];
-
-    std::snprintf(
-        b,
-        sizeof(b),
-        "Stuetzpunkt %u/%u aktiviert: %s | Map %u",
-        uint32(s.legIdx + 1),
-        uint32(s.route.size()),
-        leg.name.empty() ? "unbenannt" : leg.name.c_str(),
-        leg.mapId);
-
+    char b[160];
+    std::snprintf(b, sizeof(b), "Stuetzpunkt %u/%u erreicht, weiter zum naechsten.",
+                  uint32(s.legIdx), uint32(s.route.size()));
     Dbg(player, s, b);
-
-    if (leg.mapId != player->GetMapId())
-    {
-        s.state = AT_WAIT_CONNECTION;
-        s.waitingForMapChange = true;
-        s.connectionStartMapId = player->GetMapId();
-        s.connectionTimer = 0;
-
-        return true;
-    }
 
     s.state = AT_CALCULATE_PATH;
     return true;
@@ -1555,19 +1337,7 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     float wx = 0.0f, wy = 0.0f, wz = 0.0f;
     uint32 tmpMap = 0;
     std::string err;
-    if (!ResolveWorld(player,
-                  uiMapId,
-                  nx,
-                  ny,
-                  hasCalib,
-                  pnx,
-                  pny,
-                  wx,
-                  wy,
-                  wz,
-                  tmpMap,
-                  err,
-                  true))
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err))
     {
         Msg(player, err);
         return false;
@@ -3375,245 +3145,6 @@ void AutoTravelMgr::Update(uint32 diff)
             ++it;
     }
 }
-bool AutoTravelMgr::IsCurrentLegConnection(ATSession const& s) const
-{
-    if (s.legIdx >= s.route.size())
-        return false;
-
-    ATLeg const& leg = s.route[s.legIdx];
-
-    return (leg.flags & AT_LEG_SPECIAL) ||
-           leg.policy == AT_LEG_CONNECTION;
-}
-
-bool AutoTravelMgr::HandleConnectionTransition(
-    Player* player,
-    ATSession& s,
-    uint32 diff)
-{
-    if (!s.waitingForMapChange)
-    {
-        // A normal map change during walking is still an error.
-        if (player->IsBeingTeleported())
-        {
-            HaltMovement(player, s);
-            return;
-        }
-
-        if (HandleConnectionTransition(player, s, diff))
-            return;
-
-        return false;
-    }
-
-    s.connectionTimer += diff;
-
-    uint32 currentMap = player->GetMapId();
-
-    // Expected map reached.
-    if (currentMap == s.expectedMapId)
-    {
-        s.waitingForMapChange = false;
-        s.connectionTimer = 0;
-        s.connectionStartMapId = currentMap;
-        s.mapId = currentMap;
-
-        if (s.legIdx < s.route.size())
-        {
-            ATLeg& leg = s.route[s.legIdx];
-
-            // Recalculate terrain Z on the new map.
-            float z = BestGroundZ(player, leg.wx, leg.wy);
-
-            if (z > INVALID_HEIGHT)
-                leg.wz = z;
-
-            leg.needsMapArrival = false;
-
-            s.destX = leg.wx;
-            s.destY = leg.wy;
-            s.destZ = leg.wz;
-        }
-
-        Msg(player, "Kartenwechsel erkannt - AutoTravel wird fortgesetzt.");
-        Dbg(player, s, "Erwartete Zielkarte erreicht.");
-
-        s.state = AT_CALCULATE_PATH;
-        s.repathAttempts = 0;
-        s.path.clear();
-        s.idx = 0;
-
-        PushStatus(player, s);
-        return true;
-    }
-
-    // A map change happened, but it wasn't the map we expected.
-    if (currentMap != s.connectionStartMapId)
-    {
-        HaltMovement(player, s);
-
-        char b[256];
-        std::snprintf(
-            b,
-            sizeof(b),
-            "Falsche Zielkarte erreicht (erwartet %u, aktuell %u).",
-            s.expectedMapId,
-            currentMap);
-
-        Msg(player, b);
-
-        s.state = AT_FAILED;
-        PushStatus(player, s);
-        s.state = AT_IDLE;
-
-        return true;
-    }
-
-    if (s.connectionTimer >= ATConf.connectionTimeoutMs)
-    {
-        HaltMovement(player, s);
-
-        char b[256];
-        std::snprintf(
-            b,
-            sizeof(b),
-            "Verbindung nicht abgeschlossen (%u Sekunden Timeout).",
-            ATConf.connectionTimeoutMs / 1000);
-
-        Msg(player, b);
-
-        s.state = AT_FAILED;
-        PushStatus(player, s);
-        s.state = AT_IDLE;
-
-        return true;
-    }
-
-    return true;
-}
-bool AutoTravelMgr::IsCurrentLegConnection(ATSession const& s) const
-{
-    if (s.legIdx >= s.route.size())
-        return false;
-
-    ATLeg const& leg = s.route[s.legIdx];
-
-    return (leg.flags & AT_LEG_SPECIAL) ||
-           leg.policy == AT_LEG_CONNECTION;
-}
-
-bool AutoTravelMgr::HandleConnectionTransition(
-    Player* player,
-    ATSession& s,
-    uint32 diff)
-{
-    if (!s.waitingForMapChange)
-    {
-        if (player->IsBeingTeleported())
-        {
-            HaltMovement(player, s);
-            return;
-        }
-
-        if (HandleConnectionTransition(player, s, diff))
-            return;
-
-        return false;
-    }
-
-    s.connectionTimer += diff;
-
-    uint32 currentMap = player->GetMapId();
-
-    if (currentMap == s.expectedMapId)
-    {
-        s.waitingForMapChange = false;
-        s.connectionTimer = 0;
-        s.connectionStartMapId = currentMap;
-        s.mapId = currentMap;
-
-        if (s.legIdx < s.route.size())
-        {
-            ATLeg& leg = s.route[s.legIdx];
-
-            float z = BestGroundZ(player, leg.wx, leg.wy);
-
-            if (z > INVALID_HEIGHT)
-                leg.wz = z;
-
-            leg.needsMapArrival = false;
-
-            s.destX = leg.wx;
-            s.destY = leg.wy;
-            s.destZ = leg.wz;
-        }
-
-        Msg(
-            player,
-            "Kartenwechsel erkannt - AutoTravel wird fortgesetzt.");
-
-        Dbg(
-            player,
-            s,
-            "Erwartete Zielkarte erreicht.");
-
-        s.state = AT_CALCULATE_PATH;
-        s.repathAttempts = 0;
-        s.path.clear();
-        s.idx = 0;
-
-        PushStatus(player, s);
-
-        return true;
-    }
-
-    if (currentMap != s.connectionStartMapId)
-    {
-        HaltMovement(player, s);
-
-        char b[256];
-
-        std::snprintf(
-            b,
-            sizeof(b),
-            "Falsche Zielkarte erreicht "
-            "(erwartet %u, aktuell %u).",
-            s.expectedMapId,
-            currentMap);
-
-        Msg(player, b);
-
-        s.state = AT_FAILED;
-        PushStatus(player, s);
-        s.state = AT_IDLE;
-
-        return true;
-    }
-
-    if (s.connectionTimer >= ATConf.connectionTimeoutMs)
-    {
-        HaltMovement(player, s);
-
-        char b[256];
-
-        std::snprintf(
-            b,
-            sizeof(b),
-            "Verbindung nicht abgeschlossen "
-            "(%u Sekunden Timeout).",
-            ATConf.connectionTimeoutMs / 1000);
-
-        Msg(player, b);
-
-        s.state = AT_FAILED;
-        PushStatus(player, s);
-        s.state = AT_IDLE;
-
-        return true;
-    }
-
-    return true;
-}
 
 void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 {
@@ -3638,15 +3169,13 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     }
 
     // --- harte Abbruchbedingungen -------------------------------------------
-    if (player->IsBeingTeleported())
+    if (player->GetMapId() != s.mapId || player->IsBeingTeleported())
     {
-        // Teleport transition is handled on the next tick.
         HaltMovement(player, s);
+        Msg(player, "Karte gewechselt - Reise abgebrochen.");
+        s.state = AT_IDLE;
         return;
     }
-
-    if (HandleConnectionTransition(player, s, diff))
-        return;
 
     if (!player->IsAlive())
     {
@@ -3847,22 +3376,8 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         ATLeg const& cur = s.route[s.legIdx];
         if (!lastLeg && (cur.flags & (AT_LEG_FLIGHT | AT_LEG_SPECIAL)))
         {
-            s.state = AT_WAIT_CONNECTION;
-
+            s.state = AT_WAIT_FLIGHT;
             s.wasInFlight = false;
-            s.waitingForMapChange = true;
-            s.connectionStartMapId = player->GetMapId();
-            s.connectionTimer = 0;
-
-            if (s.legIdx + 1 < s.route.size())
-            {
-                ATLeg const& next = s.route[s.legIdx + 1];
-
-                s.expectedMapId = next.mapId;
-
-                if (!s.expectedMapId)
-                    s.expectedMapId = player->GetMapId();
-            }
 
             // Zielangabe: Name des naechsten Punktes, sonst das Reiseziel.
             std::string where = cur.nextName;
@@ -3936,54 +3451,15 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         // -------------------------------------------------------------------
         case AT_WAIT_FLIGHT:
         {
-            // Flight handling remains backwards compatible.
-            if (s.wasInFlight)
+            // Auch ohne erkannten Flug fortsetzen, sobald der Charakter in der
+            // Naehe des naechsten Punktes auftaucht - das deckt Portale,
+            // Schiffe und Zeppeline mit ab.
+            if (!s.wasInFlight && s.legIdx + 1 < s.route.size())
             {
-                s.wasInFlight = false;
-                s.waitingForMapChange = false;
-                s.connectionTimer = 0;
-
-                Msg(player, "Gelandet - Reise wird fortgesetzt.");
-
-                if (!AdvanceLeg(player, s))
+                ATLeg const& nxt = s.route[s.legIdx + 1];
+                if (nxt.resolved && player->GetExactDist2d(nxt.wx, nxt.wy) < 80.0f)
                 {
-                    s.state = AT_ARRIVED;
-                    PushStatus(player, s);
-                    Msg(player, "Ziel erreicht - " + s.destName + ".");
-                    s.state = AT_IDLE;
-                }
-
-                PushStatus(player, s);
-            }
-
-            return;
-        }
-        case AT_WAIT_CONNECTION:
-        {
-            // Portals, ships, zeppelins and other connections are expected
-            // to cause a map change. Do not run pathfinding while waiting.
-            if (player->IsInFlight())
-            {
-                s.wasInFlight = true;
-                return;
-            }
-
-            // A same-map connection can still be valid, for example a transport
-            // that unloads somewhere on the same map.
-            if (s.legIdx + 1 < s.route.size())
-            {
-                ATLeg const& next = s.route[s.legIdx + 1];
-
-                if (next.mapId == player->GetMapId() &&
-                    next.resolved &&
-                    player->GetExactDist2d(next.wx, next.wy) <=
-                        ATConf.connectionArrivalDistance)
-                {
-                    s.waitingForMapChange = false;
-                    s.connectionTimer = 0;
-
-                    Msg(player, "Verbindung erkannt - Reise wird fortgesetzt.");
-
+                    Msg(player, "Verbindung genutzt - Reise wird fortgesetzt.");
                     if (!AdvanceLeg(player, s))
                     {
                         s.state = AT_ARRIVED;
@@ -3991,13 +3467,27 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                         Msg(player, "Ziel erreicht - " + s.destName + ".");
                         s.state = AT_IDLE;
                     }
-
+                    PushStatus(player, s);
                     return;
                 }
             }
 
+            if (s.wasInFlight)
+            {
+                s.wasInFlight = false;
+                Msg(player, "Gelandet - Reise wird fortgesetzt.");
+                if (!AdvanceLeg(player, s))
+                {
+                    s.state = AT_ARRIVED;
+                    PushStatus(player, s);
+                    Msg(player, "Ziel erreicht - " + s.destName + ".");
+                    s.state = AT_IDLE;
+                }
+                PushStatus(player, s);
+            }
             return;
         }
+
         // -------------------------------------------------------------------
         case AT_MOUNTING:
         {
@@ -4038,50 +3528,17 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                     // Nicht die ganze Reise wegwerfen: der naechste
                     // Stuetzpunkt ist oft von hier aus erreichbar.
-                    if (s.legIdx < s.route.size())
+                    if (s.legIdx + 1 < s.route.size())
                     {
-                        ATLeg const& failedLeg = s.route[s.legIdx];
-
-                        if (failedLeg.policy == AT_LEG_CONNECTION ||
-                            failedLeg.policy == AT_LEG_REQUIRED)
+                        char sb[160];
+                        std::snprintf(sb, sizeof(sb),
+                                      "Stuetzpunkt %u nicht erreichbar - ueberspringe ihn.",
+                                      uint32(s.legIdx + 1));
+                        Msg(player, sb);
+                        if (AdvanceLeg(player, s))
                         {
-                            HaltMovement(player, s);
-
-                            char sb[256];
-                            std::snprintf(
-                                sb,
-                                sizeof(sb),
-                                "Erforderlicher Stuetzpunkt '%s' ist nicht erreichbar.",
-                                failedLeg.name.empty()
-                                    ? "unbekannt"
-                                    : failedLeg.name.c_str());
-
-                            Msg(player, sb);
-
-                            s.state = AT_FAILED;
                             PushStatus(player, s);
-                            s.state = AT_IDLE;
-
                             return;
-                        }
-
-                        if (s.legIdx + 1 < s.route.size())
-                        {
-                            char sb[160];
-
-                            std::snprintf(
-                                sb,
-                                sizeof(sb),
-                                "Stuetzpunkt %u nicht erreichbar - ueberspringe ihn.",
-                                uint32(s.legIdx + 1));
-
-                            Msg(player, sb);
-
-                            if (AdvanceLeg(player, s))
-                            {
-                                PushStatus(player, s);
-                                return;
-                            }
                         }
                     }
 

@@ -103,36 +103,11 @@ void AutoTravelMgr::LoadTravelNodes()
         ATNode n;
         n.id    = f[0].Get<uint32>();
         n.mapId = f[1].Get<uint32>();
-        n.x = f[2].Get<float>();
-        n.y = f[3].Get<float>();
-        n.z = f[4].Get<float>();
-
-        if (!std::isfinite(n.x) ||
-            !std::isfinite(n.y) ||
-            !std::isfinite(n.z))
-        {
-            LOG_ERROR(
-                "server.loading",
-                "mod-autotravel: TravelNode {} verworfen - ungueltige Koordinaten.",
-                n.id);
-
-            continue;
-        }
+        n.x     = f[2].Get<float>();
+        n.y     = f[3].Get<float>();
+        n.z     = f[4].Get<float>();
         n.name  = f[5].Get<std::string>();
-        auto existing = sNodes.find(n.id);
-
-        if (existing != sNodes.end())
-        {
-            LOG_ERROR(
-                "server.loading",
-                "mod-autotravel: Doppelte TravelNode-ID {} - "
-                "zweiter Eintrag verworfen.",
-                n.id);
-
-            continue;
-        }
-
-        sNodes.emplace(n.id, std::move(n));
+        sNodes[n.id] = n;
     } while (res->NextRow());
 
     sql = "SELECT node_id, to_node_id, type, distance, extra_cost FROM `" + db +
@@ -153,30 +128,7 @@ void AutoTravelMgr::LoadTravelNodes()
             l.type = f[2].Get<uint8>();
             float distance   = f[3].Get<float>();
             float extra      = f[4].Get<float>();
-            if (!std::isfinite(distance) ||
-                !std::isfinite(extra) ||
-                distance < 0.0f ||
-                extra < 0.0f)
-            {
-                LOG_ERROR(
-                    "server.loading",
-                    "mod-autotravel: Verbindung {} -> {} verworfen - "
-                    "ungueltige Kosten.",
-                    from,
-                    l.to);
 
-                continue;
-            }
-            if (from == l.to)
-{
-                LOG_ERROR(
-                    "server.loading",
-                    "mod-autotravel: Selbstverbindung {} -> {} verworfen.",
-                    from,
-                    l.to);
-
-                continue;
-            }
             if (sNodes.find(from) == sNodes.end() || sNodes.find(l.to) == sNodes.end())
                 continue;
 
@@ -204,31 +156,6 @@ void AutoTravelMgr::LoadTravelNodes()
 
     LOG_INFO("server.loading", "mod-autotravel: {} TravelNodes, {} Verbindungen geladen.",
              uint32(sNodes.size()), linkCount);
-
-    uint32 invalidLinks = 0;
-
-    for (auto const& kv : sLinks)
-    {
-        if (sNodes.find(kv.first) == sNodes.end())
-        {
-            ++invalidLinks;
-            continue;
-        }
-
-        for (ATNodeLink const& link : kv.second)
-        {
-            if (sNodes.find(link.to) == sNodes.end())
-                ++invalidLinks;
-        }
-    }
-
-    if (invalidLinks)
-    {
-        LOG_ERROR(
-            "server.loading",
-            "mod-autotravel: {} ungueltige TravelNode-Verbindungen gefunden.",
-            invalidLinks);
-    }
 
     for (auto const& kv : typeCount)
         LOG_INFO("server.loading", "mod-autotravel:   Verbindungstyp {} ({}): {}",
@@ -268,14 +195,8 @@ namespace
 // Dijkstra
 // ---------------------------------------------------------------------------
 
-bool AutoTravelMgr::BuildNodeRoute(
-    Player* player,
-    uint32 destinationMapId,
-    float dx,
-    float dy,
-    float dz,
-    std::vector<ATLeg>& out,
-    std::string& note) const
+bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*dz*/,
+                                   std::vector<ATLeg>& out, std::string& note) const
 {
     out.clear();
 
@@ -285,26 +206,12 @@ bool AutoTravelMgr::BuildNodeRoute(
         return false;
     }
 
-    uint32 startMapId = player->GetMapId();
+    uint32 mapId = player->GetMapId();
+    float dStart = 0.0f, dEnd = 0.0f;
 
-    float dStart = 0.0f;
-    float dEnd = 0.0f;
-
-    uint32 startNode =
-        NearestNode(
-            startMapId,
-            player->GetPositionX(),
-            player->GetPositionY(),
-            ATConf.nodeSearchRadius,
-            &dStart);
-
-    uint32 endNode =
-        NearestNode(
-            destinationMapId,
-            dx,
-            dy,
-            ATConf.nodeSearchRadius,
-            &dEnd);
+    uint32 startNode = NearestNode(mapId, player->GetPositionX(), player->GetPositionY(),
+                                   ATConf.nodeSearchRadius, &dStart);
+    uint32 endNode   = NearestNode(mapId, dx, dy, ATConf.nodeSearchRadius, &dEnd);
 
     if (!startNode || !endNode)
     {
@@ -454,16 +361,9 @@ bool AutoTravelMgr::BuildNodeRoute(
         ATNode const& n = sNodes[chain[i]];
 
         ATLeg leg;
-
-        leg.mapId = n.mapId;
         leg.wx = n.x;
         leg.wy = n.y;
         leg.wz = n.z;
-
-        leg.resolved = true;
-        leg.needsMapArrival = (n.mapId != player->GetMapId());
-
-        leg.name = n.name;
         leg.resolved = true;
         leg.name = n.name;
 
@@ -471,23 +371,14 @@ bool AutoTravelMgr::BuildNodeRoute(
         if (i + 1 < chain.size())
         {
             uint8 t = 1;
-
             auto pt = prevType.find(chain[i + 1]);
             if (pt != prevType.end())
                 t = pt->second;
 
             leg.linkType = t;
             leg.nextName = sNodes[chain[i + 1]].name;
-
             if (t != 1)
-            {
                 leg.flags |= AT_LEG_SPECIAL;
-                leg.policy = AT_LEG_CONNECTION;
-            }
-            else
-            {
-                leg.policy = AT_LEG_OPTIONAL;
-            }
         }
 
         out.push_back(leg);
