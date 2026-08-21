@@ -133,6 +133,7 @@ void AutoTravelMgr::LoadConfig()
     ATConf.minSwimDepth      = sConfigMgr->GetOption<float> ("AutoTravel.MinSwimDepth", 2.0f);
     ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
     ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
+    ATConf.rescueSearchRange = sConfigMgr->GetOption<float> ("AutoTravel.RescueSearchRange", 14.0f);
     ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
     ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 6.0f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
@@ -3217,12 +3218,61 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         float py = player->GetPositionY();
         float pz = player->GetPositionZ();
 
+        // --- Bezugshoehe bestimmen -----------------------------------------
+        // Frueher wurde von pz+2 aus abwaerts gesucht. Auf Treppen und Rampen
+        // ist das falsch: rutscht der Charakter mehr als zwei Yards durch die
+        // Stufe, liegt pz+2 UNTER der Stufe, und die Suche findet als naechste
+        // Flaeche das Rohgelaende - in Sturmwind rund 35 Yards tiefer unter
+        // der Stadt. Die Rettung hat den Charakter dann genau dorthin gesetzt.
+        //
+        // Verlaesslicher ist der Pfad selbst: seine Punkte stammen aus dem
+        // NavMesh und liegen damit auf der richtigen begehbaren Ebene. Gesucht
+        // wird deshalb um den naechstgelegenen Pfadpunkt herum, und nur in
+        // einem engen Fenster - so kann keine ganz andere Etage gewinnen.
+        float refBase = pz;
+        bool haveRef = false;
+
+        if (!s.path.empty())
+        {
+            float best = 1.0e30f;
+            for (size_t i = 0; i < s.path.size(); ++i)
+            {
+                float dx = s.path[i].x - px, dy = s.path[i].y - py;
+                float d2 = dx * dx + dy * dy;
+                if (d2 < best) { best = d2; refBase = s.path[i].z; haveRef = true; }
+            }
+        }
+        if (!haveRef && s.hasGoodZ)
+        {
+            refBase = s.lastGoodZ;
+            haveRef = true;
+        }
+
+        float const range = std::max(4.0f, ATConf.rescueSearchRange);
         float ground = player->GetMap()->GetHeight(player->GetPhaseMask(), px, py,
-                                                   pz + 2.0f, true, 200.0f);
+                                                   refBase + 2.0f, true, range);
+        if (ground <= INVALID_HEIGHT)
+            ground = player->GetMap()->GetHeight(player->GetPhaseMask(), px, py,
+                                                 pz + 2.0f, true, range);
         if (ground <= INVALID_HEIGHT)
             ground = BestGroundZ(player, px, py);
 
         float ref = (ground > INVALID_HEIGHT) ? TravelZ(player, px, py, ground) : INVALID_HEIGHT;
+
+        // Sicherung: liegt die gefundene Flaeche weit unter der Pfadhoehe,
+        // ist es eine andere Etage. Dann lieber gar nicht zuruecksetzen.
+        if (haveRef && ref > INVALID_HEIGHT && ref < refBase - range)
+        {
+            Dbg(player, s, "Rettung abgebrochen: gefundene Flaeche liegt eine Etage tiefer.");
+            s.offMeshHits = 0;
+            ref = INVALID_HEIGHT;
+        }
+
+        if (ref > INVALID_HEIGHT && std::fabs(pz - ref) <= ATConf.underMeshDepth)
+        {
+            s.lastGoodZ = pz;      // hier stand der Charakter sauber
+            s.hasGoodZ  = true;
+        }
 
         bool tooLow  = (ref > INVALID_HEIGHT) && (pz < ref - ATConf.underMeshDepth);
         bool tooHigh = (ref > INVALID_HEIGHT) && (pz > ref + ATConf.aboveMeshHeight);

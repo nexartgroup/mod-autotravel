@@ -317,3 +317,12 @@ AutoTravel.TeleportSecurity = 2
 #        erst in die Gegenrichtung.
 #        Default: 1.25
 AutoTravel.SkipDetourFactor = 1.25
+
+#    AutoTravel.RescueSearchRange
+#        Wie weit um die Pfadhoehe herum nach der begehbaren Flaeche gesucht
+#        wird, wenn der Charakter zurueckgesetzt werden muss.
+#        Klein halten: in mehrstoeckigen Bereichen wie Sturmwind liegt unter
+#        einer Treppe das Rohgelaende der Stadt. Eine weite Suche wuerde genau
+#        dorthin zuruecksetzen statt auf die richtige Stufe.
+#        Default: 14
+AutoTravel.RescueSearchRange = 14

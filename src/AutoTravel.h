@@ -85,6 +85,7 @@ struct ATConfig
     bool  rescueUnderMesh   = true;
     float underMeshDepth    = 2.5f;
     float aboveMeshHeight   = 12.0f;
+    float rescueSearchRange = 14.0f;   // wie weit um die Pfadhoehe gesucht wird
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
@@ -219,6 +220,8 @@ struct ATSession
 
     uint32  underwaterTimer = 0;
     bool    swimming        = false;
+    float   lastGoodZ       = 0.0f;   // letzte bestaetigt gute Hoehe auf dem Pfad
+    bool    hasGoodZ        = false;
     uint8   offMeshHits     = 0;
     float   lastOffMeshZ    = 0.0f;
     uint32  rescueCount     = 0;
