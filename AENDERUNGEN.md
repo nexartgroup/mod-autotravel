@@ -275,3 +275,62 @@ ersten Schritt kurz durch die Stufe rutscht, hängt an der Kollisionsprüfung de
 Clients gegen die Spline-Interpolation — dagegen hilft nur, die Punkte auf
 Treppen enger zu setzen (`AutoTravel.TerrainStep` verkleinern, etwa auf 1.5).
 Das kostet mehr Höhenabfragen und sollte deshalb erst gemessen werden.
+
+
+---
+
+# Nachtrag 2: "Kein begehbarer Weg" zum Hafen
+
+## Die Diagnose enthielt die Antwort
+
+```
+Ziel: -8643.9 / 1333.4 / 5.6 | Entfernung 687 yd
+Gelaendehoehe dort: -56.52 (Ziel-Z 5.64)
+  Eckpunkte  Z  5.64 -> 0x4 (INCOMPLETE), 20 Punkte verworfen
+```
+
+Der Pathfinder hatte einen Pfad mit 20 Punkten gefunden — **verworfen hat ihn
+AutoTravel selbst.** Zwischen Steg (5.6) und Rohgelände darunter (−56.5) liegen
+62 Yards.
+
+## Ursache: die punktweise Bodenprüfung
+
+`TryPath()` verglich jeden Pfadpunkt gegen **eine** Bodenhöhe und verwarf die
+**gesamte** Route, sobald ein einziger Punkt um mehr als 5 bzw. 8 Yards abwich.
+In Sturmwind kippt damit jede Brücke und jeder Steg den ganzen Weg:
+
+```
+Punkt                Pfad-Z   Gelaende   alte Pruefung
+Handelsdistrikt       104.9      104.5   ok
+Kanalbruecke           98.0       60.0   VERWIRFT DEN GANZEN PFAD
+Parkviertel            90.0       89.6   ok
+Hafenrampe             40.0       12.0   VERWIRFT DEN GANZEN PFAD
+Steg am Wasser          5.6      -56.5   VERWIRFT DEN GANZEN PFAD
+```
+
+Im Code stand dazu ausdrücklich, an dieser Stelle **keine**
+Mehrflächen-Erkennung zu verwenden. Genau die wird aber gebraucht, um eine
+Brücke von einem Fehlgriff zu unterscheiden — eine Brücke *ist* eine gültige
+Fläche über dem Gelände.
+
+## Behoben
+
+* Geprüft wird, ob **irgendeine** Fläche an dieser Stelle zur Pfadhöhe passt
+  (`FindGroundPlanes`) — Brücke, Steg, Rampe oder Gelände.
+* Ein einzelner unpassender Punkt kippt die Route nicht mehr. Verworfen wird
+  erst, wenn **ein Viertel** der Punkte nirgends aufliegt.
+
+```
+Weg zum Hafen:     0 von 5 Punkten ohne Flaeche -> akzeptiert
+Kaputter Pfad:     3 von 5 Punkten ohne Flaeche -> VERWORFEN
+```
+
+Die Schutzwirkung bleibt also erhalten, ohne legitime Bauwerke auszuschließen.
+
+## Was noch offen ist
+
+Die geglättete Variante meldete `NOPATH` mit 2 Punkten — dort findet Detour
+kein Zielpolygon. Das ist eine andere Baustelle als die Verwerfung: Bei 687
+Yards greift ohnehin die 296-Yard-Grenze der Glättung, und die Eckpunkt-Variante
+übernimmt. Sie liefert `INCOMPLETE`, also einen Teilweg — der reicht, weil
+AutoTravel am Ende jedes Teilstücks neu rechnet.

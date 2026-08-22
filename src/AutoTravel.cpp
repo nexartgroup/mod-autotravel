@@ -2089,65 +2089,76 @@ bool AutoTravelMgr::TryPathBetween(
             return false;
     }
 
-    G3D::Vector3 const& last = out.back();
-
-        /*
-     * Nicht nur den letzten Punkt pruefen.
+    /*
+     * Plausibilitaet der NavMesh-Punkte.
      *
-     * Ein PathGenerator-Pfad kann zwischen Start und Ende grosse
-     * Hoehenspruenge enthalten. Der alte Code akzeptierte ihn trotzdem,
-     * solange nur der letzte Punkt auf dem Boden lag.
+     * Die Vorfassung verglich jeden Punkt gegen EINE Bodenhoehe und verwarf
+     * den GANZEN Pfad, sobald ein einziger Punkt um mehr als 5 bzw. 8 Yards
+     * abwich. In Sturmwind kippt damit jede Bruecke und jeder Steg die ganze
+     * Route:
      *
-     * Wir pruefen deshalb alle NavMesh-Punkte.
+     *     Kanalbruecke   Pfad-Z  98.0   Gelaende  60.0   -> verworfen
+     *     Steg am Wasser Pfad-Z   5.6   Gelaende -56.5   -> verworfen
+     *
+     * Beide Punkte sind voellig in Ordnung -- sie liegen auf einer
+     * VMap-Flaeche ueber dem Rohgelaende. Der Kommentar der Vorfassung
+     * verbot hier ausdruecklich die Mehrflaechen-Erkennung; genau die wird
+     * aber gebraucht, um Bruecken von Fehlgriffen zu unterscheiden.
+     *
+     * Jetzt:
+     *   * es zaehlt, ob IRGENDEINE Flaeche an dieser Stelle zur Pfadhoehe
+     *     passt -- Bruecke, Steg, Rampe, Gelaende
+     *   * ein einzelner unpassender Punkt kippt nicht mehr die Route,
+     *     sondern wird gezaehlt
+     *   * verworfen wird erst, wenn ein nennenswerter Anteil der Punkte
+     *     nicht auf einer Flaeche liegt
      */
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
 
+    uint32 offSurface = 0;
+
     for (size_t i = 0; i < out.size(); ++i)
     {
-        G3D::Vector3& p = out[i];
+        G3D::Vector3 const& p = out[i];
 
-        /*
-         * WICHTIG:
-         *
-         * TryPathBetween() prueft den vom PathGenerator gelieferten
-         * NavMesh-Pfad.
-         *
-         * Hier KEINE Multi-Plane-Erkennung verwenden.
-         *
-         * Ein Torbogen kann mehrere VMap-Flaechen unter derselben
-         * X/Y-Position besitzen. Diese Information ist fuer die
-         * Terrain-Spline-Erzeugung in LaunchChunk() interessant,
-         * darf aber nicht den NavMesh-Pfad selbst umdeuten.
-         */
+        bool onSurface = false;
 
-        float ground =
-            map->GetHeight(
-                phase,
-                p.x,
-                p.y,
-                p.z + 5.0f,
-                true,
-                200.0f);
-
-        if (ground <= INVALID_HEIGHT)
+        // Alle Flaechen an dieser Stelle, nicht nur die erste.
+        std::vector<float> planes = FindGroundPlanes(player, p.x, p.y, p.z);
+        for (float pl : planes)
         {
-            ground =
-                BestGroundZ(
-                    player,
-                    p.x,
-                    p.y);
+            if (p.z > pl - 5.0f && p.z < pl + 8.0f)
+            {
+                onSurface = true;
+                break;
+            }
         }
 
-        if (ground <= INVALID_HEIGHT)
-            return false;
+        if (!onSurface)
+        {
+            float ground = map->GetHeight(phase, p.x, p.y, p.z + 5.0f, true, 200.0f);
+            if (ground <= INVALID_HEIGHT)
+                ground = BestGroundZ(player, p.x, p.y);
 
-        if (p.z < ground - 5.0f)
-            return false;
+            if (ground > INVALID_HEIGHT &&
+                p.z > ground - 5.0f && p.z < ground + 8.0f)
+            {
+                onSurface = true;
+            }
+        }
 
-        if (p.z > ground + 8.0f)
-            return false;
+        if (!onSurface)
+            ++offSurface;
     }
+
+    /*
+     * Toleranz: einzelne Punkte ueber Wasser oder in einem Torbogen sind
+     * normal. Erst wenn ein Viertel des Pfades nirgends aufliegt, ist die
+     * Route unbrauchbar.
+     */
+    if (offSurface * 4 > out.size())
+        return false;
 
     incomplete =
         (typeOut & PATHFIND_INCOMPLETE) != 0;
