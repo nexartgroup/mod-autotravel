@@ -85,7 +85,9 @@ struct ATConfig
     bool  rescueUnderMesh   = true;
     float underMeshDepth    = 2.5f;
     float aboveMeshHeight   = 12.0f;
-    float rescueSearchRange = 14.0f;   // wie weit um die Pfadhoehe gesucht wird
+    float rescueSearchRange = 14.0f;
+    float maxWalkSlope      = 1.20f;   // groesste Steigung, die als Laufflaeche gilt
+    float zOutlierTolerance = 2.5f;    // ab dieser Abweichung vom Verlauf: Ausreisser   // wie weit um die Pfadhoehe gesucht wird
     bool  useTravelNodes    = true;
     std::string nodeDb      = "acore_playerbots";
     float nodeSearchRadius  = 800.0f;
@@ -340,6 +342,18 @@ private:
         float referenceZ,
         float targetZ,
         float horizontalDistance) const;
+
+    // Ebenenwahl anhand des ROUTENVERLAUFS statt der Spielerposition.
+    // expectedZ ist die aus den Nachbarpunkten interpolierte Sollhoehe,
+    // prevPlane die zuletzt akzeptierte Flaeche.
+    float SelectGroundPlaneOnRoute(
+        std::vector<float> const& planes,
+        float expectedZ,
+        float prevPlane,
+        float horizontalStep) const;
+
+    // Einzelne Z-Ausreisser im Pfad gegen den Verlauf der Nachbarn pruefen.
+    void FixPathZOutliers(Player* player, Movement::PointsArray& path) const;
 
     bool WaterSurface(Player* player, float x, float y,
                       float probeZ, float& level) const;

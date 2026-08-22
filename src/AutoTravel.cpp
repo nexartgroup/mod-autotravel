@@ -134,6 +134,8 @@ void AutoTravelMgr::LoadConfig()
     ATConf.maxUnderwaterMs   = sConfigMgr->GetOption<uint32>("AutoTravel.MaxUnderwaterMs", 45000);
     ATConf.rescueUnderMesh   = sConfigMgr->GetOption<bool>  ("AutoTravel.RescueUnderMesh", true);
     ATConf.rescueSearchRange = sConfigMgr->GetOption<float> ("AutoTravel.RescueSearchRange", 14.0f);
+    ATConf.maxWalkSlope      = sConfigMgr->GetOption<float> ("AutoTravel.MaxWalkSlope", 1.20f);
+    ATConf.zOutlierTolerance = sConfigMgr->GetOption<float> ("AutoTravel.ZOutlierTolerance", 2.5f);
     ATConf.underMeshDepth    = sConfigMgr->GetOption<float> ("AutoTravel.UnderMeshDepth", 2.5f);
     ATConf.aboveMeshHeight   = sConfigMgr->GetOption<float> ("AutoTravel.AboveMeshHeight", 6.0f);
     ATConf.useTravelNodes    = sConfigMgr->GetOption<bool>  ("AutoTravel.UseTravelNodes", true);
@@ -688,6 +690,131 @@ std::vector<float> AutoTravelMgr::FindGroundPlanes(
     }
 
     return planes;
+}
+
+/*
+ * Ebenenwahl anhand des Routenverlaufs.
+ *
+ * Die bisherige Fassung verankerte auf der ECHTEN Spielerposition. Das ist
+ * genau dann falsch, wenn der Charakter einmal durch eine Stufe gerutscht ist:
+ * ab da liegt seine Position naeher am Hallenboden als an der Treppe, der
+ * Hallenboden gewinnt jede weitere Wahl -- und er bleibt bis zum Ende der
+ * Treppe darunter.
+ *
+ * Bezug ist deshalb die ROUTE. Ihre Punkte stammen aus dem NavMesh und liegen
+ * auf der begehbaren Flaeche, unabhaengig davon, wo der Charakter gerade
+ * steckt. Zusaetzlich zwei Regeln:
+ *
+ *   1. Bewertet wird der Abstand zur erwarteten Hoehe SYMMETRISCH. Die alte
+ *      Fassung bestrafte nur Spruenge nach oben (Schutz gegen Torboegen) --
+ *      ein Sturz auf eine tiefere Flaeche war gratis.
+ *   2. Ein Absacken, das steiler als maxWalkSlope waere, ist keine Laufflaeche
+ *      und wird verworfen.
+ */
+/*
+ * Einzelne Z-Ausreisser im Pfad korrigieren.
+ *
+ * Steigt oder faellt die Route ueber mehrere Punkte hinweg gleichmaessig, ist
+ * der Hoehenunterschied echt -- Treppe, Rampe, Hang. Weicht dagegen EIN Punkt
+ * stark ab, waehrend die Nachbarn davor und danach auf einer Linie liegen, hat
+ * die Hoehenabfrage dort vermutlich eine darunterliegende Flaeche erwischt.
+ *
+ * Genau dieser Fall wird hier geglaettet: der Punkt bekommt die aus seinen
+ * Nachbarn interpolierte Hoehe, sofern dort ueberhaupt eine Flaeche in der
+ * Naehe liegt. Echte Stufen bleiben unangetastet, weil dort auch die Nachbarn
+ * mitsteigen.
+ */
+void AutoTravelMgr::FixPathZOutliers(Player* player, Movement::PointsArray& path) const
+{
+    if (path.size() < 3)
+        return;
+
+    uint32 fixed = 0;
+
+    for (size_t i = 1; i + 1 < path.size(); ++i)
+    {
+        G3D::Vector3 const& a = path[i - 1];
+        G3D::Vector3&       b = path[i];
+        G3D::Vector3 const& c = path[i + 1];
+
+        float dxa = b.x - a.x, dya = b.y - a.y;
+        float dxc = c.x - b.x, dyc = c.y - b.y;
+        float da = std::sqrt(dxa * dxa + dya * dya);
+        float dc = std::sqrt(dxc * dxc + dyc * dyc);
+        if (da + dc < 0.5f)
+            continue;
+
+        // Erwartete Hoehe aus dem Verlauf der Nachbarn
+        float t = da / (da + dc);
+        float expected = a.z + (c.z - a.z) * t;
+        float deviation = b.z - expected;
+
+        if (std::fabs(deviation) <= ATConf.zOutlierTolerance)
+            continue;                      // passt zum Verlauf: echte Steigung
+
+        // Gibt es an dieser Stelle ueberhaupt eine Flaeche auf Sollhoehe?
+        std::vector<float> planes = FindGroundPlanes(player, b.x, b.y, expected);
+        float best = INVALID_HEIGHT;
+        float bestDelta = 1.0e30f;
+        for (float pl : planes)
+        {
+            float d = std::fabs(pl - expected);
+            if (d < bestDelta) { bestDelta = d; best = pl; }
+        }
+
+        if (best > INVALID_HEIGHT && bestDelta < ATConf.zOutlierTolerance)
+        {
+            b.z = best;
+            ++fixed;
+        }
+    }
+
+    if (fixed)
+        LOG_DEBUG("module", "mod-autotravel: {} Z-Ausreisser im Pfad korrigiert.", fixed);
+}
+
+float AutoTravelMgr::SelectGroundPlaneOnRoute(
+    std::vector<float> const& planes,
+    float expectedZ,
+    float prevPlane,
+    float horizontalStep) const
+{
+    if (planes.empty())
+        return INVALID_HEIGHT;
+
+    float const step = std::max(0.5f, horizontalStep);
+    float const maxChange = step * ATConf.maxWalkSlope + 0.75f;
+
+    float best = INVALID_HEIGHT;
+    float bestScore = 1.0e30f;
+
+    for (float candidate : planes)
+    {
+        // Abstand zur Sollhoehe aus dem Routenverlauf, in beide Richtungen.
+        float score = std::fabs(candidate - expectedZ);
+
+        // Uebergang von der zuletzt akzeptierten Flaeche: was steiler als eine
+        // begehbare Neigung waere, ist eine andere Etage.
+        if (prevPlane > INVALID_HEIGHT)
+        {
+            float change = std::fabs(candidate - prevPlane);
+            if (change > maxChange)
+                score += 500.0f + (change - maxChange) * 100.0f;
+        }
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            best = candidate;
+        }
+    }
+
+    // Bleibt nur eine unplausible Flaeche uebrig, ist die Routenhoehe die
+    // bessere Auskunft als eine falsche Etage.
+    if (best <= INVALID_HEIGHT || std::fabs(best - expectedZ) > maxChange + 2.0f)
+        return expectedZ;
+
+    return best;
 }
 
 float AutoTravelMgr::SelectGroundPlane(
@@ -1554,6 +1681,12 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     bool water = false;
     uint32 sourcePoints = 0;
 
+    // Hoehe, an der das aktuelle Segment beginnt -- aus der Route, nicht aus
+    // der Spielerposition. Beim ersten Segment gibt es noch keinen
+    // Vorgaengerpunkt, dort ist die Spielerhoehe die einzige Auskunft.
+    float segStartZ = (s.idx > 0) ? s.path[s.idx - 1].z : current.z;
+    float prevPlane = INVALID_HEIGHT;
+
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
 
@@ -1645,19 +1778,27 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
              * passt.
              */
 
+            /*
+             * Sollhoehe aus dem ROUTENVERLAUF: linear zwischen der Hoehe des
+             * Segmentanfangs und dem naechsten NavMesh-Punkt. Bewusst NICHT
+             * current.z verwenden -- das ist die echte Spielerposition, und
+             * die kann bereits durch eine Stufe gerutscht sein.
+             */
+            float expectedZ = segStartZ + (target.z - segStartZ) * t;
+
             std::vector<float> planes =
                 FindGroundPlanes(
                     player,
                     x,
                     y,
-                    current.z);
+                    expectedZ);
 
             float ground =
-                SelectGroundPlane(
+                SelectGroundPlaneOnRoute(
                     planes,
-                    current.z,
-                    target.z,
-                    horizontal);
+                    expectedZ,
+                    prevPlane,
+                    horizontal / float(std::max(1u, steps)));
 
             /*
              * Falls keine brauchbare Ebene gefunden wurde, benutzen
@@ -1729,6 +1870,11 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
                     x,
                     y,
                     z));
+
+            // Zuletzt akzeptierte Flaeche merken: der naechste Punkt darf sich
+            // davon nur um eine begehbare Neigung entfernen.
+            if (ground > INVALID_HEIGHT)
+                prevPlane = ground;
         }
 
         /*
@@ -1743,6 +1889,11 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
          */
         current =
             chunk.back();
+
+        // Fuer das naechste Segment ist die ROUTENHOEHE des erreichten
+        // NavMesh-Punkts der Bezug, nicht die erzeugte Terrainhoehe. Sonst
+        // wandert ein einmaliger Fehlgriff durch die ganze Treppe mit.
+        segStartZ = target.z;
 
         /*
          * Jetzt darf der PathGenerator-Punkt als verarbeitet gelten.
@@ -2867,6 +3018,7 @@ bool AutoTravelMgr::CalculatePath(
     {
         s.lastPathType = bestType;
         s.path = bestPath;
+        FixPathZOutliers(player, s.path);
         s.idx = 1;
         s.pathIncomplete = bestIncomplete;
 
@@ -2988,6 +3140,7 @@ bool AutoTravelMgr::CalculatePath(
 
             s.lastPathType = candidateType;
             s.path = candidate;
+            FixPathZOutliers(player, s.path);
             s.idx = 1;
             s.pathIncomplete = candidateIncomplete;
 

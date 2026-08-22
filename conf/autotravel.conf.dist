@@ -326,3 +326,18 @@ AutoTravel.SkipDetourFactor = 1.25
 #        dorthin zuruecksetzen statt auf die richtige Stufe.
 #        Default: 14
 AutoTravel.RescueSearchRange = 14
+
+#    AutoTravel.MaxWalkSlope
+#        Groesste Neigung, die zwischen zwei Terrainpunkten noch als
+#        Laufflaeche gilt (Hoehe geteilt durch Strecke). Was steiler waere, ist
+#        eine andere Etage -- etwa der Hallenboden unter einer Treppe.
+#        Default: 1.2
+AutoTravel.MaxWalkSlope = 1.2
+
+#    AutoTravel.ZOutlierTolerance
+#        Weicht EIN Wegpunkt um mehr als diesen Betrag von der aus seinen
+#        Nachbarn interpolierten Hoehe ab, gilt er als Ausreisser und wird
+#        korrigiert. Echte Treppen und Rampen bleiben unangetastet, weil dort
+#        auch die Nachbarn mitsteigen.
+#        Default: 2.5
+AutoTravel.ZOutlierTolerance = 2.5
