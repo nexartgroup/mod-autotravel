@@ -1,3 +1,23 @@
+/*
+ * AutoTravel_SC.cpp
+ * ---------------------------------------------------------------------------
+ * Befehlsschnittstelle und Anbindung an den Core.
+ *
+ * Alle Befehle beginnen mit ".at". Erzeugt werden sie normalerweise vom Addon;
+ * von Hand tippen laesst sich trotzdem jeder davon.
+ *
+ * Zur Rechtelage: die Unterbefehle koennen nichts, was der Spieler nicht
+ * ohnehin darf -- mit EINER Ausnahme. ".at tp" umgeht jede Wegfindung und nimmt
+ * beliebige Zielkoordinaten entgegen. In der Vorfassung lag er unter demselben
+ * SEC_PLAYER wie alles andere, womit sich jeder Spieler ueberallhin versetzen
+ * konnte. Er hat deshalb jetzt eine eigene Rechtepruefung.
+ *
+ * Zu den Eingabewerten: sie stammen aus einer Chatnachricht. atoi("abc") ist
+ * still 0, atof("nan") ergibt NaN -- und NaN pflanzt sich durch die gesamte
+ * Wegfindung fort. Deshalb wird jeder Wert geprueft und ungueltige Eingabe
+ * abgewiesen, statt sie in eine 0 zu verwandeln.
+ */
+
 #include "AutoTravel.h"
 
 #include "Chat.h"
@@ -6,10 +26,6 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 
-#include <cstdio>
-#include <cerrno>
-#include <cmath>
-#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -18,49 +34,6 @@ using namespace Acore::ChatCommands;
 
 namespace
 {
-    // ---- Gepruefte Umwandlung -------------------------------------------
-    // Diese Werte stammen aus einer Chatnachricht des Spielers. atoi/atof
-    // liefern bei Unsinn still eine 0, atof("nan") sogar NaN -- und NaN
-    // pflanzt sich durch die gesamte Wegfindung fort.
-
-    bool ParseUInt(std::string const& in, uint32& out)
-    {
-        if (in.empty()) return false;
-        char* end = nullptr;
-        errno = 0;
-        unsigned long v = std::strtoul(in.c_str(), &end, 10);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0') return false;
-        if (v > 0xFFFFFFFFul) return false;
-        out = uint32(v);
-        return true;
-    }
-
-    bool ParseFloat(std::string const& in, float& out)
-    {
-        if (in.empty()) return false;
-        char* end = nullptr;
-        errno = 0;
-        double v = std::strtod(in.c_str(), &end);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0') return false;
-        if (!std::isfinite(v)) return false;
-        out = float(v);
-        return true;
-    }
-
-    bool ParseBool(std::string const& in, bool& out)
-    {
-        uint32 v = 0;
-        if (!ParseUInt(in, v) || v > 1) return false;
-        out = (v != 0);
-        return true;
-    }
-
-    bool ParseNorm(std::string const& in, float& out)
-    {
-        if (!ParseFloat(in, out)) return false;
-        return out >= 0.0f && out <= 1.0f;   // normalisierte Kartenkoordinate
-    }
-
     std::vector<std::string> Split(std::string const& in)
     {
         std::vector<std::string> out;
@@ -98,20 +71,17 @@ public:
         return table;
     }
 
-    // Syntax (wird ausschliesslich vom Addon erzeugt):
+    // Aufbau der Zielbefehle:
+    //
     //   .at start   <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny> <Name...>
-    //   .at tp      <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny> <Name...>
-    //   .at resolve <uiMapId> <nx> <ny> <hasCalib> <pnx> <pny> <curMap> <cnx> <cny>
+    //   .at tp      <wie start>
+    //   .at resolve <wie start, ohne Name>
+    //   .at diag    <wie start, ohne Name>
     //
     // curMap/cnx/cny sind die Karten-ID und die normalisierte Position der
     // Zone, in der der Spieler GERADE steht. Damit kann der Server die
     // Zuordnung Client-ID -> WorldMapArea-ID auch dann pruefen, wenn das Ziel
     // in einer anderen Zone liegt.
-    //   .at stop
-    //   .at repath
-    //   .at status
-    //   .at debug <0|1>
-    //   .at set <key> <value>
     static bool HandleAt(ChatHandler* handler, Tail argsTail)
     {
         Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -127,45 +97,54 @@ public:
 
         std::string const& cmd = a[0];
 
+        // --- Handschlag ----------------------------------------------------
+        // Das Addon schickt dies beim Login und wartet auf die Antwort, bevor
+        // es weitere Befehle sendet. Ohne diesen Handschlag wuerde ein
+        // fehlendes Servermodul dazu fuehren, dass der Charakter ".at start"
+        // laut im Chat sagt.
+        if (cmd == "hello" || cmd == "ping")
+        {
+            sAutoTravel->SendHello(player);
+            return true;
+        }
+
+        // --- Zielbefehle ---------------------------------------------------
         if (cmd == "start" || cmd == "tp" || cmd == "resolve" || cmd == "diag")
         {
             if (a.size() < 7)
             {
-                handler->SendSysMessage("[AT]M|Ungueltige Parameter.");
+                sAutoTravel->Msg(player, "Ungueltige Parameter.");
                 return true;
             }
+
             uint32 uiMapId = 0;
-            float  nx = 0.0f, ny = 0.0f, pnx = 0.0f, pny = 0.0f;
-            bool   hasCalib = false;
+            float nx = 0.0f, ny = 0.0f, pnx = 0.0f, pny = 0.0f;
+            bool hasCalib = false;
 
-            if (!ParseUInt(a[1], uiMapId) || !uiMapId
-                || !ParseNorm(a[2], nx) || !ParseNorm(a[3], ny)
-                || !ParseBool(a[4], hasCalib)
-                || !ParseNorm(a[5], pnx) || !ParseNorm(a[6], pny))
+            if (!AT::ParseUInt(a[1], uiMapId) || !uiMapId
+                || !AT::ParseNorm(a[2], nx) || !AT::ParseNorm(a[3], ny)
+                || !AT::ParseBool(a[4], hasCalib)
+                || !AT::ParseNorm(a[5], pnx) || !AT::ParseNorm(a[6], pny))
             {
-                handler->SendSysMessage("[AT]M|Ungueltige Parameter - Befehl abgewiesen.");
+                sAutoTravel->Msg(player, "Ungueltige Parameter - Befehl abgewiesen.");
                 return true;
             }
 
-            // Teleport umgeht jede Wegfindung und nimmt beliebige
-            // Zielkoordinaten entgegen. Ohne diese Pruefung koennte sich jeder
-            // Spieler ueberallhin versetzen -- der Befehl lag bisher unter
-            // demselben SEC_PLAYER wie alles andere.
             if (cmd == "tp")
             {
-                if (handler->GetSession()->GetSecurity() <
-                    AccountTypes(ATConf.teleportSecurity))
+                if (handler->GetSession()->GetSecurity() < AccountTypes(ATConf.teleportSecurity))
                 {
-                    handler->SendSysMessage("[AT]M|Teleport ist dir nicht erlaubt.");
+                    sAutoTravel->Msg(player, "Teleport ist dir nicht erlaubt.");
                     return true;
                 }
             }
+
             if (a.size() >= 10)
             {
                 uint32 curMap = 0;
-                float  cnx = 0.0f, cny = 0.0f;
-                if (ParseUInt(a[7], curMap) && curMap
-                    && ParseNorm(a[8], cnx) && ParseNorm(a[9], cny))
+                float cnx = 0.0f, cny = 0.0f;
+                if (AT::ParseUInt(a[7], curMap) && curMap
+                    && AT::ParseNorm(a[8], cnx) && AT::ParseNorm(a[9], cny))
                 {
                     sAutoTravel->LearnMapId(player, curMap, cnx, cny);
                 }
@@ -181,17 +160,22 @@ public:
                 sAutoTravel->Diagnose(player, uiMapId, nx, ny, hasCalib, pnx, pny);
             else
                 sAutoTravel->Resolve(player, uiMapId, nx, ny, hasCalib, pnx, pny);
+
             return true;
         }
 
+        // --- Route uebertragen ---------------------------------------------
         if (cmd == "route")
         {
-            // .at route <0=neu|1=anhaengen> <map:nx:ny:flags> ...
-            if (a.size() < 3) return true;
+            // .at route <0=neu|1=anhaengen> <map:nx:ny:art> ...
+            if (a.size() < 3)
+                return true;
+
             uint32 mode = 0;
-            if (!ParseUInt(a[1], mode)) return true;
-            bool clearFirst = (mode == 0);
-            sAutoTravel->RouteAdd(player, clearFirst, JoinFrom(a, 2));
+            if (!AT::ParseUInt(a[1], mode))
+                return true;
+
+            sAutoTravel->RouteAdd(player, mode == 0, JoinFrom(a, 2));
             return true;
         }
 
@@ -201,9 +185,9 @@ public:
             if (a.size() >= 4)
             {
                 uint32 curMap = 0;
-                float  cnx = 0.0f, cny = 0.0f;
-                if (ParseUInt(a[1], curMap) && curMap
-                    && ParseNorm(a[2], cnx) && ParseNorm(a[3], cny))
+                float cnx = 0.0f, cny = 0.0f;
+                if (AT::ParseUInt(a[1], curMap) && curMap
+                    && AT::ParseNorm(a[2], cnx) && AT::ParseNorm(a[3], cny))
                 {
                     sAutoTravel->LearnMapId(player, curMap, cnx, cny);
                 }
@@ -212,15 +196,22 @@ public:
             return true;
         }
 
-        if (cmd == "nodes")
-        {
-            sAutoTravel->NodeInfo(player);
-            return true;
-        }
-
+        // --- Steuerung -----------------------------------------------------
         if (cmd == "stop")
         {
             sAutoTravel->Stop(player, "Reise gestoppt.");
+            return true;
+        }
+
+        if (cmd == "pause")
+        {
+            sAutoTravel->PauseByPlayer(player, JoinFrom(a, 1));
+            return true;
+        }
+
+        if (cmd == "resume")
+        {
+            sAutoTravel->ResumeByPlayer(player);
             return true;
         }
 
@@ -236,28 +227,83 @@ public:
             return true;
         }
 
+        // --- Auskunft ------------------------------------------------------
+        if (cmd == "nodes")
+        {
+            sAutoTravel->NodeInfo(player);
+            return true;
+        }
+
+        if (cmd == "taxi")
+        {
+            sAutoTravel->TaxiInfo(player);
+            return true;
+        }
+
+        if (cmd == "options" || cmd == "opts")
+        {
+            sAutoTravel->ListOptions(player, a.size() > 1 ? a[1] : std::string());
+            return true;
+        }
+
+        // --- Einstellungen -------------------------------------------------
         if (cmd == "debug")
         {
             bool on = true;
-            if (a.size() > 1 && !ParseBool(a[1], on))
+            if (a.size() > 1 && !AT::ParseBool(a[1], on))
             {
-                handler->SendSysMessage("[AT]M|Ungueltiger Parameter.");
+                sAutoTravel->Msg(player, "Ungueltiger Parameter.");
                 return true;
             }
             sAutoTravel->SetDebug(player, on);
             return true;
         }
 
-        if (cmd == "set" && a.size() >= 3)
+        if (cmd == "set")
         {
+            if (a.size() < 3)
+            {
+                sAutoTravel->Msg(player, "Verwendung: .at set <schluessel> <wert>");
+                return true;
+            }
+
+            // Werte, die nur der Serververwalter aendern darf: alles, was
+            // andere Spieler mitbetrifft. Die beiden Sitzungswerte (arrival,
+            // grace) bleiben fuer jeden offen.
+            if (a[1] != "arrival" && a[1] != "grace")
+            {
+                if (handler->GetSession()->GetSecurity() < SEC_GAMEMASTER)
+                {
+                    sAutoTravel->Msg(player,
+                        "Diese Einstellung gilt fuer den ganzen Server und darf nur ein "
+                        "Spielleiter aendern.");
+                    return true;
+                }
+            }
+
             sAutoTravel->SetOption(player, a[1], a[2]);
             return true;
         }
 
-        handler->SendSysMessage("[AT]M|Unbekannter Unterbefehl.");
+        sAutoTravel->Msg(player, "Unbekannter Unterbefehl. '.at options' zeigt die Einstellungen.");
         return true;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Anbindung an den Core
+// ---------------------------------------------------------------------------
+//
+// Bewusst NUR WorldScript. Ein PlayerScript fuer das Ausloggen waere nett, ist
+// aber nicht noetig: die Clientkontrolle wird nicht in der Datenbank
+// gespeichert, sie steht nach jedem Login wieder beim Client. Verwaiste
+// Sitzungen raeumt der Takt selbst ab, sobald der Spieler nicht mehr in der
+// Welt ist.
+//
+// Der Verzicht hat einen zweiten Grund: AzerothCore hat die PlayerScript-Hooks
+// zwischenzeitlich von OnLogout auf OnPlayerLogout umbenannt. Ein Modul, das
+// sie benutzt, baut je nach Corestand nicht mehr. WorldScript::OnUpdate und
+// OnAfterConfigLoad sind dagegen seit Jahren unveraendert.
 
 class autotravel_worldscript : public WorldScript
 {

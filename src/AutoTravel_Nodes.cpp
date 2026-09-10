@@ -1,7 +1,30 @@
+/*
+ * AutoTravel_Nodes.cpp
+ * ---------------------------------------------------------------------------
+ * Der Reiseknotengraph von mod-playerbots.
+ *
+ * mod-playerbots pflegt einen Graphen aus mehreren tausend Knoten samt
+ * Verbindungen. Genau dieser Graph ist der Grund, warum ein Bot von Sturmwind
+ * aus zum Questgebiet FLIEGT statt zu laufen: er kennt Verbindungen, die das
+ * NavMesh gar nicht kennen kann -- Flugrouten, Portale, Schiffe.
+ *
+ * AutoTravel liest ihn per SQL. Bewusst NICHT ueber die C++-Schnittstelle von
+ * mod-playerbots: das wuerde eine Kompilierabhaengigkeit zwischen zwei Modulen
+ * erzeugen. Ueber die Datenbank bleibt die Kopplung an den Daten, und ohne
+ * mod-playerbots faellt AutoTravel einfach auf die Carbonite-Route zurueck.
+ *
+ * Tabellen:
+ *   playerbots_travelnode        id, name, map_id, x, y, z, linked
+ *   playerbots_travelnode_link   node_id, to_node_id, type, object, distance,
+ *                                swim_distance, extra_cost, calculated
+ *
+ * Die Koordinaten sind bereits Weltkoordinaten. Fuer diese Etappen entfaellt
+ * die gesamte Karten-ID-Umrechnung samt ihrer Fehlerquellen.
+ */
+
 #include "AutoTravel.h"
 
 #include "Chat.h"
-#include "Config.h"
 #include "DatabaseEnv.h"
 #include "Log.h"
 #include "Map.h"
@@ -12,29 +35,8 @@
 #include <cstdio>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
-
-// ---------------------------------------------------------------------------
-// Reiseknoten von mod-playerbots
-// ---------------------------------------------------------------------------
-// mod-playerbots pflegt einen Graphen aus 3781 Knoten mit Verbindungen. Genau
-// dieser Graph ist der Grund, warum ein Bot mit "nc +new rpg" von Sturmwind
-// aus zum Questgebiet FLIEGT: der Graph kennt Verbindungen, die das NavMesh
-// nicht kennen kann -- Flugrouten, Portale, Schiffe.
-//
-// AutoTravel liest ihn per SQL aus der Playerbot-Datenbank. Bewusst NICHT
-// ueber die C++-Schnittstelle von mod-playerbots: das wuerde eine
-// Kompilierabhaengigkeit zwischen zwei Modulen erzeugen. Ueber die Datenbank
-// bleibt die Kopplung an den Daten, und ohne mod-playerbots faellt AutoTravel
-// einfach auf die Carbonite-Route zurueck.
-//
-// Tabellen (in dieser Reihenfolge geprueft):
-//   playerbots_travelnode        id, name, map_id, x, y, z, linked
-//   playerbots_travelnode_link   node_id, to_node_id, type, object, distance,
-//                                swim_distance, extra_cost, calculated
-//
-// Die Koordinaten sind bereits Weltkoordinaten. Fuer diese Etappen entfaellt
-// die gesamte Karten-ID-Umrechnung samt ihrer Fehlerquellen.
 
 namespace
 {
@@ -42,24 +44,15 @@ namespace
     std::unordered_map<uint32, std::vector<ATNodeLink>> sLinks;
     bool sNodesLoaded = false;
 
-    inline float Dist2D(float ax, float ay, float bx, float by)
+    ATLegKind KindFromLinkType(uint8 t)
     {
-        float dx = ax - bx, dy = ay - by;
-        return std::sqrt(dx * dx + dy * dy);
-    }
-
-    char const* LinkTypeName(uint8 t)
-    {
-        // Typ 1 ist in der gelieferten Datenbank die Laufverbindung. Die
-        // uebrigen Werte werden beim Laden gezaehlt und protokolliert, statt
-        // sie hier zu erraten.
         switch (t)
         {
-            case 1:  return "zu Fuss";
-            case 2:  return "Portal";
-            case 3:  return "Transport";
-            case 4:  return "Flugroute";
-            default: return "Sonderverbindung";
+            case 1:  return AT_LEG_WALK;
+            case 2:  return AT_LEG_PORTAL;
+            case 3:  return AT_LEG_TRANSPORT;
+            case 4:  return AT_LEG_TAXI;
+            default: return AT_LEG_MANUAL;
         }
     }
 }
@@ -81,18 +74,18 @@ void AutoTravelMgr::LoadTravelNodes()
 
     if (!ATConf.useTravelNodes)
     {
-        LOG_INFO("server.loading", "mod-autotravel: TravelNodes sind per Konfiguration aus.");
+        LOG_INFO("server.loading", "mod-autotravel: Reiseknoten sind per Konfiguration aus.");
         return;
     }
 
-    std::string const db = ATConf.nodeDb;
+    std::string const& db = ATNodeDb;
 
     std::string sql = "SELECT id, map_id, x, y, z, name FROM `" + db + "`.`playerbots_travelnode`";
     QueryResult res = WorldDatabase.Query(sql.c_str());
     if (!res)
     {
         LOG_INFO("server.loading",
-                 "mod-autotravel: Keine TravelNodes gefunden (Datenbank '{}'). "
+                 "mod-autotravel: Keine Reiseknoten gefunden (Datenbank '{}'). "
                  "AutoTravel benutzt weiterhin die Carbonite-Route.", db);
         return;
     }
@@ -123,11 +116,13 @@ void AutoTravelMgr::LoadTravelNodes()
         {
             Field* f = lres->Fetch();
             uint32 from = f[0].Get<uint32>();
+
             ATNodeLink l;
             l.to   = f[1].Get<uint32>();
             l.type = f[2].Get<uint8>();
-            float distance   = f[3].Get<float>();
-            float extra      = f[4].Get<float>();
+
+            float distance = f[3].Get<float>();
+            float extra    = f[4].Get<float>();
 
             if (sNodes.find(from) == sNodes.end() || sNodes.find(l.to) == sNodes.end())
                 continue;
@@ -136,9 +131,9 @@ void AutoTravelMgr::LoadTravelNodes()
             {
                 if (!ATConf.useSpecialLinks)
                     continue;
+
                 // Sonderverbindungen kosten extra, damit sie nur benutzt
-                // werden, wenn sie wirklich viel Strecke sparen -- der Spieler
-                // muss dort schliesslich selbst taetig werden.
+                // werden, wenn sie wirklich viel Strecke sparen.
                 extra += ATConf.specialLinkCost;
             }
 
@@ -154,12 +149,12 @@ void AutoTravelMgr::LoadTravelNodes()
 
     sNodesLoaded = !sNodes.empty() && linkCount > 0;
 
-    LOG_INFO("server.loading", "mod-autotravel: {} TravelNodes, {} Verbindungen geladen.",
+    LOG_INFO("server.loading", "mod-autotravel: {} Reiseknoten, {} Verbindungen geladen.",
              uint32(sNodes.size()), linkCount);
 
     for (auto const& kv : typeCount)
         LOG_INFO("server.loading", "mod-autotravel:   Verbindungstyp {} ({}): {}",
-                 uint32(kv.first), LinkTypeName(uint8(kv.first)), kv.second);
+                 uint32(kv.first), ATLinkTypeName(uint8(kv.first)), kv.second);
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +172,7 @@ namespace
         {
             if (kv.second.mapId != mapId)
                 continue;
-            float d = Dist2D(x, y, kv.second.x, kv.second.y);
+            float d = AT::Dist2D(x, y, kv.second.x, kv.second.y);
             if (d < bestDist)
             {
                 bestDist = d;
@@ -192,26 +187,41 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// Dijkstra
+// A*
 // ---------------------------------------------------------------------------
+//
+// Dijkstra breitet sich gleichmaessig in alle Richtungen aus und besucht dabei
+// Zehntausende Knoten. A* mit Luftlinien-Schaetzung laeuft auf das Ziel zu.
+//
+// Die Schaetzung ist zulaessig (unterschaetzt nie), weil die Kantenkosten aus
+// Weglaengen stammen und ein Weg nie kuerzer als die Luftlinie ist. Bei Knoten
+// auf ANDEREN Karten ist eine Luftlinie bedeutungslos -- dort ist die
+// Schaetzung 0 und A* verhaelt sich wie Dijkstra.
+//
+// Wichtig: die Warteschlange enthaelt f = g + h, verglichen werden muss aber
+// gegen g. Ohne diese Trennung waehlt A* falsche Wege.
 
-bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*dz*/,
+bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
+                                   float dx, float dy, float /*dz*/,
                                    std::vector<ATLeg>& out, std::string& note) const
 {
     out.clear();
 
     if (!sNodesLoaded)
     {
-        note = "keine TravelNodes geladen";
+        note = "keine Reiseknoten geladen";
         return false;
     }
 
-    uint32 mapId = player->GetMapId();
+    uint32 startMap = player->GetMapId();
+    if (!destMap)
+        destMap = startMap;
+
     float dStart = 0.0f, dEnd = 0.0f;
 
-    uint32 startNode = NearestNode(mapId, player->GetPositionX(), player->GetPositionY(),
+    uint32 startNode = NearestNode(startMap, player->GetPositionX(), player->GetPositionY(),
                                    ATConf.nodeSearchRadius, &dStart);
-    uint32 endNode   = NearestNode(mapId, dx, dy, ATConf.nodeSearchRadius, &dEnd);
+    uint32 endNode = NearestNode(destMap, dx, dy, ATConf.nodeSearchRadius, &dEnd);
 
     if (!startNode || !endNode)
     {
@@ -220,31 +230,28 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     }
     if (startNode == endNode)
     {
-        note = "Start und Ziel am selben Knoten";
+        note = "Start und Ziel liegen am selben Knoten";
         return false;
     }
 
-    // --- Suche -------------------------------------------------------------
     std::unordered_map<uint32, float> dist;
-    std::unordered_map<uint32, bool> closed;
+    std::unordered_set<uint32> closed;
     std::unordered_map<uint32, uint32> prev;
     std::unordered_map<uint32, uint8> prevType;
 
     typedef std::pair<float, uint32> QE;
     std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
 
-    // A* statt reinem Dijkstra: die geschaetzte Restentfernung lenkt die Suche
-    // auf das Ziel zu. Die Schaetzung ist zulaessig (unterschaetzt nie), weil
-    // die Kantenkosten aus Weglaengen stammen und ein Weg nie kuerzer als die
-    // Luftlinie ist. Bei Knoten auf ANDEREN Karten ist eine Luftlinie
-    // bedeutungslos -- dort ist die Schaetzung 0, A* verhaelt sich wie Dijkstra.
-    ATNode const& goalNode = sNodes[endNode];
+    ATNode const& goalNode = sNodes.find(endNode)->second;
+
     auto heuristic = [&](uint32 n) -> float
     {
-        ATNode const& x = sNodes[n];
-        if (x.mapId != goalNode.mapId)
+        auto it = sNodes.find(n);
+        if (it == sNodes.end())
             return 0.0f;
-        return Dist2D(x.x, x.y, goalNode.x, goalNode.y);
+        if (it->second.mapId != goalNode.mapId)
+            return 0.0f;
+        return AT::Dist2D(it->second.x, it->second.y, goalNode.x, goalNode.y);
     };
 
     dist[startNode] = 0.0f;
@@ -264,13 +271,13 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             break;
         }
 
-        // cur.first ist f = g + h. Verglichen werden muss gegen g.
+        if (closed.find(cur.second) != closed.end())
+            continue;
+        closed.insert(cur.second);
+
         auto dIt = dist.find(cur.second);
         if (dIt == dist.end())
             continue;
-        if (closed[cur.second])
-            continue;
-        closed[cur.second] = true;
 
         if (++visited > 40000)
             break;
@@ -279,9 +286,11 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         if (lIt == sLinks.end())
             continue;
 
+        float g = dIt->second;
+
         for (ATNodeLink const& l : lIt->second)
         {
-            float nd = dist[cur.second] + l.cost;
+            float nd = g + l.cost;
             auto old = dist.find(l.to);
             if (old == dist.end() || nd < old->second)
             {
@@ -307,6 +316,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
         chain.push_back(at);
         if (at == startNode)
             break;
+
         auto p = prev.find(at);
         if (p == prev.end())
         {
@@ -314,6 +324,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             return false;
         }
         at = p->second;
+
         if (chain.size() > 400)
         {
             note = "Route unplausibel lang";
@@ -323,15 +334,15 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     std::reverse(chain.begin(), chain.end());
 
     // --- Umweg am Routenanfang abschneiden ---------------------------------
-    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wird er
-    // stur angelaufen, rennt der Charakter erst in die Gegenrichtung und dreht
-    // dann um. Verglichen wird deshalb der Umweg:
+    //
+    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wird er stur
+    // angelaufen, rennt der Charakter erst in die Gegenrichtung und dreht dann
+    // um. Verglichen wird deshalb der tatsaechliche Umweg:
     //
     //     ueber n0:  |Spieler->n0| + |n0->n1|
     //     direkt:    |Spieler->n1|
     //
-    // Ist der Umweg groesser als SkipDetourFactor, faellt n0 weg. In einer
-    // Schleife, weil manchmal mehrere Knoten hinter dem Spieler liegen.
+    // In einer Schleife, weil manchmal mehrere Knoten hinter dem Spieler liegen.
     {
         float px = player->GetPositionX();
         float py = player->GetPositionY();
@@ -339,11 +350,15 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
         while (chain.size() > 1 && skipped < 4)
         {
-            ATNode const& n0 = sNodes[chain[0]];
-            ATNode const& n1 = sNodes[chain[1]];
+            ATNode const& n0 = sNodes.find(chain[0])->second;
+            ATNode const& n1 = sNodes.find(chain[1])->second;
 
-            float viaN0  = Dist2D(px, py, n0.x, n0.y) + Dist2D(n0.x, n0.y, n1.x, n1.y);
-            float direct = Dist2D(px, py, n1.x, n1.y);
+            // Nur vergleichbar, solange beide auf derselben Karte liegen.
+            if (n0.mapId != startMap || n1.mapId != startMap)
+                break;
+
+            float viaN0  = AT::Dist2D(px, py, n0.x, n0.y) + AT::Dist2D(n0.x, n0.y, n1.x, n1.y);
+            float direct = AT::Dist2D(px, py, n1.x, n1.y);
 
             if (direct > ATConf.nodeSearchRadius * 1.5f)
                 break;
@@ -358,16 +373,18 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
     // --- In Etappen umwandeln ---------------------------------------------
     for (size_t i = 0; i < chain.size(); ++i)
     {
-        ATNode const& n = sNodes[chain[i]];
+        ATNode const& n = sNodes.find(chain[i])->second;
 
         ATLeg leg;
+        leg.mapId = n.mapId;
         leg.wx = n.x;
         leg.wy = n.y;
         leg.wz = n.z;
         leg.resolved = true;
         leg.name = n.name;
+        leg.kind = AT_LEG_WALK;
 
-        // Art der Verbindung zum naechsten Knoten
+        // Art der Verbindung ZUM NAECHSTEN Knoten
         if (i + 1 < chain.size())
         {
             uint8 t = 1;
@@ -375,17 +392,16 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
             if (pt != prevType.end())
                 t = pt->second;
 
-            leg.linkType = t;
-            leg.nextName = sNodes[chain[i + 1]].name;
-            if (t != 1)
-                leg.flags |= AT_LEG_SPECIAL;
+            leg.kind = KindFromLinkType(t);
+            leg.nextName = sNodes.find(chain[i + 1])->second.name;
         }
 
         out.push_back(leg);
     }
 
-    char b[192];
-    std::snprintf(b, sizeof(b), "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
+    char b[224];
+    std::snprintf(b, sizeof(b),
+                  "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
                   uint32(out.size()), dStart, dEnd);
     note = b;
     return true;
@@ -397,14 +413,14 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, float dx, float dy, float /*d
 
 void AutoTravelMgr::NodeInfo(Player* player)
 {
-    char b[256];
-    std::snprintf(b, sizeof(b), "TravelNodes: %u Knoten geladen, Datenbank '%s'.",
-                  uint32(sNodes.size()), ATConf.nodeDb.c_str());
+    char b[288];
+    std::snprintf(b, sizeof(b), "Reiseknoten: %u geladen, Datenbank '%s'.",
+                  uint32(sNodes.size()), ATNodeDb.c_str());
     Msg(player, b);
 
     if (sNodes.empty())
     {
-        Msg(player, "Nichts geladen - Tabellenname oder Datenbankrechte pruefen (Serverlog).");
+        Msg(player, "Nichts geladen - Tabellenname oder Datenbankrechte pruefen (siehe Serverlog).");
         return;
     }
 
@@ -418,9 +434,10 @@ void AutoTravelMgr::NodeInfo(Player* player)
         return;
     }
 
-    ATNode const& node = sNodes[n];
+    ATNode const& node = sNodes.find(n)->second;
+    size_t links = sLinks.count(n) ? sLinks.find(n)->second.size() : 0;
+
     std::snprintf(b, sizeof(b), "Naechster Knoten: #%u '%s', %.0f yd entfernt, %u Verbindungen.",
-                  node.id, node.name.c_str(), d,
-                  uint32(sLinks.count(n) ? sLinks[n].size() : 0));
+                  node.id, node.name.c_str(), d, uint32(links));
     Msg(player, b);
 }

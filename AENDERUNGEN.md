@@ -1,336 +1,320 @@
-# Prüfbericht und Änderungen
+# Was sich geaendert hat
 
-Der hochgeladene Stand wurde geprüft, nicht neu geschrieben. Gefunden wurden
-**ein schwerer Bewertungsfehler**, eine **Sicherheitslücke** und drei kleinere
-Mängel.
-
----
-
-## 1. Die Bergstrafe hing an der Punktdichte, nicht am Gelände
-
-`ScoreNaturalPath()` startete für **jeden Punkt** ein neues Fenster. Damit
-zählte dieselbe Steigung so oft, wie Punkte darauf lagen — und die Punktzahl
-hängt vom Pfadmodus ab, nicht vom Berg.
-
-Gemessen an einem Hang von 200 yd Länge und 30 yd Anstieg:
-
-```
-Abtastung                     Punkte  Fensterstrafe
-alle   2.0 yd ein Punkt          101              0
-alle   4.0 yd ein Punkt           51              0
-alle   8.0 yd ein Punkt           26            768
-alle  20.0 yd ein Punkt           11           1000
-```
-
-Zwei Fehler zugleich:
-
-* **Punktdichte**: gleicher Berg, Strafen zwischen 0 und 1000.
-* **Fenster zu kurz**: bei 10 yd Fenster steigt auch ein langer Berg nur ein
-  bis zwei Yards und blieb unter der Schwelle von 2 yd. Auf geglätteten
-  Pfaden (etwa 4 yd Schrittweite) feuerte die Bergstrafe deshalb **nie** —
-  ausgerechnet auf denen, die normalerweise benutzt werden.
-
-Die Einheit war zusätzlich falsch: `travelled * gain * penalty` ergibt
-Yards² und explodiert gegenüber der Wegstrecke, die in Yards zählt. Das ist
-die Ursache für Umwege, die in keinem Verhältnis zum vermiedenen Hügel stehen.
-
-**Neu:** Fenster fester Länge (40 yd), gesetzt in festen Abständen entlang der
-**Strecke** statt je Punkt. Die Strafe wird in Yards gerechnet und ist damit
-mit der Wegstrecke vergleichbar.
-
-```
-Punktdichte-Test (200 yd Hang, 30 yd Anstieg)
-  alle   2.0 yd: 101 Punkte -> Strafe     54
-  alle   4.0 yd:  51 Punkte -> Strafe     54
-  alle   8.0 yd:  26 Punkte -> Strafe     54
-  alle  20.0 yd:  11 Punkte -> Strafe     54
-```
-
-Und gegen die Beispiele der Vorlage:
-
-```
-  100 yd eben                Strecke   100 + Berg     0 =    100
-  110 yd sanft ansteigend    Strecke   108 + Berg     0 =    108
-  125 yd um den Berg herum   Strecke   124 + Berg     0 =    124
-  105 yd steil hinauf        Strecke   104 + Berg   302 =    406
-```
-
-Der Weg um den Berg gewinnt deutlich, ohne dass ein 3-km-Umweg attraktiv wird.
-
-Neu kalibriert: `ElevationWindow 10 → 40`, `GainStart 2 → 4`,
-`GainStrong 6 → 10`, `GainExtreme 8 → 20`, Strafen `5/20/80 → 3/8/20`.
+Modul und Addon wurden neu geschrieben. Die im Spiel erprobten Loesungen der
+Vorfassung sind erhalten geblieben -- die streckenbasierte Bergstrafe, die
+Etagenwahl am Routenverlauf, die Mehrflaechen-Pruefung fuer Bruecken, A* im
+Knotengraphen. Neu ist alles, was darum herum fehlte.
 
 ---
 
-## 1b. Rettung setzte auf Treppen unter die Stadt
+## 1. Die Uebergabe an den Spieler gab es gar nicht
 
-Auf Treppen und Rampen rutscht der Charakter durch die Stufe. Die Rettung
-suchte die Bodenhöhe **von `pz + 2` abwärts über 200 Yards**. Sobald er mehr
-als zwei Yards durchgerutscht war, lag `pz + 2` unter der Stufe — und die
-nächste gefundene Fläche war das Rohgelände unter der Stadt:
+Das war die Hauptforderung, und sie war nicht umgesetzt. Die Vorfassung nahm
+mit `SetClientControl(player, false)` die Steuerung und gab sie erst am Ende
+der Reise, bei Kampfbeginn oder beim Abbruch zurueck. Dazwischen konnte der
+Spieler **nichts** tun: bei entzogener Kontrolle erzeugt ein Tastendruck nicht
+einmal ein Bewegungspaket, das der Server sehen koennte.
+
+### Was jetzt passiert
+
+**Uebernehmen** geschieht bewusst -- ueber den grossen Knopf im Panel, den
+mittleren Mausknopf auf dem Minimap-Symbol oder eine frei belegbare Taste unter
+*Tastaturbelegung -> AutoTravel*. Der Server gibt die Kontrolle im selben
+Serverakt zurueck; der Befehl laeuft in einer eigenen Warteschlange mit 0,1 s
+Abstand statt der 0,35 s, mit denen Routen uebertragen werden.
+
+**Zurueckgeben** geschieht von selbst. Das Addon beobachtet, ob der Spieler
+etwas tut, und meldet Ruhe:
 
 ```
-Stufe 95.0, Rohgelaende unter der Stadt 59.0
-pz           ALT (pz+2)   NEU (Pfad-Z)   Ergebnis
-94.5               95.0           95.0   ALT ok    / NEU ok
-93.0               95.0           95.0   ALT ok    / NEU ok
-92.0               59.0           95.0   ALT STURZ / NEU ok
-88.0               59.0           95.0   ALT STURZ / NEU ok
-80.0               59.0           95.0   ALT STURZ / NEU ok
+Bewegung   Mausblick   Mausbewegung   Maustasten   Modifikatortasten
+Fallen     Kampf       Zaubern        offener Chat
+offene Fenster (Beute, Haendler, Quest, Post, Bank, Flugmeister, Karte ...)
 ```
 
-**Neu:** Bezug ist der **Pfad selbst**. Seine Punkte stammen aus dem NavMesh
-und liegen damit auf der richtigen begehbaren Ebene. Gesucht wird um den
-nächstgelegenen Pfadpunkt herum und nur in einem engen Fenster
-(`RescueSearchRange`, Standard 14 yd), damit keine andere Etage gewinnen kann.
+Nach der eingestellten Ruhezeit (Standard 8 s) laeuft ein sichtbarer Countdown
+(Standard 3 s), den jede Eingabe abbricht. Erst danach uebernimmt der Autopilot.
 
-Zusätzlich zwei Sicherungen:
+### Warum kein Haken auf WASD
 
-* Liegt die gefundene Fläche mehr als das Suchfenster **unter** der Pfadhöhe,
-  ist es eine andere Etage — dann wird **gar nicht** zurückgesetzt. Lieber
-  einmal nicht helfen als in den Keller versetzen.
-* Die zuletzt bestätigt gute Höhe wird laufend mitgeführt und dient als
-  Rückfallebene, wenn gerade kein Pfad vorliegt.
+Naheliegend waere, die Bewegungstasten mitzulesen. Das geht in 3.3.5a nicht
+verlustfrei:
+
+* `SetPropagateKeyboardInput` gibt es erst ab Cataclysm. Ein Frame mit
+  `EnableKeyboard(true)` schluckt jede Taste, auch Enter und Screenshot.
+* `SetOverrideBindingClick` leitet eine Taste auf einen Addon-Knopf um -- dann
+  bewegt sie nicht mehr.
+* Weiterreichen ist nicht moeglich: `MoveForwardStart()` ist protected und wird
+  aus Addoncode als "tainted" abgewiesen.
+
+Der Tastendruck ginge also in jedem Fall verloren. Deshalb: **uebernommen wird
+per Knopf, zurueckgegeben wird beobachtend.** Fuers Beobachten reicht die
+Auswertung oben vollstaendig aus, und sie kostet keinen einzigen Tastendruck.
+
+### Der Playerbot bleibt an
+
+Beim Pausieren wird der Selbstmodus ausdruecklich **nicht** abgeschaltet -- weder
+von Hand noch bei Kampfbeginn. Sonst koennte sich der Charakter genau in dem
+Moment nicht wehren, in dem er es braucht. `AutoDisableBot` steht neu auf
+**aus**, betrifft ohnehin nur das Ende der ganzen Reise.
+
+### Nach dem Kampf
+
+Die Vorfassung fuhr zwei Sekunden nach Kampfende einfach weiter und nahm dem
+Spieler die Steuerung mitten im Pluendern wieder weg. Jetzt geht der Server
+nach dem Kampf in dieselbe Uebergabe wie nach einer Handpause und wartet auf
+die Ruhemeldung des Addons. Ist kein Addon da, faehrt er wie bisher direkt
+weiter -- es gaebe sonst niemanden, der die Meldung schicken koennte.
 
 ---
 
-## 2. `.at tp` war für jeden Spieler offen
+## 2. Ein Absturz des Weltservers durch einen Diagnosebefehl
 
 ```cpp
-{ "at", HandleAt, SEC_PLAYER, Console::No }
+Dbg(player, _sessions.at(player->GetGUID()), b);
 ```
 
-Der Teleport lag unter demselben `SEC_PLAYER` wie alles andere und nimmt
-beliebige Zielkoordinaten entgegen. Jeder Spieler konnte sich überallhin
-versetzen.
+`std::map::at()` wirft `std::out_of_range`, wenn der Schluessel fehlt. Diese
+Zeile lief in `TryPathBetween()` bei eingeschaltetem Debug -- und `.at diag`
+ruft `TryPathBetween()` fuer einen Spieler auf, der gar keine Sitzung hat. Mit
+`AutoTravel.Debug = 1` beendete ein harmloser Diagnosebefehl den Weltserver.
 
-**Neu:** eigene Rechteprüfung nur für `tp`, über
-`AutoTravel.TeleportSecurity` (Standard 2 = GM). Die übrigen Unterbefehle
-bleiben offen — sie können nichts, was der Spieler nicht ohnehin darf.
-
----
-
-## 3. Ungeprüfte Umwandlung von Spielereingaben
-
-14 Aufrufe von `atoi()`/`atof()` auf Werten aus Chatnachrichten. `atoi("abc")`
-ist still `0`, `atof("nan")` ergibt NaN — und NaN pflanzt sich durch die
-gesamte Wegfindung fort.
-
-**Neu:** `ParseUInt`, `ParseFloat`, `ParseBool`, `ParseNorm` mit `strtoul`/
-`strtod`, Prüfung auf vollständigen Verbrauch, `ERANGE`, `isfinite` und
-Wertebereich 0..1 für normalisierte Koordinaten. Ungültige Eingabe wird
-abgewiesen statt in eine 0 verwandelt.
+Behoben durch `Find()`, das `nullptr` liefert statt zu werfen.
 
 ---
 
-## 4. Knotensuche war Dijkstra
+## 3. Die halbe Optionsseite war wirkungslos
 
-Dijkstra breitet sich gleichmäßig in alle Richtungen aus. **Neu:** A* mit
-Luftlinien-Schätzung.
+Die Optionsseite des Addons schickte `natural`, `contour`, `contour_elevation`,
+`contour_slope`, `contour_narrow`, `contour_wide` und `contour_factor`. Der
+Server kannte in `SetOption()` genau zwei Schluessel:
 
-Die Schätzung ist zulässig, weil die Kantenkosten aus Weglängen stammen und
-ein Weg nie kürzer als die Luftlinie ist. Bei Knoten auf **anderen Karten**
-ist eine Luftlinie bedeutungslos — dort ist die Schätzung 0 und A* verhält
-sich wie Dijkstra.
-
-Dabei berichtigt: die Warteschlange enthält jetzt `f = g + h`, der Vergleich
-läuft aber gegen `g`. Ohne diese Trennung hätte A* falsche Wege gewählt.
-
----
-
-## 5. Umweg am Routenanfang
-
-Der nächstgelegene Knoten liegt häufig **hinter** dem Spieler; die alte Prüfung
-verglich nur zwei Entfernungen und entfernte höchstens einen Knoten.
-
-**Neu:** Vergleich des tatsächlichen Umwegs
-(`|Spieler→n0| + |n0→n1|` gegen `|Spieler→n1|`), in einer Schleife für bis zu
-vier Knoten.
-
-```
-Knoten 80 yd hinter dem Spieler    über 360  direkt 200  -> ÜBERSPRINGEN
-Knoten seitlich, leichter Umweg    über 219  direkt 200  -> behalten
-Knoten genau auf dem Weg           über 200  direkt 200  -> behalten
+```cpp
+if (key == "arrival") { ... }
+else if (key == "grace") { ... }
+else Msg(player, "Unbekannte Option: " + key);
 ```
 
+Alle sieben liefen ins Leere. Jeder Haken auf der Seite tat nichts.
+
+Neu gibt es **eine** Tabelle in `AutoTravel_Config.cpp` mit 89 Eintraegen, aus
+der sich das Laden aus der Konfigurationsdatei, `.at set` und `.at options`
+gemeinsam bedienen. Ein neuer Wert wird an einer Stelle eingetragen und ist
+ueberall verfuegbar. `conf/autotravel.conf.dist` wird aus derselben Tabelle
+erzeugt und kann deshalb nicht davon abweichen.
+
+Zusaetzlich pruefen die Auslieferungstests, dass jeder Schluessel, den das Addon
+sendet, im Server existiert.
+
 ---
 
-## 6. Schwebeschwelle zu scharf
+## 4. Das Addon war beim ersten Optionsklick kaputt
 
-`AboveMeshHeight` stand auf 6 yd. Auf hügeligem Gelände überspannt der Spline
-regelmäßig eine Senke, ohne dass etwas kaputt ist. **Neu:** 12 yd.
+```lua
+function AT.SetServerOption(key, value)
+   ...
+   Send("at set " .. tostring(key) .. " " .. v)   -- Zeile 102
+end
+...
+local function Send(cmd)                          -- Zeile 126
+```
+
+`Send` ist eine **lokale** Funktion, die erst 24 Zeilen spaeter deklariert
+wird. Der Aufruf in Zeile 102 sucht deshalb ein globales `Send`, findet nil und
+wirft "attempt to call global 'Send' (a nil value)". Jeder Haken auf der
+Optionsseite loeste diesen Fehler aus.
 
 ---
 
-## Geprüft, aber nicht geändert
+## 5. Die Optionsseite war nur zur Haelfte erreichbar
 
-* **Kandidatenauswahl** — der Stand wählt bereits den besten Kandidaten statt
-  des ersten gültigen. Richtig so.
-* **Hang- und Kurvenstrafe** — dimensionsmäßig sauber (`horizontal × Überschuss
-  × Faktor` ergibt Yards) und skaliert mit der Strecke. Keine Änderung nötig.
-* **Contour-Probing** — greift nur bei erkanntem Anstieg, ist also nicht der
-  Normalfall. Bleibt.
-* **`ChunkPoints`** — die Vorlage schlägt 12 → 6 vor. Das ist eine reine
-  Geschmacksfrage ohne messbares Kriterium; ohne Test im Spiel würde ich einen
-  funktionierenden Wert nicht ändern.
+Die Seite reichte bis y = -840. Das Optionsfenster von 3.3.5a ist rund 600
+Pixel hoch. Alles ab dem Abschnitt "Teleport" war schlicht nicht sichtbar und
+nicht anklickbar.
 
-## Automatische Gegenprüfungen
+Neu: ein `ScrollFrame`. Die Positionen werden ausserdem mitgezaehlt statt von
+Hand gesetzt -- eine neue Zeile in der Mitte verschiebt jetzt alles Folgende
+von selbst, statt zwanzig Zahlen ungueltig zu machen.
 
-Beim Bauen laufen jetzt zwölf Plausibilitätsprüfungen der Schwellwerte
-gegeneinander (Zielradius gegen Etappenradius, Fenster gegen Anstiegsschwelle,
-unvollständiger Pfad teurer als jeder Berg …). Alle zwölf sind derzeit in
-Ordnung.
+---
 
+## 6. Es gab keine Flugmeister, keine Flugmounts, keine Transporte
+
+Die Vorfassung meldete bei einer Sonderverbindung nur "dort musst du selbst
+fliegen oder das Portal nehmen" und wartete.
+
+### Flugmeister
+
+Neu sucht der Server die guenstigste Verbindung zwischen zwei **bekannten**
+Flugpunkten -- Dijkstra ueber `sTaxiPathSetBySource`, mit Fraktionspruefung
+ueber `MountCreatureID` und der Flugpunktmaske des Charakters. Er laeuft hin und
+startet den Flug mit `ActivateTaxiPathTo`. Zwischenstationen sind erlaubt.
+
+Zwei Bedingungen, beide einstellbar: der Flug muss mindestens 60 Prozent der
+verbleibenden **Laufstrecke** sparen (die Flugstrecke selbst zaehlt nicht als
+Laufweg), und er darf hoechstens 5 Gold kosten.
+
+Eine Feinheit, die leicht uebersehen wird: der Core laesst den Abflug nur
+innerhalb von `2 * INTERACTION_DISTANCE`, also 10 Yards, zu. Der normale
+Etappenradius von 15 Yards haette jeden Flug mit "zu weit weg" abgelehnt.
+Deshalb gilt vor einem Flugmeister ein eigener, kleinerer Radius.
+
+### Eigenes Flugmount
+
+Wo Fliegen erlaubt ist, wird eine Luftroute gebaut: Steigflug, Reiseflug entlang
+eines Hoehenprofils, Sinkflug.
+
+```
+              ____________
+             /            \.
+        ____/    Berg      \____
+       /                        \.
+      A                          B
+```
+
+Das Profil wird zweimal mit dem Maximum der Nachbarschaft geglaettet, damit die
+Route **vor** dem Berg steigt statt hineinzufliegen. Damit sind Klippen,
+Wasser und Berge auf einen Schlag erledigt.
+
+Ob Fliegen ueberhaupt erlaubt ist, wird nicht geraten: nach dem Aufsitzen sagt
+`CanFly()`, ob der Core das Flugtempo gewaehrt hat. In Azeroth gewaehrt dasselbe
+Mount nur Bodentempo -- dann wird gelaufen, ohne dass jemand eine Zonenliste
+pflegen muss.
+
+### Zeppelin, Schiff, Tiefenbahn
+
+Steht der Charakter auf einem Transport, uebergibt der Autopilot vollstaendig
+und wartet. Weder Wegfindung noch Bodenrettung noch Feststeck-Erkennung ergeben
+dort einen Sinn -- alle drei wuerden sofort und dauernd ausloesen, weil sich der
+Boden unter dem Charakter wegbewegt. Steigt er aus, wird von der neuen Position
+aus weitergerechnet. Das deckt alle drei Fahrzeugarten ab, ohne fuer jedes
+Sonderwissen zu brauchen.
+
+---
+
+## 7. Nur zwei Etagen waren zu wenig
+
+`FindGroundPlanes()` suchte genau zwei Ebenen. Das reicht fuer einen Torbogen,
+nicht fuer die Stellen, an denen es darauf ankommt: die Bank von Sturmwind, das
+Wirtshaus mit Galerie, die Rampen der Tiefenbahn, Eisenschmiede mit drei
+uebereinanderliegenden Ringen.
+
+Neu wird von oben nach unten durchgetastet, bis die eingestellte Zahl an Etagen
+gefunden ist (Standard 4, einstellbar bis 8) oder das Suchfenster verlassen
+wurde.
+
+Die Bewertung kennt jetzt zusaetzlich `MaxStepUp` und `MaxStepDown`: nach oben
+ist eine Treppenstufe normal, nach unten ist ein Absatz von mehreren Yards
+verdaechtig. Vorher galt dieselbe Grenze in beide Richtungen.
+
+---
+
+## 8. Klippen und Wasser flossen nicht in die Bewertung ein
+
+Zwei Aufschlaege sind dazugekommen, beide in Yards und damit mit der Wegstrecke
+vergleichbar:
+
+* **Klippen**: ein Hoehensturz ueber eine sehr kurze horizontale Strecke. Ein
+  Hang faellt ueber viele Yards, eine Klippe auf einmal. Faellt es ins Wasser,
+  zaehlt es nicht.
+* **Schwimmstrecke**: jeder Yard im Wasser kostet extra. Damit gewinnt der Weg
+  am Ufer entlang gegen den Weg quer durch den See, solange der Umweg im
+  Rahmen bleibt.
+
+---
+
+## 9. Bewegung ohne Tempoangabe
+
+`MoveSplineInit` bekam nur `MovebyPath()` und `SetWalk(false)`. Die
+Geschwindigkeit blieb dem Core ueberlassen, der sie aus den Bewegungsflags
+ableitet -- und die werden im selben Atemzug von Hand gesetzt.
+
+Neu wird sie ausdruecklich gesetzt: `MOVE_FLIGHT` beim Fliegen, `MOVE_SWIM` im
+Wasser, sonst `MOVE_RUN`. Ausserdem dreht sich der Charakter am Ende jedes
+Abschnitts in Fahrtrichtung, statt in die zuletzt vom Client gemeldete Richtung
+zu springen.
+
+---
+
+## 10. Ein uint8, in den ein uint32 geschrieben wurde
+
+Die Optionsregistry adressiert die Konfigurationsfelder ueber `offsetof` und
+schreibt sie ueber einen typgerechten Zeiger. `groundPlanes` war als `uint8`
+deklariert, in der Registry aber als `OPT_UINT` eingetragen -- ein Schreibzugriff
+haette vier Bytes in ein Ein-Byte-Feld geschrieben und die Nachbarfelder
+mitgenommen.
+
+Gefunden hat das ein Pruefskript, das die Typen in Kopfdatei und Registry
+gegeneinander haelt. Es laeuft jetzt bei jeder Auslieferung mit, zusammen mit:
+
+* jede deklarierte Methode hat genau eine Definition
+* jeder Optionsschluessel des Addons existiert im Server
+* jeder Chatbefehl des Addons wird vom Server behandelt
+* jeder Zustandsname des Servers ist im Panel hinterlegt
+* jede `AT.*`-Funktion, die aufgerufen wird, ist auch definiert
+
+Zusaetzlich wurde das Modul gegen Attrappen der Core-Schnittstelle uebersetzt
+und gebunden, und das Addon in einer nachgebauten Oberflaeche geladen und
+durchgespielt: Handschlag, Statuspaket, Pause, Countdown, Abbruch durch
+Bewegung, Wiederaufnahme, Ende, alle Slash-Befehle, Optionsseite.
+
+---
+
+## 11. Kleinigkeiten
+
+* `RouteAdd()` benutzte `atoi`/`atof` auf Spielereingaben; jetzt die gepruefte
+  Umwandlung, die im Rest des Moduls schon verwendet wurde.
+* `ATLeg` kennt jetzt eine `mapId`. Ohne sie liessen sich Knoten- und
+  Taxietappen auf anderen Karten nicht sauber behandeln.
+* Der Fortschrittsbalken wird vom Server berechnet statt aus der schwankenden
+  Restdistanz im Client geschaetzt; bei einem Zwischenziel sprang er sonst
+  zurueck.
+* `WorldMapArea.dbc` wird jetzt auch unter `frFR` und `ruRU` gesucht, und ein
+  unplausibel grosser Dateikopf wird abgewiesen, statt Speicher dafuer
+  anzufordern.
+* `.at set` fuer serverweite Werte verlangt jetzt Spielleiterrechte. Vorher
+  haette `/at ziel 20` den Zielradius fuer alle Spieler mitverstellt.
+* Der Handschlag `.at hello` sagt dem Addon, ob das Modul da, aktiv und wie
+  bestueckt ist. Fehlermeldungen koennen dadurch unterscheiden, ob das Addon
+  oder das Modul schuld ist.
+
+---
+
+## Geprueft und bewusst nicht geaendert
+
+* **Streckenbasierte Bergstrafe.** Fenster fester Laenge in festen Abstaenden
+  entlang der Strecke -- damit haengt die Strafe an der Geometrie und nicht an
+  der Punktdichte. Bleibt genau so.
+* **Etagenwahl am Routenverlauf** statt an der Spielerposition. Das ist der
+  Kern gegen "bleibt unter der Treppe". Bleibt.
+* **Mehrflaechen-Pruefung in `TryPath`**, damit eine Kanalbruecke nicht die
+  ganze Route kippt. Bleibt, mit der Toleranz von einem Viertel.
+* **A\* statt Dijkstra** im Knotengraphen, mit `f = g + h` in der
+  Warteschlange und Vergleich gegen `g`. Bleibt.
+* **Umweg am Routenanfang abschneiden.** Bleibt, jetzt mit zusaetzlicher
+  Pruefung, dass beide Knoten auf derselben Karte liegen -- eine Luftlinie
+  ueber Kartengrenzen hinweg ist bedeutungslos.
+* **`ChunkPoints = 12`.** Ohne Messung im Spiel wird ein funktionierender Wert
+  nicht geaendert.
 
 ---
 
 ## Zur Frage: Navigation auf den Client verlagern?
 
-Kurz: **nein**, und es würde das Problem auch nicht lösen.
+Kurz: nein, und es wuerde das Problem auch nicht loesen.
 
-**Bewegung ist clientseitig nicht auslösbar.** `MoveForwardStart()`,
-`TurnLeftStart()` und alle verwandten Funktionen sind in 3.3.5a *protected* —
-ein Addon darf sie nicht aufrufen. Ein Client-Router müsste seine Ergebnisse
-also doch wieder an den Server schicken, damit der bewegt. Damit hätte man
-dieselbe Architektur wie jetzt, nur mit der Wegfindung auf der schwächeren
-Seite.
+**Bewegung ist clientseitig nicht ausloesbar.** `MoveForwardStart()`,
+`TurnLeftStart()` und alle verwandten Funktionen sind in 3.3.5a protected. Ein
+Client-Router muesste seine Ergebnisse also doch wieder an den Server schicken,
+damit der bewegt -- dieselbe Architektur wie jetzt, nur mit der Wegfindung auf
+der schwaecheren Seite.
 
-**Der Client hat die nötigen Daten nicht.** Lua kennt weder Terrainhöhen noch
-Kollisionsgeometrie noch das NavMesh. Es gibt keine Möglichkeit, aus einem
+**Der Client hat die noetigen Daten nicht.** Lua kennt weder Terrainhoehen noch
+Kollisionsgeometrie noch das NavMesh. Es gibt keine Moeglichkeit, aus einem
 Addon heraus zu erfahren, ob ein Punkt begehbar ist. Genau diese Frage ist der
 Kern der Wegfindung.
 
-**Das Clipping käme davon nicht weg.** Es entsteht, weil die Z-Werte des
+**Das Clipping kaeme davon nicht weg.** Es entsteht, weil die Z-Werte des
 serverseitigen Splines nicht exakt zur Kollisionsgeometrie passen, die der
-Client rendert. Wer die Route auf dem Client rechnet, ändert daran nichts —
+Client rendert. Wer die Route auf dem Client rechnet, aendert daran nichts --
 bewegt wird weiterhin per Spline vom Server.
-
-**Was tatsächlich hilft**, ist genau das oben Umgesetzte: die Rettung an der
-Pfadgeometrie ausrichten statt an einer Blindsuche, und im Zweifel nichts tun.
-Für mehrstöckige Bereiche wie Sturmwind ist die Etagenprüfung der
-entscheidende Teil.
-
-
----
-
-# Nachtrag: Durchfallen auf Treppen
-
-## Die Ursache war eine Verankerung an der Spielerposition
-
-`SelectGroundPlane()` bewertete die gefundenen Flächen relativ zur **echten
-Position des Charakters**. Solange er sauber auf der Stufe steht, geht das gut.
-Rutscht er einmal durch, liegt seine Position näher am Hallenboden als an der
-Treppe — und ab da gewinnt der Hallenboden **jede weitere Wahl**:
-
-```
-Der Charakter ist bereits durch die Stufe gerutscht.
-steht bei 95.0   Ebenen {89.0, 97.0}  ->  97.0  ok
-steht bei 92.0   Ebenen {89.0, 97.0}  ->  89.0  <-- bleibt unter der Treppe
-steht bei 90.0   Ebenen {89.0, 97.0}  ->  89.0  <-- bleibt unter der Treppe
-```
-
-Genau das beschriebene Bild: er bleibt bis zum Ende der Treppe darunter und
-wird erst oben wieder hinaufgesetzt.
-
-Dazu kam eine **Asymmetrie** in der Bewertung: Sprünge nach oben wurden hart
-bestraft (Schutz gegen Torbögen), ein Sturz auf eine tiefere Fläche war
-kostenlos.
-
-## Umsetzung deines Vorschlags
-
-**1. Bezug ist der Routenverlauf, nicht die Spielerposition.**
-Die Sollhöhe wird zwischen den benachbarten NavMesh-Punkten interpoliert. Deren
-Höhen stammen aus dem Mesh und liegen auf der begehbaren Fläche — unabhängig
-davon, wo der Charakter gerade steckt.
-
-**2. Bewertung symmetrisch**, plus eine Neigungsregel: Der Übergang von der
-zuletzt akzeptierten Fläche darf nicht steiler als `MaxWalkSlope` (1.2) sein.
-Was steiler wäre, ist keine Lauffläche, sondern eine andere Etage.
-
-**3. Ausreißerkorrektur im Pfad** (`FixPathZOutliers`). Weicht ein einzelner
-Punkt um mehr als `ZOutlierTolerance` (2,5 yd) von der aus seinen Nachbarn
-interpolierten Höhe ab, wird geprüft, ob dort eine Fläche auf Sollhöhe liegt —
-und diese genommen. Steigen die Nachbarn mit, wie bei Treppe, Rampe und Hang,
-bleibt der Punkt unangetastet.
-
-**4. Kein Mitschleppen des Fehlers.** Der Segmentanfang für das nächste Stück
-ist die **Routenhöhe** des erreichten Punkts, nicht die erzeugte Terrainhöhe.
-Ein einmaliger Fehlgriff wandert damit nicht durch die ganze Treppe.
-
-Gegenüberstellung mit einem einmaligen Durchrutschen bei Schritt 1:
-
-```
-i    Soll    ALT (Spieler)  NEU (Route)
-0    95.0    95.0           95.0
-1    97.0    97.0           97.0
-2    99.0    89.0           99.0   <- ALT unter der Treppe
-3   101.0    89.0          101.0   <- ALT unter der Treppe
-4   103.0    89.0          103.0   <- ALT unter der Treppe
-```
-
-## Was das nicht löst
-
-Das verhindert, dass der Charakter **unter der Treppe bleibt**. Ob er beim
-ersten Schritt kurz durch die Stufe rutscht, hängt an der Kollisionsprüfung des
-Clients gegen die Spline-Interpolation — dagegen hilft nur, die Punkte auf
-Treppen enger zu setzen (`AutoTravel.TerrainStep` verkleinern, etwa auf 1.5).
-Das kostet mehr Höhenabfragen und sollte deshalb erst gemessen werden.
-
-
----
-
-# Nachtrag 2: "Kein begehbarer Weg" zum Hafen
-
-## Die Diagnose enthielt die Antwort
-
-```
-Ziel: -8643.9 / 1333.4 / 5.6 | Entfernung 687 yd
-Gelaendehoehe dort: -56.52 (Ziel-Z 5.64)
-  Eckpunkte  Z  5.64 -> 0x4 (INCOMPLETE), 20 Punkte verworfen
-```
-
-Der Pathfinder hatte einen Pfad mit 20 Punkten gefunden — **verworfen hat ihn
-AutoTravel selbst.** Zwischen Steg (5.6) und Rohgelände darunter (−56.5) liegen
-62 Yards.
-
-## Ursache: die punktweise Bodenprüfung
-
-`TryPath()` verglich jeden Pfadpunkt gegen **eine** Bodenhöhe und verwarf die
-**gesamte** Route, sobald ein einziger Punkt um mehr als 5 bzw. 8 Yards abwich.
-In Sturmwind kippt damit jede Brücke und jeder Steg den ganzen Weg:
-
-```
-Punkt                Pfad-Z   Gelaende   alte Pruefung
-Handelsdistrikt       104.9      104.5   ok
-Kanalbruecke           98.0       60.0   VERWIRFT DEN GANZEN PFAD
-Parkviertel            90.0       89.6   ok
-Hafenrampe             40.0       12.0   VERWIRFT DEN GANZEN PFAD
-Steg am Wasser          5.6      -56.5   VERWIRFT DEN GANZEN PFAD
-```
-
-Im Code stand dazu ausdrücklich, an dieser Stelle **keine**
-Mehrflächen-Erkennung zu verwenden. Genau die wird aber gebraucht, um eine
-Brücke von einem Fehlgriff zu unterscheiden — eine Brücke *ist* eine gültige
-Fläche über dem Gelände.
-
-## Behoben
-
-* Geprüft wird, ob **irgendeine** Fläche an dieser Stelle zur Pfadhöhe passt
-  (`FindGroundPlanes`) — Brücke, Steg, Rampe oder Gelände.
-* Ein einzelner unpassender Punkt kippt die Route nicht mehr. Verworfen wird
-  erst, wenn **ein Viertel** der Punkte nirgends aufliegt.
-
-```
-Weg zum Hafen:     0 von 5 Punkten ohne Flaeche -> akzeptiert
-Kaputter Pfad:     3 von 5 Punkten ohne Flaeche -> VERWORFEN
-```
-
-Die Schutzwirkung bleibt also erhalten, ohne legitime Bauwerke auszuschließen.
-
-## Was noch offen ist
-
-Die geglättete Variante meldete `NOPATH` mit 2 Punkten — dort findet Detour
-kein Zielpolygon. Das ist eine andere Baustelle als die Verwerfung: Bei 687
-Yards greift ohnehin die 296-Yard-Grenze der Glättung, und die Eckpunkt-Variante
-übernimmt. Sie liefert `INCOMPLETE`, also einen Teilweg — der reicht, weil
-AutoTravel am Ende jedes Teilstücks neu rechnet.

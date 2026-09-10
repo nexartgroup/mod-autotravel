@@ -1,343 +1,535 @@
+#
+# mod-autotravel  --  Konfiguration
+# ---------------------------------------------------------------------------
+# Diese Datei nach autotravel.conf kopieren und dort aendern. Die .dist wird
+# bei einem Update ueberschrieben, die .conf nicht.
+#
+# Jeder Wert laesst sich zusaetzlich im laufenden Betrieb setzen:
+#
+#     .at options            zeigt alle Werte mit ihrem aktuellen Stand
+#     .at options fly        zeigt nur Werte, die zum Fliegen gehoeren
+#     .at set fly 0          schaltet das Fliegen ab
+#
+# Aenderungen im laufenden Betrieb gelten bis zum naechsten Serverneustart und
+# brauchen Spielleiterrechte. Ausgenommen sind 'arrival' und 'grace': die
+# gelten nur fuer die eigene Reise und darf jeder Spieler setzen.
+#
+# VORAUSSETZUNGEN
+#   * mmaps muessen erzeugt und in worldserver.conf aktiviert sein
+#     (MoveMaps.Enable = 1). Ohne sie kann der Server keinen Weg berechnen.
+#   * vmaps werden fuer die Hoehen gebraucht (Vmap.EnableHeight = 1).
+#   * dbc/WorldMapArea.dbc muss unter DataDir liegen. AzerothCore legt dafuer
+#     keinen eigenen Speicher an, deshalb liest dieses Modul die Datei selbst.
+#   * mod-playerbots ist optional. Ist es vorhanden, benutzt AutoTravel seinen
+#     Reiseknotengraphen; fehlt es, faellt es auf die Carbonite-Route zurueck.
+#
+# ---------------------------------------------------------------------------
+
 [worldserver]
 
-########################################
-# mod-autotravel configuration
-########################################
 
-#    AutoTravel.Enable
-#        Modul global ein-/ausschalten.
-#        Default: 1
+#--------------------------------------------------------------------------
+#   Grundbetrieb
+#--------------------------------------------------------------------------
+
+#    Modul aktiv
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: enable
 AutoTravel.Enable = 1
 
-#    AutoTravel.ArrivalDistance
-#        Zielradius in Yards (2D). Innerhalb dieses Radius gilt das Ziel
-#        als erreicht.
-#        Minimum 0.5, damit sich auch punktgenaue Ziele einstellen lassen.
-#        Default: 8
-AutoTravel.ArrivalDistance = 8
-
-########################################
-# Wasser und Bodenkontakt
-########################################
-
-#    AutoTravel.Swim
-#        Wegpunkte im Wasser werden an die Oberflaeche gelegt, statt ueber den
-#        Grund zu fuehren. 0 = Reise bricht bei Wasser ab (altes Verhalten).
-#        Default: 1
-AutoTravel.Swim = 1
-
-#    AutoTravel.SwimSurfaceOffset
-#        Wie tief unter dem Wasserspiegel geschwommen wird (Yards).
-#        Default: 1.2
-AutoTravel.SwimSurfaceOffset = 1.2
-
-#    AutoTravel.MinSwimDepth
-#        Ab dieser Wassertiefe wird geschwommen. Darunter ist es eine Furt und
-#        der Charakter laeuft normal hindurch.
-#        Default: 2
-AutoTravel.MinSwimDepth = 2
-
-#    AutoTravel.MaxUnderwaterMs
-#        Notbremse: bleibt der Charakter so lange untergetaucht, wird die Reise
-#        beendet, bevor die Luft ausgeht.
-#        Default: 45000
-AutoTravel.MaxUnderwaterMs = 45000
-
-#    AutoTravel.RescueUnderMesh
-#        Erkennt, wenn der Charakter unter die begehbare Flaeche geraten ist,
-#        und setzt ihn zurueck darauf. Das ist eine Stoerungsbehebung, kein
-#        Reisemittel.
-#        Default: 1
-AutoTravel.RescueUnderMesh = 1
-
-#    AutoTravel.UnderMeshDepth
-#        Ab so vielen Yards unter der Reisehoehe gilt der Charakter als
-#        durchgefallen.
-#        Default: 2.5
-AutoTravel.UnderMeshDepth = 6
-
-#    AutoTravel.AboveMeshHeight
-#        Ab so vielen Yards ueber der Reisehoehe gilt er als haengend oder
-#        fallend und wird nach unten auf die Flaeche gesetzt. Grosszuegiger als
-#        UnderMeshDepth, damit Spruenge und Rampen nicht ausloesen.
-#        Default: 6
-AutoTravel.AboveMeshHeight = 12
-
-#    AutoTravel.LegDistance
-#        Radius, ab dem ein ZWISCHENstuetzpunkt der Carbonite-Route als
-#        erreicht gilt. Grosszuegiger als der Zielradius, weil es dort nicht
-#        auf Genauigkeit ankommt.
-#        Default: 15
-AutoTravel.LegDistance = 15
-
-#    AutoTravel.AutoMount
-#        Automatisch ein Bodenmount benutzen, wenn erlaubt.
-#        Default: 1
-AutoTravel.AutoMount = 1
-
-#    AutoTravel.MountMinDistance
-#        Erst ab dieser Restdistanz (Yards) wird gemountet.
-#        Default: 150
-AutoTravel.MountMinDistance = 150
-
-#    AutoTravel.PauseInCombat
-#        Bewegung im Kampf pausieren und Kontrolle an den Spieler zurueckgeben.
-#        Default: 1
-AutoTravel.PauseInCombat = 1
-
-#    AutoTravel.ResumeAfterCombat
-#        Nach Kampfende automatisch neu pathen und weiterlaufen.
-#        Default: 1
-AutoTravel.ResumeAfterCombat = 1
-
-#    AutoTravel.CombatGraceMs
-#        Wartezeit nach Kampfende, bevor neu gepatht wird.
-#        Default: 1500
-AutoTravel.CombatGraceMs = 1500
-
-#    AutoTravel.StuckDetection
-#        Default: 1
-AutoTravel.StuckDetection = 1
-
-#    AutoTravel.StuckTimeoutMs
-#        Messfenster fuer die Stuck-Erkennung.
-#        Default: 5000
-AutoTravel.StuckTimeoutMs = 5000
-
-#    AutoTravel.StuckMinDistance
-#        Minimale Strecke (Yards) innerhalb des Messfensters. Darunter gilt
-#        der Charakter als haengengeblieben.
-#        Default: 3
-AutoTravel.StuckMinDistance = 3
-
-#    AutoTravel.MaxRepathAttempts
-#        Nach so vielen erfolglosen Versuchen wird abgebrochen (keine
-#        Endlosschleife).
-#        Default: 8
-AutoTravel.MaxRepathAttempts = 8
-
-#    AutoTravel.ResumeAfterDeath
-#        Ziel nach dem Tod gespeichert lassen und nach Wiederbelebung
-#        fortsetzen.
-#        Default: 0
-AutoTravel.ResumeAfterDeath = 0
-
-#    AutoTravel.TakeClientControl
-#        1 = Server uebernimmt waehrend der Fahrt die Bewegungskontrolle
-#            (SetClientControl). Zuverlaessig, aber der Spieler kann waehrend
-#            der Fahrt nicht selbst steuern.
-#        0 = nur Splines ohne Kontrollentzug. Sanfter, aber der Client kann
-#            gegensteuern und die Bewegung abbrechen.
-#        Default: 1
-AutoTravel.TakeClientControl = 0
-
-#    AutoTravel.ChunkPoints
-#        Wie viele Pfadpunkte pro Spline gesendet werden. Kleiner = feiner
-#        reagierend, groesser = weniger Pakete.
-#        Default: 12
-AutoTravel.ChunkPoints = 24
-
-########################################
-# Natuerliche Navigation
-########################################
-
-# 1 = mehrere gueltige Wege bewerten.
-# 0 = normale PathGenerator-Auswahl.
-AutoTravel.NaturalPathing = 1
-
-# Ab dieser Steigung beginnt eine zusaetzliche Strafe.
-AutoTravel.SlopeStart = 0.15
-
-# Deutlich steilere Steigung.
-AutoTravel.SlopeStrong = 0.25
-
-# Sehr steile Steigung.
-AutoTravel.SlopeExtreme = 0.35
-
-AutoTravel.SlopePenalty = 7.0
-AutoTravel.SteepSlopePenalty = 15.0
-AutoTravel.ExtremeSlopePenalty = 60.0
-
-# Hoehengewinn wird ueber dieses Fenster bewertet.
-AutoTravel.ElevationWindow = 40.0
-
-AutoTravel.ElevationGainStart = 4.0
-AutoTravel.ElevationGainStrong = 4.0
-AutoTravel.ElevationGainExtreme = 6.0
-
-AutoTravel.ElevationPenalty = 3.0
-AutoTravel.StrongElevationPenalty = 8.0
-AutoTravel.ExtremeElevationPenalty = 20.0
-
-# Unnatuerliche starke Richtungswechsel.
-AutoTravel.TurnPenaltyStart = 35.0
-AutoTravel.TurnPenaltyStrong = 70.0
-AutoTravel.TurnPenaltyExtreme = 110.0
-
-AutoTravel.TurnPenalty = 2.0
-AutoTravel.StrongTurnPenalty = 5.0
-AutoTravel.ExtremeTurnPenalty = 12.0
-
-# Unvollstaendige Wege werden nur als Notloesung akzeptiert.
-AutoTravel.IncompletePathPenalty = 10000.0
-
-
-########################################
-# Contour / Bergumfahrung
-########################################
-
-# Wenn 1, sucht AutoTravel bei einem erkannten Berganstieg
-# aktiv nach einem Weg links und rechts um den Berg.
-AutoTravel.ContourProbing = 1
-
-# Ab diesem nachhaltigen Hoehengewinn wird ein Pfad als
-# moeglicher Berganstieg betrachtet.
-AutoTravel.ContourTriggerElevation = 8.0
-
-# Durchschnittliche Steigung, ab der Contour-Probing aktiviert wird.
-AutoTravel.ContourTriggerSlope = 0.1
-
-# Abstand der ersten beiden Suchrouten links/rechts.
-#
-# Narrow:
-#   ca. 100 Yards neben der direkten Route
-#
-# Wide:
-#   ca. 180 Yards neben der direkten Route
-AutoTravel.ContourNarrowOffset = 100.0
-AutoTravel.ContourWideOffset = 180.0
-
-# Position der beiden Konturpunkte entlang A -> B.
-#
-# Beispiel:
-#
-# A ------------------------------ B
-#       ^              ^
-#      35%            65%
-AutoTravel.ContourFirstProgress = 0.35
-AutoTravel.ContourSecondProgress = 0.65
-
-# Ein Contour-Pfad darf maximal so viel laenger sein als
-# die direkte Luftstrecke, bevor er verworfen wird.
-#
-# 2.5 = maximal 250% der direkten Distanz.
-AutoTravel.ContourMaxDistanceFactor = 5
-
-########################################
-# Reiseknoten von mod-playerbots
-########################################
-#
-# mod-playerbots pflegt einen Graphen aus Reiseknoten (Tabellen
-# playerbots_travelnode / _link). Dieser Graph kennt Verbindungen, die das
-# NavMesh nicht kennen kann: Flugrouten, Portale, Schiffe. AutoTravel liest ihn
-# per SQL - es besteht KEINE Kompilierabhaengigkeit zu mod-playerbots.
-# Fehlen die Tabellen, benutzt AutoTravel weiterhin die Carbonite-Route.
-
-#    AutoTravel.UseTravelNodes
-#        Default: 1
-AutoTravel.UseTravelNodes = 1
-
-#    AutoTravel.NodeDatabase
-#        Schemaname der Playerbot-Datenbank. Der MySQL-Benutzer des
-#        worldservers braucht darauf Leserechte.
-#        Default: "acore_playerbots"
-AutoTravel.NodeDatabase = "acore_playerbots"
-
-#    AutoTravel.NodeSearchRadius
-#        Wie weit nach dem naechstgelegenen Knoten gesucht wird (Yards).
-#        Default: 800
-AutoTravel.NodeSearchRadius = 800
-
-#    AutoTravel.NodeMinDistance
-#        Erst ab dieser Zielentfernung wird der Knotengraph benutzt. Darunter
-#        pathet das NavMesh direkt, das ist genauer.
-#        Default: 300
-AutoTravel.NodeMinDistance = 800
-
-#    AutoTravel.UseSpecialLinks
-#        Verbindungen, die nicht gelaufen werden (Flug, Portal, Schiff) in die
-#        Routensuche einbeziehen. Der Spieler muss sie selbst ausloesen.
-#        Default: 1
-AutoTravel.UseSpecialLinks = 1
-
-#    AutoTravel.SpecialLinkCost
-#        Aufschlag in Yards fuer eine Sonderverbindung, damit sie nur benutzt
-#        wird, wenn sie wirklich viel Strecke spart.
-#        Default: 400
-AutoTravel.SpecialLinkCost = 400
-
-#    AutoTravel.AllowTeleport
-#        Erlaubt den Teleport-Knopf des Addons (.at tp). Steht das auf 0,
-#        funktioniert nur das Laufen.
-#        Default: 1
-AutoTravel.AllowTeleport = 1
-
-#    AutoTravel.TeleportMinDistance
-#        Unter dieser Entfernung wird der Teleport abgelehnt (0 = keine Grenze).
-#        Sinnvoll, damit kurze Strecken gelaufen statt gesprungen werden.
-#        Default: 0
-AutoTravel.TeleportMinDistance = 0
-
-#    AutoTravel.TeleportCooldownSec
-#        Abklingzeit zwischen zwei Teleports.
-#        Default: 5
-AutoTravel.TeleportCooldownSec = 5
-
-#    AutoTravel.Debug
-#        Serverweiter Debug-Modus.
-#        Default: 0
+#    ausfuehrliche Serverausgabe
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: debug
 AutoTravel.Debug = 0
 
-#    AutoTravel.TerrainStep
-#        Maximale horizontale Distanz zwischen den automatisch erzeugten
-#        Terrain-Splinepunkten.
-#
-#        Kleiner = genaueres Folgen des Gelaendes, aber mehr Splinepunkte
-#        und mehr Hoehenabfragen.
-#
-#        3.0 = guter Ausgangswert.
-#        2.0 = sehr genau.
-#        4.0 = weniger Punkte.
-#
-#        Minimum im Code: 0.5
-#        Default: 3.0
-AutoTravel.TerrainStep = 3.0
-#    AutoTravel.TeleportSecurity
-#        Ab welcher Kontostufe ".at tp" erlaubt ist.
-#            0 = jeder Spieler   1 = Moderator   2 = GM   3 = Administrator
-#        Der Teleport umgeht jede Wegfindung und nimmt beliebige Zielkoordinaten
-#        entgegen. Auf 0 kann sich damit jeder Spieler ueberallhin versetzen.
-#        Default: 2
-AutoTravel.TeleportSecurity = 2
+#    Zielradius der letzten Etappe (yd)
+#    erlaubt: 0.5 bis 100
+#    Laufzeitschluessel: arrival
+AutoTravel.ArrivalDistance = 8
 
-#    AutoTravel.SkipDetourFactor
-#        Der naechstgelegene Reiseknoten liegt oft HINTER dem Spieler. Kostet
-#        der Weg ueber ihn mehr als dieses Vielfache des direkten Wegs zum
-#        uebernaechsten, wird er uebersprungen -- sonst laeuft der Charakter
-#        erst in die Gegenrichtung.
-#        Default: 1.25
-AutoTravel.SkipDetourFactor = 1.25
+#    Radius der Zwischenetappen (yd)
+#    erlaubt: 1 bis 120
+#    Laufzeitschluessel: leg
+AutoTravel.LegDistance = 15
 
-#    AutoTravel.RescueSearchRange
-#        Wie weit um die Pfadhoehe herum nach der begehbaren Flaeche gesucht
-#        wird, wenn der Charakter zurueckgesetzt werden muss.
-#        Klein halten: in mehrstoeckigen Bereichen wie Sturmwind liegt unter
-#        einer Treppe das Rohgelaende der Stadt. Eine weite Suche wuerde genau
-#        dorthin zuruecksetzen statt auf die richtige Stufe.
-#        Default: 14
+#    NavMesh-Punkte je Spline-Abschnitt
+#    erlaubt: 2 bis 60
+#    Laufzeitschluessel: chunk
+AutoTravel.ChunkPoints = 12
+
+#    Abtastweite entlang eines Abschnitts (yd)
+#    erlaubt: 0.5 bis 10
+#    Laufzeitschluessel: step
+AutoTravel.TerrainStep = 3
+
+#    Taktweite des Moduls (ms)
+#    erlaubt: 50 bis 1000
+#    Laufzeitschluessel: tick
+AutoTravel.UpdateIntervalMs = 200
+
+#--------------------------------------------------------------------------
+#   Uebergabe zwischen Spieler und Autopilot
+#--------------------------------------------------------------------------
+
+#    Clientkontrolle waehrend der Fahrt uebernehmen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: control
+AutoTravel.TakeClientControl = 1
+
+#    im Kampf pausieren und Kontrolle abgeben
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: combatpause
+AutoTravel.PauseInCombat = 1
+
+#    nach dem Kampf weiterfahren
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: combatresume
+AutoTravel.ResumeAfterCombat = 1
+
+#    Wartezeit nach dem Kampf (ms)
+#    erlaubt: 0 bis 30000
+#    Laufzeitschluessel: grace
+AutoTravel.CombatGraceMs = 2000
+
+#    Ziel nach dem Tod behalten
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: deathresume
+AutoTravel.ResumeAfterDeath = 0
+
+#    Abbruch, wenn der Spieler dauerhaft uebernimmt (ms)
+#    erlaubt: 10000 bis 3600000
+#    Laufzeitschluessel: handover
+AutoTravel.HandoverTimeoutMs = 900000
+
+#--------------------------------------------------------------------------
+#   Feststecken
+#--------------------------------------------------------------------------
+
+#    Feststecken erkennen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: stuck
+AutoTravel.StuckDetection = 1
+
+#    Messfenster fuer Feststecken (ms)
+#    erlaubt: 1000 bis 60000
+#    Laufzeitschluessel: stucktime
+AutoTravel.StuckTimeoutMs = 5000
+
+#    Mindestfortschritt im Messfenster (yd)
+#    erlaubt: 0.5 bis 50
+#    Laufzeitschluessel: stuckdist
+AutoTravel.StuckMinDistance = 3
+
+#    Versuche, bevor aufgegeben wird
+#    erlaubt: 1 bis 50
+#    Laufzeitschluessel: repath
+AutoTravel.MaxRepathAttempts = 8
+
+#--------------------------------------------------------------------------
+#   Reittiere
+#--------------------------------------------------------------------------
+
+#    Reittier automatisch rufen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: mount
+AutoTravel.AutoMount = 1
+
+#    ab dieser Restentfernung aufsitzen (yd)
+#    erlaubt: 0 bis 5000
+#    Laufzeitschluessel: mountdist
+AutoTravel.MountMinDistance = 150
+
+#    in Gebaeuden absteigen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: dismount
+AutoTravel.DismountIndoors = 1
+
+#--------------------------------------------------------------------------
+#   Fliegen mit eigenem Flugmount
+#--------------------------------------------------------------------------
+
+#    eigenes Flugmount benutzen, wo erlaubt
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: fly
+AutoTravel.AllowFlying = 1
+
+#    ab dieser Entfernung fliegen (yd)
+#    erlaubt: 100 bis 10000
+#    Laufzeitschluessel: flydist
+AutoTravel.FlyMinDistance = 400
+
+#    Sicherheitsabstand ueber Gelaende (yd)
+#    erlaubt: 5 bis 200
+#    Laufzeitschluessel: flyclear
+AutoTravel.FlyClearance = 25
+
+#    Abtastweite des Hoehenprofils (yd)
+#    erlaubt: 5 bis 100
+#    Laufzeitschluessel: flysample
+AutoTravel.FlySampleStep = 25
+
+#    hoechste Flughoehe ueber Grund (yd)
+#    erlaubt: 30 bis 1000
+#    Laufzeitschluessel: flymax
+AutoTravel.FlyMaxHeight = 250
+
+#    Beginn des Sinkflugs vor dem Ziel (yd)
+#    erlaubt: 10 bis 400
+#    Laufzeitschluessel: flyland
+AutoTravel.FlyDescendDistance = 60
+
+#--------------------------------------------------------------------------
+#   Flugmeister
+#--------------------------------------------------------------------------
+
+#    Flugmeister selbstaendig benutzen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: taxi
+AutoTravel.UseTaxi = 1
+
+#    ab dieser Restentfernung Flug pruefen (yd)
+#    erlaubt: 200 bis 50000
+#    Laufzeitschluessel: taxidist
+AutoTravel.TaxiMinDistance = 1500
+
+#    Anteil der Strecke, den der Flug sparen muss
+#    erlaubt: 0 bis 0.95
+#    Laufzeitschluessel: taxisaving
+AutoTravel.TaxiMinSaving = 0.6
+
+#    hoechster Fussweg zum Flugmeister (yd)
+#    erlaubt: 50 bis 10000
+#    Laufzeitschluessel: taxiwalk
+AutoTravel.TaxiMaxWalkToNode = 1200
+
+#    Preisgrenze je Flug in Kupfer
+#    erlaubt: 0 bis 100000000
+#    Laufzeitschluessel: taxicost
+AutoTravel.TaxiMaxCostCopper = 50000
+
+#    Naehe zum Flugmeister zum Abheben (yd)
+#    erlaubt: 2 bis 9.5
+#    Laufzeitschluessel: taxiboard
+AutoTravel.TaxiBoardDistance = 8
+
+#--------------------------------------------------------------------------
+#   Transporte: Zeppelin, Schiff, Tiefenbahn
+#--------------------------------------------------------------------------
+
+#    Zeppelin, Schiff und Bahn begleiten
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: transport
+AutoTravel.UseTransports = 1
+
+#    Wartezeit am Anleger (ms)
+#    erlaubt: 30000 bis 1800000
+#    Laufzeitschluessel: transportwait
+AutoTravel.TransportWaitMs = 300000
+
+#--------------------------------------------------------------------------
+#   Schwimmen
+#--------------------------------------------------------------------------
+
+#    schwimmen erlaubt
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: swim
+AutoTravel.Swim = 1
+
+#    Tiefe unter der Wasseroberflaeche (yd)
+#    erlaubt: 0 bis 5
+#    Laufzeitschluessel: swimoffset
+AutoTravel.SwimSurfaceOffset = 1.2
+
+#    ab dieser Wassertiefe wird geschwommen (yd)
+#    erlaubt: 0.5 bis 20
+#    Laufzeitschluessel: swimdepth
+AutoTravel.MinSwimDepth = 2
+
+#    Abbruch nach dieser Zeit unter Wasser (ms)
+#    erlaubt: 5000 bis 300000
+#    Laufzeitschluessel: swimair
+AutoTravel.MaxUnderwaterMs = 45000
+
+#    Zusatzkosten je Yard Schwimmstrecke
+#    erlaubt: 0 bis 20
+#    Laufzeitschluessel: waterpenalty
+AutoTravel.WaterPenalty = 1.5
+
+#--------------------------------------------------------------------------
+#   Bodenkontakt und Etagen
+#--------------------------------------------------------------------------
+
+#    bei fehlendem Bodenkontakt zuruecksetzen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: rescue
+AutoTravel.RescueUnderMesh = 1
+
+#    Tiefe, ab der es als durchgefallen gilt (yd)
+#    erlaubt: 0.5 bis 20
+#    Laufzeitschluessel: under
+AutoTravel.UnderMeshDepth = 2.5
+
+#    Hoehe, ab der es als schwebend gilt (yd)
+#    erlaubt: 2 bis 60
+#    Laufzeitschluessel: above
+AutoTravel.AboveMeshHeight = 12
+
+#    Suchfenster um die Pfadhoehe (yd)
+#    erlaubt: 4 bis 60
+#    Laufzeitschluessel: rescuerange
 AutoTravel.RescueSearchRange = 14
 
-#    AutoTravel.MaxWalkSlope
-#        Groesste Neigung, die zwischen zwei Terrainpunkten noch als
-#        Laufflaeche gilt (Hoehe geteilt durch Strecke). Was steiler waere, ist
-#        eine andere Etage -- etwa der Hallenboden unter einer Treppe.
-#        Default: 1.2
+#    Rettungen, bevor abgebrochen wird
+#    erlaubt: 1 bis 50
+#    Laufzeitschluessel: maxrescue
+AutoTravel.MaxRescues = 6
+
+#    groesste Neigung, die als Laufflaeche gilt
+#    erlaubt: 0.3 bis 3
+#    Laufzeitschluessel: walkslope
 AutoTravel.MaxWalkSlope = 1.2
 
-#    AutoTravel.ZOutlierTolerance
-#        Weicht EIN Wegpunkt um mehr als diesen Betrag von der aus seinen
-#        Nachbarn interpolierten Hoehe ab, gilt er als Ausreisser und wird
-#        korrigiert. Echte Treppen und Rampen bleiben unangetastet, weil dort
-#        auch die Nachbarn mitsteigen.
-#        Default: 2.5
+#    Abweichung, ab der ein Punkt Ausreisser ist (yd)
+#    erlaubt: 0.5 bis 20
+#    Laufzeitschluessel: zoutlier
 AutoTravel.ZOutlierTolerance = 2.5
+
+#    groesste Stufe nach oben (yd)
+#    erlaubt: 0.5 bis 10
+#    Laufzeitschluessel: stepup
+AutoTravel.MaxStepUp = 2.5
+
+#    groesster Absatz nach unten (yd)
+#    erlaubt: 1 bis 40
+#    Laufzeitschluessel: stepdown
+AutoTravel.MaxStepDown = 6
+
+#    wie viele Etagen je Punkt gesucht werden
+#    erlaubt: 1 bis 8
+#    Laufzeitschluessel: planes
+AutoTravel.GroundPlanes = 4
+
+#--------------------------------------------------------------------------
+#   Reiseknoten aus mod-playerbots
+#--------------------------------------------------------------------------
+
+#    Knotengraph von mod-playerbots benutzen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: nodes
+AutoTravel.UseTravelNodes = 1
+
+#    Suchradius fuer den naechsten Knoten (yd)
+#    erlaubt: 50 bis 10000
+#    Laufzeitschluessel: noderadius
+AutoTravel.NodeSearchRadius = 800
+
+#    ab dieser Entfernung Knoten benutzen (yd)
+#    erlaubt: 0 bis 10000
+#    Laufzeitschluessel: nodemin
+AutoTravel.NodeMinDistance = 300
+
+#    Umwegfaktor, ab dem der Startknoten entfaellt
+#    erlaubt: 1 bis 5
+#    Laufzeitschluessel: nodeskip
+AutoTravel.SkipDetourFactor = 1.25
+
+#    Portale und Transporte im Graphen erlauben
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: speciallinks
+AutoTravel.UseSpecialLinks = 1
+
+#    Aufschlag fuer Sonderverbindungen
+#    erlaubt: 0 bis 100000
+#    Laufzeitschluessel: specialcost
+AutoTravel.SpecialLinkCost = 400
+
+#--------------------------------------------------------------------------
+#   Teleport
+#--------------------------------------------------------------------------
+
+#    Teleportbefehl erlaubt
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: teleport
+AutoTravel.AllowTeleport = 1
+
+#    Rechtestufe fuer den Teleport
+#    erlaubt: 0 bis 3
+#    Laufzeitschluessel: teleportsec
+AutoTravel.TeleportSecurity = 2
+
+#    Mindestentfernung fuer den Teleport (yd)
+#    erlaubt: 0 bis 50000
+#    Laufzeitschluessel: teleportmin
+AutoTravel.TeleportMinDistance = 0
+
+#    Abklingzeit des Teleports (s)
+#    erlaubt: 0 bis 3600
+#    Laufzeitschluessel: teleportcd
+AutoTravel.TeleportCooldownSec = 5
+
+#--------------------------------------------------------------------------
+#   Bewertung natuerlicher Wege
+#--------------------------------------------------------------------------
+
+#    natuerliche Wege bevorzugen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: natural
+AutoTravel.NaturalPathing = 1
+
+#    Neigung, ab der Strafe faellt
+#    erlaubt: 0 bis 3
+#    Laufzeitschluessel: slopestart
+AutoTravel.SlopeStart = 0.15
+
+#    Neigung fuer die zweite Stufe
+#    erlaubt: 0 bis 3
+#    Laufzeitschluessel: slopestrong
+AutoTravel.SlopeStrong = 0.25
+
+#    Neigung fuer die dritte Stufe
+#    erlaubt: 0 bis 3
+#    Laufzeitschluessel: slopeextreme
+AutoTravel.SlopeExtreme = 0.35
+
+#    Strafe erste Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: slopecost
+AutoTravel.SlopePenalty = 5
+
+#    Strafe zweite Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: slopecost2
+AutoTravel.SteepSlopePenalty = 10
+
+#    Strafe dritte Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: slopecost3
+AutoTravel.ExtremeSlopePenalty = 30
+
+#    Fensterlaenge fuer den Hoehengewinn (yd)
+#    erlaubt: 10 bis 400
+#    Laufzeitschluessel: elevwindow
+AutoTravel.ElevationWindow = 40
+
+#    Hoehengewinn erste Stufe (yd)
+#    erlaubt: 0 bis 200
+#    Laufzeitschluessel: elevstart
+AutoTravel.ElevationGainStart = 4
+
+#    Hoehengewinn zweite Stufe (yd)
+#    erlaubt: 0 bis 200
+#    Laufzeitschluessel: elevstrong
+AutoTravel.ElevationGainStrong = 10
+
+#    Hoehengewinn dritte Stufe (yd)
+#    erlaubt: 0 bis 200
+#    Laufzeitschluessel: elevextreme
+AutoTravel.ElevationGainExtreme = 20
+
+#    Strafe erste Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: elevcost
+AutoTravel.ElevationPenalty = 3
+
+#    Strafe zweite Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: elevcost2
+AutoTravel.StrongElevationPenalty = 8
+
+#    Strafe dritte Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: elevcost3
+AutoTravel.ExtremeElevationPenalty = 20
+
+#    Winkel, ab dem Strafe faellt (Grad)
+#    erlaubt: 0 bis 180
+#    Laufzeitschluessel: turnstart
+AutoTravel.TurnPenaltyStart = 35
+
+#    Winkel zweite Stufe (Grad)
+#    erlaubt: 0 bis 180
+#    Laufzeitschluessel: turnstrong
+AutoTravel.TurnPenaltyStrong = 70
+
+#    Winkel dritte Stufe (Grad)
+#    erlaubt: 0 bis 180
+#    Laufzeitschluessel: turnextreme
+AutoTravel.TurnPenaltyExtreme = 110
+
+#    Strafe erste Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: turncost
+AutoTravel.TurnPenalty = 2
+
+#    Strafe zweite Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: turncost2
+AutoTravel.StrongTurnPenalty = 5
+
+#    Strafe dritte Stufe
+#    erlaubt: 0 bis 1000
+#    Laufzeitschluessel: turncost3
+AutoTravel.ExtremeTurnPenalty = 12
+
+#    Aufschlag fuer Teilwege
+#    erlaubt: 0 bis 1e+06
+#    Laufzeitschluessel: incomplete
+AutoTravel.IncompletePathPenalty = 10000
+
+#    Aufschlag je erkanntem Absturz
+#    erlaubt: 0 bis 100000
+#    Laufzeitschluessel: cliffcost
+AutoTravel.CliffPenalty = 400
+
+#--------------------------------------------------------------------------
+#   Suche um Hindernisse herum
+#--------------------------------------------------------------------------
+
+#    Weg um den Berg herum suchen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: contour
+AutoTravel.ContourProbing = 1
+
+#    Hoehengewinn, der die Suche ausloest (yd)
+#    erlaubt: 1 bis 200
+#    Laufzeitschluessel: contour_elevation
+AutoTravel.ContourTriggerElevation = 15
+
+#    Steigung, die die Suche ausloest
+#    erlaubt: 0.01 bis 3
+#    Laufzeitschluessel: contour_slope
+AutoTravel.ContourTriggerSlope = 0.2
+
+#    erster Suchabstand seitlich (yd)
+#    erlaubt: 10 bis 1000
+#    Laufzeitschluessel: contour_narrow
+AutoTravel.ContourNarrowOffset = 100
+
+#    zweiter Suchabstand seitlich (yd)
+#    erlaubt: 10 bis 2000
+#    Laufzeitschluessel: contour_wide
+AutoTravel.ContourWideOffset = 180
+
+#    Lage des ersten Suchpunkts auf der Strecke
+#    erlaubt: 0.05 bis 0.9
+#    Laufzeitschluessel: contour_first
+AutoTravel.ContourFirstProgress = 0.35
+
+#    Lage des zweiten Suchpunkts
+#    erlaubt: 0.1 bis 0.95
+#    Laufzeitschluessel: contour_second
+AutoTravel.ContourSecondProgress = 0.65
+
+#    hoechster Umwegfaktor der Contour-Route
+#    erlaubt: 1 bis 10
+#    Laufzeitschluessel: contour_factor
+AutoTravel.ContourMaxDistanceFactor = 2.5
+
+#--------------------------------------------------------------------------
+#   Reiseknoten: Datenbankname
+#--------------------------------------------------------------------------
+
+#    Datenbank, in der mod-playerbots die Tabellen playerbots_travelnode
+#    und playerbots_travelnode_link haelt. Der Weltserver braucht dort
+#    Leserecht.
+AutoTravel.NodeDatabase = "acore_playerbots"
