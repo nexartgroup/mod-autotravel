@@ -28,6 +28,7 @@
 #include "ObjectAccessor.h"
 #include "PathGenerator.h"
 #include "Player.h"
+#include "SpellAuraDefines.h"
 #include "World.h"
 
 #include <algorithm>

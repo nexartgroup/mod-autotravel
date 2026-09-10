@@ -37,12 +37,40 @@
 #include <cmath>
 #include <cstdio>
 #include <queue>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace
 {
+    // -----------------------------------------------------------------------
+    // Preis einer Flugverbindung
+    // -----------------------------------------------------------------------
+    //
+    // AzerothCore hat den Wertetyp von sTaxiPathSetBySource im Lauf der Zeit
+    // geaendert:
+    //
+    //   frueher   std::unordered_map<uint32, TaxiPathBySourceAndDestination>
+    //   heute     std::unordered_map<uint32, TaxiPathEntry const*>
+    //
+    // Beide tragen ein Feld 'price'; einmal wird es mit '.', einmal mit '->'
+    // erreicht. Damit das Modul auf beiden Staenden baut, wird der Zugriff
+    // hier einmal gekapselt statt an der Aufrufstelle geraten.
+    //
+    // 'if constexpr' statt zweier Ueberladungen, weil eine Ueberladung auf
+    // 'T const&' und eine auf 'T const*' fuer ein Zeigerargument beide exakt
+    // passen und die Aufloesung dann von der partiellen Ordnung abhaengt --
+    // unnoetig heikel fuer eine so kleine Sache.
+    template<class T>
+    inline uint32 TaxiPriceOf(T const& v)
+    {
+        if constexpr (std::is_pointer<T>::value)
+            return v ? uint32(v->price) : 0u;
+        else
+            return uint32(v.price);
+    }
+
     // Fraktionspruefung: ein Flugpunkt gehoert zu einer Seite, wenn dort ein
     // Reittier fuer diese Seite steht. Index 0 ist Horde, 1 ist Allianz.
     bool NodeUsableBy(TaxiNodesEntry const* node, Player* player)
@@ -97,7 +125,7 @@ namespace
 
             TaxiHop h;
             h.to = to;
-            h.price = kv.second.price;
+            h.price = TaxiPriceOf(kv.second);
             out.push_back(h);
         }
     }

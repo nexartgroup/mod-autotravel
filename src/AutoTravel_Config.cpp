@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstddef>   // offsetof
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

@@ -220,6 +220,19 @@ einer dieser Stellen -- AzerothCore aendert sie gelegentlich:
 | `Player::m_movementInfo.transport.guid` | AutoTravel_Session.cpp |
 | `WorldScript::OnUpdate`, `OnAfterConfigLoad` | AutoTravel_SC.cpp |
 
+### Ein Unterschied zwischen den Corestaenden ist bereits abgefangen
+
+`sTaxiPathSetBySource` hat im Lauf der Zeit den Wertetyp gewechselt:
+
+```
+frueher   std::unordered_map<uint32, TaxiPathBySourceAndDestination>
+heute     std::unordered_map<uint32, TaxiPathEntry const*>
+```
+
+Beide tragen ein Feld `price`, einmal ueber `.` und einmal ueber `->`
+erreichbar. `AutoTravel_Taxi.cpp` kapselt den Zugriff in `TaxiPriceOf()` und
+baut deshalb auf beiden Staenden.
+
 Bewusst **nicht** benutzt wird `PlayerScript`. AzerothCore hat dessen Hooks
 zwischenzeitlich von `OnLogout` auf `OnPlayerLogout` umbenannt; ein Modul, das
 sie verwendet, baut je nach Corestand nicht mehr. Noetig sind sie nicht: die

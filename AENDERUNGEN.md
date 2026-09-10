@@ -260,7 +260,47 @@ Bewegung, Wiederaufnahme, Ende, alle Slash-Befehle, Optionsseite.
 
 ---
 
-## 11. Kleinigkeiten
+## 11. Nachtrag: Baufehler auf aktuellem AzerothCore
+
+```
+AutoTravel_Taxi.cpp:100: member reference type 'const TaxiPathEntry *const'
+                         is a pointer; did you mean to use '->'?
+```
+
+`sTaxiPathSetBySource` hat den Wertetyp gewechselt: frueher stand die Struktur
+`TaxiPathBySourceAndDestination` direkt im Container, heute ein Zeiger auf
+`TaxiPathEntry`. Beide tragen ein Feld `price`, einmal ueber `.` und einmal
+ueber `->` erreichbar.
+
+Der Zugriff sitzt jetzt in einer Stelle:
+
+```cpp
+template<class T>
+inline uint32 TaxiPriceOf(T const& v)
+{
+    if constexpr (std::is_pointer<T>::value)
+        return v ? uint32(v->price) : 0u;
+    else
+        return uint32(v.price);
+}
+```
+
+`if constexpr` statt zweier Ueberladungen: eine Ueberladung auf `T const&` und
+eine auf `T const*` passen fuer ein Zeigerargument beide exakt, und die
+Aufloesung haengt dann an der partiellen Ordnung von Funktionstemplates --
+unnoetig heikel fuer eine so kleine Sache.
+
+Gegengeprueft wurde gegen Attrappen **beider** Corestaende; die Datei
+uebersetzt in beiden Faellen.
+
+Bei der Gelegenheit zwei Includes nachgezogen, die bisher nur zufaellig ueber
+`Player.h` hereinkamen: `SpellAuraDefines.h` in `AutoTravel_Session.cpp` (fuer
+`SPELL_AURA_MOUNTED`) und `<cstddef>` in `AutoTravel_Config.cpp` (fuer
+`offsetof`).
+
+---
+
+## 12. Kleinigkeiten
 
 * `RouteAdd()` benutzte `atoi`/`atof` auf Spielereingaben; jetzt die gepruefte
   Umwandlung, die im Rest des Moduls schon verwendet wurde.
