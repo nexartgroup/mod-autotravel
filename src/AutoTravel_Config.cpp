@@ -643,7 +643,7 @@ void AutoTravelMgr::SendHello(Player* player)
 
     char b[192];
     std::snprintf(b, sizeof(b), "[AT]H|%s|%u|%u|%u|%u",
-                  "3.1",
+                  "3.2",
                   ATConf.enable ? 1u : 0u,
                   uint32(NodeCount()),
                   ATConf.useTaxi ? 1u : 0u,

@@ -397,7 +397,142 @@ Bei der Gelegenheit zwei Includes nachgezogen, die bisher nur zufaellig ueber
 
 ---
 
-## 13. Kleinigkeiten
+## 13. Nachtrag: Fluege, die es gar nicht gibt
+
+Aus einem Protokoll im Spiel:
+
+```
+Flugpunkte: 3 bekannt, davon 3 fuer deine Fraktion nutzbar.
+Die Route benutzt 1 Sonderverbindung(en).
+Reise gestartet: Goto 32, 41
+Der Flug kam nicht zustande - es geht zu Fuss weiter.
+```
+
+Ein Charakter der Stufe 1 kennt genau einen Flugpunkt. Der Knotengraph von
+mod-playerbots kennt trotzdem Flugverbindungen zwischen seinen Knoten -- er
+beschreibt ja, was es an Verbindungen GIBT, nicht, was DIESER Charakter
+benutzen kann.
+
+### Was schieflief
+
+`BuildNodeRoute()` uebernahm den Verbindungstyp ungeprueft: Typ 4 wurde zu
+`AT_LEG_TAXI`. Die Etappe landete in der Route, der Charakter lief brav zum
+Flugmeister, und dort scheiterte `StartTaxi()` -- weil die Etappe aus dem
+Graphen gar keine Flugpunkte trug. `leg.taxiFrom` und `leg.taxiTo` waren
+schlicht 0.
+
+Das war doppelt aergerlich: der Weg zum Flugmeister war umsonst, und die
+Meldung kam erst, nachdem er gelaufen war.
+
+### Was jetzt passiert
+
+Jede Sonderverbindung der fertigen Kette wird gegen die echten Flugpunkte
+geprueft, BEVOR die Reise beginnt. Dafuer gibt es `ResolveTaxiHop()`: es
+beantwortet fuer eine Verbindung alles, was der Core beim Abflug auch prueft --
+Punkt bekannt, Fraktion passt, Verbindung vorhanden, Preis unter der Grenze,
+Geld reicht.
+
+Faellt eine Verbindung durch, wird die Kante **gesperrt und die Suche laeuft
+erneut** (bis zu fuenfmal). Findet sich kein Weg mehr, faellt AutoTravel auf
+die Carbonite-Route und damit aufs Laufen zurueck -- also genau auf das, was
+vorher auch passiert ist, nur ohne den Umweg zum Flugmeister.
+
+Haelt eine Verbindung stand, wandern die aufgeloesten Flugpunkte in die Etappe,
+**und die Etappe rueckt auf die Position des echten Flugmeisters**. Der
+Graphknoten liegt meist ein paar Yards daneben, und der Core laesst den Abflug
+nur innerhalb von zwei Interaktionsdistanzen zu.
+
+### Frueher abbrechen
+
+`BuildTaxiPlan()` zaehlt jetzt zuerst die nutzbaren Flugpunkte. Unter zwei
+davon hat kein Flug eine Chance, und die ganze Suche kann entfallen. `.at taxi`
+zeigt die Zahl deshalb auch im Verhaeltnis:
+
+```
+Flugpunkte: 3 von 254 bekannt, davon 3 fuer deine Fraktion nutzbar.
+```
+
+Das haette die Lage sofort erklaert. Vorher stand dort nur "3 bekannt" -- ohne
+Bezugsgroesse sieht das nach viel aus.
+
+### Zum Taxi-Cheat
+
+`.cheat taxi on` setzt die komplette Flugpunktmaske des Charakters. Da
+AutoTravel ausschliesslich diese Maske liest (`m_taxi.IsTaximaskNodeKnown`),
+funktioniert die Automatik damit sofort und vollstaendig -- ohne Sonderfall im
+Code. Das ist die richtige Kopplung: die Maske ist die einzige Wahrheit, und
+der Core prueft sie beim Abflug noch einmal selbst.
+
+`.at taxi` weist bei zu wenigen Flugpunkten ausdruecklich darauf hin.
+
+---
+
+## 14. Nachtrag: Rohzeilen im Chat
+
+Ebenfalls aus dem Protokoll:
+
+```
+AutoTravel: Rohgelaende dort: 338.49 (Ziel-Z 338.49)
+[AT]Mohgelaende dort: 338.49 (Ziel-Z 338.49)
+```
+
+Zwei Fehler auf einmal.
+
+Erstens stand die Rohzeile ueberhaupt da. Der Chatfilter blendete sie nur aus,
+wenn "HideProtocol" gesetzt war -- ein Schalter, den man versehentlich umlegen
+kann. Rohzeilen sind aber unter keinen Umstaenden nuetzlich.
+
+Zweitens ist sie verstuemmelt: aus `[AT]M|Rohgelaende` wurde `[AT]Mohgelaende`.
+Das Trennzeichen `|` leitet im Client eine Escapefolge ein, und `|R` wird beim
+Zeichnen geschluckt. Die Auswertung im Addon ist davon nicht betroffen -- sie
+sieht den Text vor dem Rendern -- angezeigt werden darf so etwas trotzdem nicht.
+
+Neu: der Filter blendet `[AT]`-Zeilen **immer** aus. Der Schalter heisst jetzt
+"ChatMessages" und entscheidet ueber die LESBARE Fassung.
+
+---
+
+## 15. Nachtrag: Das Fenster schliesst sich nicht mehr von selbst
+
+Drei Ursachen, alle behoben:
+
+* Das Fenster stand in `UISpecialFrames`. Bequem, wenn man es kurz aufmacht --
+  laestig, wenn es offen stehen soll: jede Flucht aus einem anderen Fenster,
+  jeder Griff zum Spielmenue macht es zu. Der Eintrag ist jetzt abschaltbar und
+  standardmaessig **aus**.
+* Nach `/reload` oder einem Neuanmelden war es weg. Der offene Zustand wird
+  jetzt gemerkt und wiederhergestellt.
+* Der Schliessknopf ging an `frame:Hide()` vorbei am gemerkten Zustand. Jetzt
+  laeuft alles ueber `G.Close()`.
+
+---
+
+## 16. Nachtrag: Eine Pruefstrecke
+
+Bisher liefen die Pruefungen von Hand. Sie liegen jetzt als
+`autotravel-tools/` bei und laufen mit einem Aufruf:
+
+```
+./pipeline.sh              nur pruefen
+./pipeline.sh --fix        autotravel.conf.dist neu erzeugen, dann pruefen
+./pipeline.sh --package    nach bestandener Pruefung die Zips bauen
+```
+
+Fuenf Schritte: Servermodul gegen Attrappen der Core-Schnittstelle uebersetzen
+(beide Auspraegungen von `sTaxiPathSetBySource`), Lua-Syntax mit `luac5.1`,
+rund fuenfzig Durchlaufpruefungen in einer nachgebauten Oberflaeche, Servermodul
+und Addon gegeneinander halten, und die Konfigurationsdatei gegen die Registry.
+
+Die Konfigurationsdatei wird dabei nicht mehr gepflegt, sondern **erzeugt**.
+Beim ersten Lauf hat die Strecke prompt gemeldet, dass die ausgelieferte
+`.dist` nicht die erzeugte war -- genau der Fall, fuer den sie da ist.
+
+Was die Strecke nicht kann, steht in ihrer README: sie ersetzt weder den Build
+gegen den echten AzerothCore noch eine Fahrt im Spiel.
+
+---
+
+## 17. Kleinigkeiten
 
 * `RouteAdd()` benutzte `atoi`/`atof` auf Spielereingaben; jetzt die gepruefte
   Umwandlung, die im Rest des Moduls schon verwendet wurde.

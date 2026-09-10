@@ -1,7 +1,10 @@
 #
 # mod-autotravel  --  Konfiguration
 # ---------------------------------------------------------------------------
-# Diese Datei nach autotravel.conf kopieren und dort aendern. Die .dist wird
+# ERZEUGTE DATEI. Nicht von Hand aendern -- sie entsteht aus der Optionsregistry
+# in src/AutoTravel_Config.cpp (Werkzeug: autotravel-tools/gen/gen_conf.py).
+#
+# Diese Datei nach autotravel.conf kopieren und DORT aendern. Die .dist wird
 # bei einem Update ueberschrieben, die .conf nicht.
 #
 # Jeder Wert laesst sich zusaetzlich im laufenden Betrieb setzen:
@@ -26,6 +29,7 @@
 # ---------------------------------------------------------------------------
 
 [worldserver]
+
 
 #--------------------------------------------------------------------------
 #   Grundbetrieb

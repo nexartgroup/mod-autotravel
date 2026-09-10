@@ -431,6 +431,20 @@ public:
                        std::vector<ATLeg>& out, std::string& note) const;
     bool StartTaxi(Player* player, ATSession& s, ATLeg const& leg);
 
+    // Beantwortet VOR der Reise, ob dieser Charakter zwischen zwei Orten
+    // wirklich fliegen koennte: Flugpunkt bekannt, Fraktion passt, Verbindung
+    // vorhanden, Preis unter der Grenze, Geld reicht. Liefert dazu die
+    // Positionen der beiden Flugmeister, damit die Etappe genau dort landet --
+    // der Core laesst den Abflug nur aus naechster Naehe zu.
+    bool ResolveTaxiHop(Player* player,
+                        uint32 mapA, float ax, float ay,
+                        uint32 mapB, float bx, float by,
+                        uint32& fromNode, uint32& toNode, uint32& cost,
+                        uint32& boardMap, float& boardX, float& boardY, float& boardZ,
+                        uint32& landMap, float& landX, float& landY, float& landZ) const;
+
+    void TaxiStats(Player* player, uint32& total, uint32& known, uint32& usable) const;
+
 private:
     // --- Sitzungsablauf (AutoTravel_Session.cpp) ---------------------------
     void UpdateSession(Player* player, ATSession& s, uint32 diff);

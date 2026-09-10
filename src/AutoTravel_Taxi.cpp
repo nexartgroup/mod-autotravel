@@ -19,9 +19,22 @@
  * durchsucht. Mehrere Zwischenstationen sind ausdruecklich erlaubt -- genau so
  * funktioniert Fliegen im Spiel auch, wenn man es von Hand macht.
  *
- * Der Flug wird nur vorgeschlagen, wenn er sich lohnt: er muss einen
- * einstellbaren Anteil der Laufstrecke sparen und darf eine Preisgrenze nicht
- * ueberschreiten. Beides steht in der Konfiguration.
+ * ---------------------------------------------------------------------------
+ * WAS "BEKANNT" HEISST
+ * ---------------------------------------------------------------------------
+ *
+ * Ein Flugpunkt gilt als bekannt, wenn er in der Flugpunktmaske des Charakters
+ * steht (`m_taxi.IsTaximaskNodeKnown`). Das ist dieselbe Maske, die der
+ * GM-Befehl `.cheat taxi` vollstaendig setzt -- ein Spielleiter mit
+ * eingeschaltetem Taxi-Cheat hat damit automatisch alle Punkte, und die
+ * Automatik benutzt sie auch. Das ist gewollt und braucht keine Sonderbehandlung:
+ * die Maske ist die einzige Wahrheit, und der Core prueft sie beim Abflug noch
+ * einmal selbst.
+ *
+ * Was dagegen NICHT passieren darf: eine Flugverbindung einplanen, die der
+ * Charakter gar nicht nehmen kann. Genau dafuer gibt es ResolveTaxiHop() --
+ * es beantwortet die Frage "koennte dieser Charakter hier wirklich fliegen"
+ * VOR der Reise, nicht erst, wenn er am Flugmeister steht.
  */
 
 #include "AutoTravel.h"
@@ -81,6 +94,11 @@ namespace
         return node->MountCreatureID[idx] != 0;
     }
 
+    bool NodeKnownBy(uint32 nodeId, Player* player)
+    {
+        return player->m_taxi.IsTaximaskNodeKnown(nodeId);
+    }
+
     std::string MoneyText(uint32 copper)
     {
         char b[64];
@@ -116,7 +134,7 @@ namespace
         {
             uint32 to = kv.first;
 
-            if (!player->m_taxi.IsTaximaskNodeKnown(to))
+            if (!NodeKnownBy(to, player))
                 continue;
 
             TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(to);
@@ -128,6 +146,92 @@ namespace
             h.price = TaxiPriceOf(kv.second);
             out.push_back(h);
         }
+    }
+
+    // Guenstigste Kette zwischen zwei Flugpunkten. Rueckgabe false, wenn es
+    // keine gibt oder sie ueber der Preisgrenze liegt.
+    bool FindCheapestChain(Player* player, uint32 from, uint32 to,
+                           std::vector<uint32>& chain, uint32& totalCost)
+    {
+        chain.clear();
+        totalCost = 0;
+
+        if (!from || !to || from == to)
+            return false;
+        if (!NodeKnownBy(from, player) || !NodeKnownBy(to, player))
+            return false;
+
+        std::unordered_map<uint32, uint32> cost;
+        std::unordered_map<uint32, uint32> prev;
+        std::unordered_set<uint32> closed;
+
+        typedef std::pair<uint32, uint32> QE;      // (Preis, Knoten)
+        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+
+        cost[from] = 0;
+        pq.push(QE(0, from));
+
+        std::vector<TaxiHop> hops;
+        bool found = false;
+        uint32 guard = 0;
+
+        while (!pq.empty())
+        {
+            QE cur = pq.top();
+            pq.pop();
+
+            if (cur.second == to)
+            {
+                found = true;
+                break;
+            }
+
+            if (closed.find(cur.second) != closed.end())
+                continue;
+            closed.insert(cur.second);
+
+            if (++guard > 5000)
+                break;
+
+            CollectHops(cur.second, player, hops);
+            for (TaxiHop const& h : hops)
+            {
+                uint32 nc = cur.first + h.price;
+                if (nc > ATConf.taxiMaxCostCopper)
+                    continue;
+
+                auto old = cost.find(h.to);
+                if (old == cost.end() || nc < old->second)
+                {
+                    cost[h.to] = nc;
+                    prev[h.to] = cur.second;
+                    pq.push(QE(nc, h.to));
+                }
+            }
+        }
+
+        if (!found)
+            return false;
+
+        totalCost = cost[to];
+        if (totalCost > ATConf.taxiMaxCostCopper)
+            return false;
+
+        uint32 at = to;
+        while (true)
+        {
+            chain.push_back(at);
+            if (at == from)
+                break;
+            auto p = prev.find(at);
+            if (p == prev.end())
+                return false;
+            at = p->second;
+            if (chain.size() > 60)
+                return false;
+        }
+        std::reverse(chain.begin(), chain.end());
+        return chain.size() >= 2;
     }
 
     // Naechster bekannter, benutzbarer Flugpunkt zu einer Stelle.
@@ -144,7 +248,7 @@ namespace
                 continue;
             if (!NodeUsableBy(node, player))
                 continue;
-            if (!player->m_taxi.IsTaximaskNodeKnown(i))
+            if (!NodeKnownBy(i, player))
                 continue;
 
             float d = AT::Dist2D(x, y, node->x, node->y);
@@ -162,7 +266,110 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// Planung
+// Zaehlwerk fuer die Auskunft
+// ---------------------------------------------------------------------------
+
+void AutoTravelMgr::TaxiStats(Player* player, uint32& total, uint32& known,
+                              uint32& usable) const
+{
+    total = 0;
+    known = 0;
+    usable = 0;
+
+    for (uint32 i = 1; i < sTaxiNodesStore.GetNumRows(); ++i)
+    {
+        TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(i);
+        if (!node)
+            continue;
+        ++total;
+
+        if (!NodeKnownBy(i, player))
+            continue;
+        ++known;
+
+        if (NodeUsableBy(node, player))
+            ++usable;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kann dieser Charakter hier wirklich fliegen?
+// ---------------------------------------------------------------------------
+//
+// Beantwortet die Frage fuer EINE Verbindung, vor der Reise. Gebraucht wird
+// das an zwei Stellen:
+//
+//   * der Knotengraph von mod-playerbots kennt Flugverbindungen, die ein
+//     konkreter Charakter nicht nehmen kann -- ein Charakter der Stufe 1 kennt
+//     genau einen Flugpunkt
+//   * die eigene Flugplanung, die dieselben Pruefungen braucht
+//
+// Geprueft wird alles, was der Core beim Abflug auch prueft: Punkt bekannt,
+// Fraktion passt, Verbindung existiert, Preis unter der Grenze, Geld reicht.
+// Zusaetzlich muss der gefundene Flugmeister nah genug am gefragten Ort liegen
+// -- sonst beschreibt die Verbindung einen ganz anderen Flug.
+
+bool AutoTravelMgr::ResolveTaxiHop(Player* player,
+                                   uint32 mapA, float ax, float ay,
+                                   uint32 mapB, float bx, float by,
+                                   uint32& fromNode, uint32& toNode, uint32& cost,
+                                   uint32& boardMap, float& boardX, float& boardY, float& boardZ,
+                                   uint32& landMap, float& landX, float& landY, float& landZ) const
+{
+    fromNode = 0;
+    toNode = 0;
+    cost = 0;
+
+    if (!ATConf.useTaxi || !player)
+        return false;
+
+    // Wie weit ein Flugmeister vom gefragten Ort entfernt sein darf, damit es
+    // noch dieselbe Verbindung ist. Die Knoten des Playerbot-Graphen liegen
+    // direkt beim Flugmeister ("Dun Morogh flightMaster"), also reicht ein
+    // enges Fenster.
+    constexpr float MATCH_RANGE = 80.0f;
+
+    float dA = 0.0f, dB = 0.0f;
+    uint32 a = NearestKnownNode(player, mapA, ax, ay, MATCH_RANGE, &dA);
+    if (!a)
+        return false;
+
+    uint32 b = NearestKnownNode(player, mapB, bx, by, MATCH_RANGE, &dB);
+    if (!b || a == b)
+        return false;
+
+    std::vector<uint32> chain;
+    uint32 total = 0;
+    if (!FindCheapestChain(player, a, b, chain, total))
+        return false;
+
+    if (player->GetMoney() < total)
+        return false;
+
+    TaxiNodesEntry const* ea = sTaxiNodesStore.LookupEntry(a);
+    TaxiNodesEntry const* eb = sTaxiNodesStore.LookupEntry(b);
+    if (!ea || !eb)
+        return false;
+
+    fromNode = a;
+    toNode = b;
+    cost = total;
+
+    boardMap = ea->map_id;
+    boardX = ea->x;
+    boardY = ea->y;
+    boardZ = ea->z;
+
+    landMap = eb->map_id;
+    landX = eb->x;
+    landY = eb->y;
+    landZ = eb->z;
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Eigene Flugplanung
 // ---------------------------------------------------------------------------
 
 bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
@@ -189,6 +396,24 @@ bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
     {
         note = "die Strecke ist zu kurz";
         return false;
+    }
+
+    // --- Hat der Charakter ueberhaupt genug Flugpunkte? --------------------
+    //
+    // Diese Pruefung steht bewusst ganz vorn. Ein frischer Charakter kennt
+    // einen einzigen Flugpunkt; ohne sie liefe die ganze Suche los, um am Ende
+    // dasselbe festzustellen.
+    {
+        uint32 total = 0, known = 0, usable = 0;
+        TaxiStats(player, total, known, usable);
+        if (usable < 2)
+        {
+            char b[160];
+            std::snprintf(b, sizeof(b),
+                          "du kennst erst %u nutzbare Flugpunkte (von %u)", usable, total);
+            note = b;
+            return false;
+        }
     }
 
     // --- Start- und Zielflugpunkt -----------------------------------------
@@ -235,97 +460,21 @@ bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
         return false;
     }
 
-    // --- Guenstigste Flugverbindung suchen (Dijkstra) ----------------------
-    std::unordered_map<uint32, uint32> cost;      // Knoten -> Preis in Kupfer
-    std::unordered_map<uint32, uint32> prev;
-    std::unordered_set<uint32> closed;
+    // --- Guenstigste Verbindung suchen ------------------------------------
+    std::vector<uint32> chain;
+    uint32 total = 0;
 
-    typedef std::pair<uint32, uint32> QE;         // (Preis, Knoten)
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-
-    cost[startNode] = 0;
-    pq.push(QE(0, startNode));
-
-    std::vector<TaxiHop> hops;
-    bool found = false;
-    uint32 guard = 0;
-
-    while (!pq.empty())
+    if (!FindCheapestChain(player, startNode, endNode, chain, total))
     {
-        QE cur = pq.top();
-        pq.pop();
-
-        if (cur.second == endNode)
-        {
-            found = true;
-            break;
-        }
-
-        if (closed.find(cur.second) != closed.end())
-            continue;
-        closed.insert(cur.second);
-
-        if (++guard > 5000)
-            break;
-
-        CollectHops(cur.second, player, hops);
-        for (TaxiHop const& h : hops)
-        {
-            uint32 nc = cur.first + h.price;
-            if (nc > ATConf.taxiMaxCostCopper)
-                continue;
-
-            auto old = cost.find(h.to);
-            if (old == cost.end() || nc < old->second)
-            {
-                cost[h.to] = nc;
-                prev[h.to] = cur.second;
-                pq.push(QE(nc, h.to));
-            }
-        }
-    }
-
-    if (!found)
-    {
-        note = "keine Flugverbindung zwischen den beiden Punkten";
+        note = "keine bezahlbare Flugverbindung zwischen den beiden Punkten";
         return false;
     }
 
-    uint32 const total = cost[endNode];
-
-    if (total > ATConf.taxiMaxCostCopper)
-    {
-        note = "der Flug ist teurer als erlaubt (" + MoneyText(total) + ")";
-        return false;
-    }
     if (player->GetMoney() < total)
     {
         note = "das Gold reicht nicht (" + MoneyText(total) + ")";
         return false;
     }
-
-    // --- Kette zurueckverfolgen -------------------------------------------
-    std::vector<uint32> chain;
-    uint32 at = endNode;
-    while (true)
-    {
-        chain.push_back(at);
-        if (at == startNode)
-            break;
-        auto p = prev.find(at);
-        if (p == prev.end())
-        {
-            note = "Rueckverfolgung der Flugroute unterbrochen";
-            return false;
-        }
-        at = p->second;
-        if (chain.size() > 60)
-        {
-            note = "Flugroute unplausibel lang";
-            return false;
-        }
-    }
-    std::reverse(chain.begin(), chain.end());
 
     TaxiNodesEntry const* startEntry = sTaxiNodesStore.LookupEntry(startNode);
     TaxiNodesEntry const* endEntry = sTaxiNodesStore.LookupEntry(endNode);
@@ -355,11 +504,6 @@ bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
     board.name = "Flugmeister";
     board.nextName = "Flugpunkt";
 
-    // Die vollstaendige Kette in der Etappe mitfuehren, damit StartTaxi sie
-    // unveraendert an den Core geben kann. Sie steht als Namensliste im
-    // nextName-Feld nicht gut aufgehoben -- deshalb wird sie beim Start
-    // einfach erneut berechnet, siehe StartTaxi().
-
     ATLeg land;
     land.mapId = endEntry->map_id;
     land.wx = endEntry->x;
@@ -372,23 +516,34 @@ bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
     out.push_back(board);
     out.push_back(land);
 
-    char b[288];
+    char b[320];
     std::snprintf(b, sizeof(b),
                   "%u Stationen, %s, %.0f yd zum Flugmeister, danach noch %.0f yd zu Fuss "
                   "(spart %.0f%%).",
-                  uint32(chain.size()), MoneyText(total).c_str(), toStart, fromEnd, saving * 100.0f);
+                  uint32(chain.size()), MoneyText(total).c_str(), toStart, fromEnd,
+                  saving * 100.0f);
     note = b;
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Start
+// Abflug
 // ---------------------------------------------------------------------------
 
 bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
 {
-    if (!ATConf.useTaxi || leg.kind != AT_LEG_TAXI || !leg.taxiFrom || !leg.taxiTo)
+    if (!ATConf.useTaxi || leg.kind != AT_LEG_TAXI)
         return false;
+
+    if (!leg.taxiFrom || !leg.taxiTo)
+    {
+        // Darf nicht mehr vorkommen: Etappen aus dem Knotengraphen werden
+        // beim Bauen gegen die echten Flugpunkte geprueft. Bleibt als
+        // Sicherung stehen, damit ein Fehler hier nicht in einem
+        // ActivateTaxiPathTo mit leerer Liste endet.
+        Dbg(player, s, "Flugetappe ohne aufgeloeste Flugpunkte - wird uebersprungen.");
+        return false;
+    }
 
     if (player->IsInCombat())
     {
@@ -397,7 +552,7 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
     }
 
     // Der Core verlangt: nicht beritten, Kontrolle beim Client, nah genug am
-    // Flugpunkt. Alle drei Punkte werden hier hergestellt.
+    // Flugpunkt. Die ersten beiden Punkte werden hier hergestellt.
     ReleaseControl(player, s);
 
     if (player->IsMounted())
@@ -407,95 +562,15 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
     }
 
     // Kette neu bestimmen: zwischen Planung und Abflug koennen Minuten
-    // vergehen, und in der Zeit kann der Charakter Flugpunkte dazugelernt
-    // haben -- oder Gold ausgegeben haben.
+    // vergehen, und in der Zeit kann der Charakter Flugpunkte dazugelernt oder
+    // Gold ausgegeben haben.
     std::vector<uint32> nodes;
-    {
-        std::unordered_map<uint32, uint32> cost;
-        std::unordered_map<uint32, uint32> prev;
-        std::unordered_set<uint32> closed;
-
-        typedef std::pair<uint32, uint32> QE;
-        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-
-        cost[leg.taxiFrom] = 0;
-        pq.push(QE(0, leg.taxiFrom));
-
-        std::vector<TaxiHop> hops;
-        bool found = false;
-        uint32 guard = 0;
-
-        while (!pq.empty())
-        {
-            QE cur = pq.top();
-            pq.pop();
-
-            if (cur.second == leg.taxiTo)
-            {
-                found = true;
-                break;
-            }
-            if (closed.find(cur.second) != closed.end())
-                continue;
-            closed.insert(cur.second);
-            if (++guard > 5000)
-                break;
-
-            CollectHops(cur.second, player, hops);
-            for (TaxiHop const& h : hops)
-            {
-                uint32 nc = cur.first + h.price;
-                if (nc > ATConf.taxiMaxCostCopper)
-                    continue;
-                auto old = cost.find(h.to);
-                if (old == cost.end() || nc < old->second)
-                {
-                    cost[h.to] = nc;
-                    prev[h.to] = cur.second;
-                    pq.push(QE(nc, h.to));
-                }
-            }
-        }
-
-        if (!found)
-        {
-            Dbg(player, s, "Flug nicht moeglich: keine Verbindung mehr vorhanden.");
-            return false;
-        }
-
-        uint32 at = leg.taxiTo;
-        while (true)
-        {
-            nodes.push_back(at);
-            if (at == leg.taxiFrom)
-                break;
-            auto p = prev.find(at);
-            if (p == prev.end())
-                return false;
-            at = p->second;
-            if (nodes.size() > 60)
-                return false;
-        }
-        std::reverse(nodes.begin(), nodes.end());
-    }
-
-    if (nodes.size() < 2)
-        return false;
-
-    // Preis aufsummieren, um ihn melden zu koennen.
     uint32 price = 0;
+
+    if (!FindCheapestChain(player, leg.taxiFrom, leg.taxiTo, nodes, price))
     {
-        std::vector<TaxiHop> hops;
-        for (size_t i = 0; i + 1 < nodes.size(); ++i)
-        {
-            CollectHops(nodes[i], player, hops);
-            for (TaxiHop const& h : hops)
-                if (h.to == nodes[i + 1])
-                {
-                    price += h.price;
-                    break;
-                }
-        }
+        Dbg(player, s, "Flug nicht moeglich: keine bezahlbare Verbindung mehr vorhanden.");
+        return false;
     }
 
     if (player->GetMoney() < price)
@@ -510,13 +585,11 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
         return false;
     }
 
-    TaxiNodesEntry const* endEntry = sTaxiNodesStore.LookupEntry(leg.taxiTo);
-
     char b[288];
-    std::snprintf(b, sizeof(b), "Abflug fuer %s%s%s. AutoTravel wartet auf die Landung.",
+    std::snprintf(b, sizeof(b),
+                  "Abflug fuer %s%s. AutoTravel wartet auf die Landung.",
                   MoneyText(price).c_str(),
-                  (endEntry && nodes.size() > 2) ? " ueber " : "",
-                  (endEntry && nodes.size() > 2) ? "Zwischenstationen" : "");
+                  (nodes.size() > 2) ? " ueber Zwischenstationen" : "");
     Msg(player, b);
 
     s.wasInFlight = false;
@@ -524,34 +597,36 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
 }
 
 // ---------------------------------------------------------------------------
-// Diagnose
+// Auskunft
 // ---------------------------------------------------------------------------
 
 void AutoTravelMgr::TaxiInfo(Player* player)
 {
-    char b[288];
+    char b[320];
 
-    uint32 known = 0;
-    uint32 usable = 0;
-    for (uint32 i = 1; i < sTaxiNodesStore.GetNumRows(); ++i)
-    {
-        TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(i);
-        if (!node)
-            continue;
-        if (!player->m_taxi.IsTaximaskNodeKnown(i))
-            continue;
-        ++known;
-        if (NodeUsableBy(node, player))
-            ++usable;
-    }
+    uint32 total = 0, known = 0, usable = 0;
+    TaxiStats(player, total, known, usable);
 
     std::snprintf(b, sizeof(b),
-                  "Flugpunkte: %u bekannt, davon %u fuer deine Fraktion nutzbar. "
-                  "Automatik: %s, Preisgrenze %s.",
-                  known, usable,
-                  ATConf.useTaxi ? "an" : "aus",
-                  MoneyText(ATConf.taxiMaxCostCopper).c_str());
+                  "Flugpunkte: %u von %u bekannt, davon %u fuer deine Fraktion nutzbar.",
+                  known, total, usable);
     Msg(player, b);
+
+    std::snprintf(b, sizeof(b), "Automatik: %s | Preisgrenze %s | ab %.0f yd Restweg | "
+                                "muss %.0f%% der Strecke sparen",
+                  ATConf.useTaxi ? "an" : "aus",
+                  MoneyText(ATConf.taxiMaxCostCopper).c_str(),
+                  ATConf.taxiMinDistance,
+                  ATConf.taxiMinSaving * 100.0f);
+    Msg(player, b);
+
+    if (usable < 2)
+    {
+        Msg(player, "Mit weniger als zwei nutzbaren Flugpunkten kommt kein Flug zustande - "
+                    "AutoTravel laeuft dann. Ein Spielleiter kann mit '.cheat taxi on' alle "
+                    "Flugpunkte freischalten.");
+        return;
+    }
 
     float d = 0.0f;
     uint32 n = NearestKnownNode(player, player->GetMapId(),
@@ -569,7 +644,8 @@ void AutoTravelMgr::TaxiInfo(Player* player)
     std::vector<TaxiHop> hops;
     CollectHops(n, player, hops);
 
-    std::snprintf(b, sizeof(b), "Naechster Flugpunkt: #%u, %.0f yd entfernt, %u Ziele erreichbar.",
+    std::snprintf(b, sizeof(b),
+                  "Naechster Flugpunkt: #%u, %.0f yd entfernt, %u direkt erreichbare Ziele.",
                   n, d, uint32(hops.size()));
     Msg(player, b);
 

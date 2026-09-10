@@ -187,7 +187,7 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// A*
+// A* mit gesperrten Kanten
 // ---------------------------------------------------------------------------
 //
 // Dijkstra breitet sich gleichmaessig in alle Richtungen aus und besucht dabei
@@ -200,6 +200,139 @@ namespace
 //
 // Wichtig: die Warteschlange enthaelt f = g + h, verglichen werden muss aber
 // gegen g. Ohne diese Trennung waehlt A* falsche Wege.
+//
+// Neu ist die Sperrliste. Der Graph kennt Flugverbindungen, die ein konkreter
+// Charakter gar nicht benutzen kann, weil ihm der Flugpunkt fehlt. Solche
+// Kanten fallen erst auf, wenn die Route steht -- dann werden sie gesperrt und
+// die Suche laeuft noch einmal.
+
+namespace
+{
+    inline uint64 EdgeId(uint32 a, uint32 b)
+    {
+        return (uint64(a) << 32) | uint64(b);
+    }
+
+    bool SearchChain(uint32 startNode, uint32 endNode,
+                     std::unordered_set<uint64> const& banned,
+                     std::vector<uint32>& chain,
+                     std::unordered_map<uint32, uint8>& prevType,
+                     std::string& note)
+    {
+        chain.clear();
+        prevType.clear();
+
+        std::unordered_map<uint32, float> dist;
+        std::unordered_set<uint32> closed;
+        std::unordered_map<uint32, uint32> prev;
+
+        typedef std::pair<float, uint32> QE;
+        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+
+        auto goalIt = sNodes.find(endNode);
+        if (goalIt == sNodes.end())
+        {
+            note = "Zielknoten fehlt";
+            return false;
+        }
+        ATNode const& goalNode = goalIt->second;
+
+        auto heuristic = [&](uint32 n) -> float
+        {
+            auto it = sNodes.find(n);
+            if (it == sNodes.end())
+                return 0.0f;
+            if (it->second.mapId != goalNode.mapId)
+                return 0.0f;
+            return AT::Dist2D(it->second.x, it->second.y, goalNode.x, goalNode.y);
+        };
+
+        dist[startNode] = 0.0f;
+        pq.push(QE(heuristic(startNode), startNode));
+
+        uint32 visited = 0;
+        bool found = false;
+
+        while (!pq.empty())
+        {
+            QE cur = pq.top();
+            pq.pop();
+
+            if (cur.second == endNode)
+            {
+                found = true;
+                break;
+            }
+
+            if (closed.find(cur.second) != closed.end())
+                continue;
+            closed.insert(cur.second);
+
+            auto dIt = dist.find(cur.second);
+            if (dIt == dist.end())
+                continue;
+
+            if (++visited > 40000)
+                break;
+
+            auto lIt = sLinks.find(cur.second);
+            if (lIt == sLinks.end())
+                continue;
+
+            float g = dIt->second;
+
+            for (ATNodeLink const& l : lIt->second)
+            {
+                if (banned.find(EdgeId(cur.second, l.to)) != banned.end())
+                    continue;
+
+                float nd = g + l.cost;
+                auto old = dist.find(l.to);
+                if (old == dist.end() || nd < old->second)
+                {
+                    dist[l.to] = nd;
+                    prev[l.to] = cur.second;
+                    prevType[l.to] = l.type;
+                    pq.push(QE(nd + heuristic(l.to), l.to));
+                }
+            }
+        }
+
+        if (!found)
+        {
+            note = "kein Weg im Knotengraphen";
+            return false;
+        }
+
+        uint32 at = endNode;
+        while (true)
+        {
+            chain.push_back(at);
+            if (at == startNode)
+                break;
+
+            auto p = prev.find(at);
+            if (p == prev.end())
+            {
+                note = "Rueckverfolgung unterbrochen";
+                return false;
+            }
+            at = p->second;
+
+            if (chain.size() > 400)
+            {
+                note = "Route unplausibel lang";
+                return false;
+            }
+        }
+        std::reverse(chain.begin(), chain.end());
+        return true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Route aus dem Knotengraphen
+// ---------------------------------------------------------------------------
 
 bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
                                    float dx, float dy, float /*dz*/,
@@ -234,177 +367,179 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
         return false;
     }
 
-    std::unordered_map<uint32, float> dist;
-    std::unordered_set<uint32> closed;
-    std::unordered_map<uint32, uint32> prev;
+    // --- Suchen, pruefen, notfalls sperren und erneut suchen ---------------
+    //
+    // Der Knotengraph von mod-playerbots beschreibt, was es an Verbindungen
+    // GIBT -- nicht, was DIESER Charakter benutzen kann. Eine Flugverbindung
+    // nuetzt nichts, wenn ihm der Flugpunkt fehlt; ein Charakter der Stufe 1
+    // kennt genau einen.
+    //
+    // Frueher landete so eine Verbindung ungeprueft in der Route. Die Etappe
+    // wurde brav angelaufen, der Abflug scheiterte, und AutoTravel meldete
+    // "Der Flug kam nicht zustande" -- nachdem es den Charakter zum
+    // Flugmeister geschickt hatte.
+    //
+    // Jetzt wird jede Sonderverbindung der fertigen Kette geprueft. Was der
+    // Charakter nicht nehmen kann, wird gesperrt und die Suche laeuft erneut.
+
+    std::unordered_set<uint64> banned;
+    std::vector<uint32> chain;
     std::unordered_map<uint32, uint8> prevType;
 
-    typedef std::pair<float, uint32> QE;
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+    uint32 flightsPlanned = 0;
+    uint32 flightsRejected = 0;
 
-    ATNode const& goalNode = sNodes.find(endNode)->second;
-
-    auto heuristic = [&](uint32 n) -> float
+    for (uint8 attempt = 0; attempt < 5; ++attempt)
     {
-        auto it = sNodes.find(n);
-        if (it == sNodes.end())
-            return 0.0f;
-        if (it->second.mapId != goalNode.mapId)
-            return 0.0f;
-        return AT::Dist2D(it->second.x, it->second.y, goalNode.x, goalNode.y);
-    };
+        if (!SearchChain(startNode, endNode, banned, chain, prevType, note))
+            return false;
 
-    dist[startNode] = 0.0f;
-    pq.push(QE(heuristic(startNode), startNode));
-
-    uint32 visited = 0;
-    bool found = false;
-
-    while (!pq.empty())
-    {
-        QE cur = pq.top();
-        pq.pop();
-
-        if (cur.second == endNode)
+        // --- Umweg am Routenanfang abschneiden -----------------------------
+        //
+        // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wird er
+        // stur angelaufen, rennt der Charakter erst in die Gegenrichtung und
+        // dreht dann um. Verglichen wird deshalb der tatsaechliche Umweg:
+        //
+        //     ueber n0:  |Spieler->n0| + |n0->n1|
+        //     direkt:    |Spieler->n1|
         {
-            found = true;
-            break;
-        }
+            float px = player->GetPositionX();
+            float py = player->GetPositionY();
+            uint32 skipped = 0;
 
-        if (closed.find(cur.second) != closed.end())
-            continue;
-        closed.insert(cur.second);
-
-        auto dIt = dist.find(cur.second);
-        if (dIt == dist.end())
-            continue;
-
-        if (++visited > 40000)
-            break;
-
-        auto lIt = sLinks.find(cur.second);
-        if (lIt == sLinks.end())
-            continue;
-
-        float g = dIt->second;
-
-        for (ATNodeLink const& l : lIt->second)
-        {
-            float nd = g + l.cost;
-            auto old = dist.find(l.to);
-            if (old == dist.end() || nd < old->second)
+            while (chain.size() > 2 && skipped < 4)
             {
-                dist[l.to] = nd;
-                prev[l.to] = cur.second;
-                prevType[l.to] = l.type;
-                pq.push(QE(nd + heuristic(l.to), l.to));
+                auto i0 = sNodes.find(chain[0]);
+                auto i1 = sNodes.find(chain[1]);
+                if (i0 == sNodes.end() || i1 == sNodes.end())
+                    break;
+
+                ATNode const& n0 = i0->second;
+                ATNode const& n1 = i1->second;
+
+                // Nur vergleichbar, solange beide auf derselben Karte liegen.
+                if (n0.mapId != startMap || n1.mapId != startMap)
+                    break;
+
+                float viaN0  = AT::Dist2D(px, py, n0.x, n0.y) + AT::Dist2D(n0.x, n0.y, n1.x, n1.y);
+                float direct = AT::Dist2D(px, py, n1.x, n1.y);
+
+                if (direct > ATConf.nodeSearchRadius * 1.5f)
+                    break;
+                if (viaN0 <= direct * ATConf.skipDetourFactor)
+                    break;
+
+                chain.erase(chain.begin());
+                ++skipped;
             }
         }
-    }
 
-    if (!found)
-    {
-        note = "kein Weg im Knotengraphen";
-        return false;
-    }
+        // --- In Etappen umwandeln, Sonderverbindungen dabei pruefen --------
+        out.clear();
+        flightsPlanned = 0;
 
-    // --- Zurueckverfolgen --------------------------------------------------
-    std::vector<uint32> chain;
-    uint32 at = endNode;
-    while (true)
-    {
-        chain.push_back(at);
-        if (at == startNode)
-            break;
+        bool retry = false;
+        uint64 banEdge = 0;
 
-        auto p = prev.find(at);
-        if (p == prev.end())
+        for (size_t i = 0; i < chain.size(); ++i)
         {
-            note = "Rueckverfolgung unterbrochen";
-            return false;
-        }
-        at = p->second;
+            auto ni = sNodes.find(chain[i]);
+            if (ni == sNodes.end())
+                continue;
+            ATNode const& n = ni->second;
 
-        if (chain.size() > 400)
-        {
-            note = "Route unplausibel lang";
-            return false;
-        }
-    }
-    std::reverse(chain.begin(), chain.end());
+            ATLeg leg;
+            leg.mapId = n.mapId;
+            leg.wx = n.x;
+            leg.wy = n.y;
+            leg.wz = n.z;
+            leg.resolved = true;
+            leg.name = n.name;
+            leg.kind = AT_LEG_WALK;
 
-    // --- Umweg am Routenanfang abschneiden ---------------------------------
-    //
-    // Der naechstgelegene Knoten liegt haeufig HINTER dem Spieler. Wird er stur
-    // angelaufen, rennt der Charakter erst in die Gegenrichtung und dreht dann
-    // um. Verglichen wird deshalb der tatsaechliche Umweg:
-    //
-    //     ueber n0:  |Spieler->n0| + |n0->n1|
-    //     direkt:    |Spieler->n1|
-    //
-    // In einer Schleife, weil manchmal mehrere Knoten hinter dem Spieler liegen.
-    {
-        float px = player->GetPositionX();
-        float py = player->GetPositionY();
-        uint32 skipped = 0;
+            if (i + 1 < chain.size())
+            {
+                uint8 t = 1;
+                auto pt = prevType.find(chain[i + 1]);
+                if (pt != prevType.end())
+                    t = pt->second;
 
-        while (chain.size() > 1 && skipped < 4)
-        {
-            ATNode const& n0 = sNodes.find(chain[0])->second;
-            ATNode const& n1 = sNodes.find(chain[1])->second;
+                leg.kind = KindFromLinkType(t);
 
-            // Nur vergleichbar, solange beide auf derselben Karte liegen.
-            if (n0.mapId != startMap || n1.mapId != startMap)
-                break;
+                auto nx = sNodes.find(chain[i + 1]);
+                if (nx != sNodes.end())
+                    leg.nextName = nx->second.name;
 
-            float viaN0  = AT::Dist2D(px, py, n0.x, n0.y) + AT::Dist2D(n0.x, n0.y, n1.x, n1.y);
-            float direct = AT::Dist2D(px, py, n1.x, n1.y);
+                // --- Flugverbindung: gegen die echten Flugpunkte pruefen ----
+                if (leg.kind == AT_LEG_TAXI && nx != sNodes.end())
+                {
+                    ATNode const& nn = nx->second;
 
-            if (direct > ATConf.nodeSearchRadius * 1.5f)
-                break;
-            if (viaN0 <= direct * ATConf.skipDetourFactor)
-                break;
+                    uint32 fromNode = 0, toNode = 0, cost = 0;
+                    float boardX = 0.0f, boardY = 0.0f, boardZ = 0.0f;
+                    float landX = 0.0f, landY = 0.0f, landZ = 0.0f;
+                    uint32 boardMap = 0, landMap = 0;
 
-            chain.erase(chain.begin());
-            ++skipped;
-        }
-    }
+                    if (ResolveTaxiHop(player,
+                                       n.mapId, n.x, n.y,
+                                       nn.mapId, nn.x, nn.y,
+                                       fromNode, toNode, cost,
+                                       boardMap, boardX, boardY, boardZ,
+                                       landMap, landX, landY, landZ))
+                    {
+                        leg.taxiFrom = fromNode;
+                        leg.taxiTo   = toNode;
+                        leg.taxiCost = cost;
 
-    // --- In Etappen umwandeln ---------------------------------------------
-    for (size_t i = 0; i < chain.size(); ++i)
-    {
-        ATNode const& n = sNodes.find(chain[i])->second;
+                        // Auf die Position des echten Flugmeisters ruecken.
+                        // Der Core laesst den Abflug nur innerhalb von zwei
+                        // Interaktionsdistanzen zu -- der Graphknoten liegt
+                        // meist daneben.
+                        leg.mapId = boardMap;
+                        leg.wx = boardX;
+                        leg.wy = boardY;
+                        leg.wz = boardZ;
+                        ++flightsPlanned;
+                    }
+                    else
+                    {
+                        // Diese Verbindung kann der Charakter nicht nehmen.
+                        banEdge = EdgeId(chain[i], chain[i + 1]);
+                        retry = true;
+                        ++flightsRejected;
+                        break;
+                    }
+                }
+            }
 
-        ATLeg leg;
-        leg.mapId = n.mapId;
-        leg.wx = n.x;
-        leg.wy = n.y;
-        leg.wz = n.z;
-        leg.resolved = true;
-        leg.name = n.name;
-        leg.kind = AT_LEG_WALK;
-
-        // Art der Verbindung ZUM NAECHSTEN Knoten
-        if (i + 1 < chain.size())
-        {
-            uint8 t = 1;
-            auto pt = prevType.find(chain[i + 1]);
-            if (pt != prevType.end())
-                t = pt->second;
-
-            leg.kind = KindFromLinkType(t);
-            leg.nextName = sNodes.find(chain[i + 1])->second.name;
+            out.push_back(leg);
         }
 
-        out.push_back(leg);
+        if (!retry)
+        {
+            char b[288];
+            std::snprintf(b, sizeof(b),
+                          "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten"
+                          "%s%u Flug(e) geplant%s",
+                          uint32(out.size()), dStart, dEnd,
+                          flightsPlanned ? ", " : "",
+                          flightsPlanned,
+                          flightsRejected ? " (nicht nutzbare Fluege uebersprungen)" : "");
+            if (!flightsPlanned)
+                std::snprintf(b, sizeof(b),
+                              "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten%s",
+                              uint32(out.size()), dStart, dEnd,
+                              flightsRejected ? " (nicht nutzbare Fluege uebersprungen)" : "");
+            note = b;
+            return true;
+        }
+
+        banned.insert(banEdge);
     }
 
-    char b[224];
-    std::snprintf(b, sizeof(b),
-                  "%u Knoten, Start %.0f yd entfernt, Ziel %.0f yd vom letzten Knoten",
-                  uint32(out.size()), dStart, dEnd);
-    note = b;
-    return true;
+    note = "zu viele nicht nutzbare Verbindungen im Knotengraphen";
+    out.clear();
+    return false;
 }
 
 // ---------------------------------------------------------------------------

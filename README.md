@@ -105,9 +105,20 @@ Leserecht auf diese Datenbank (Name in `AutoTravel.NodeDatabase`).
   (`CanFly()`); in Azeroth gewaehrt dasselbe Mount nur Bodentempo, dann wird
   gelaufen.
 * **Flugmeister**: das Modul sucht die guenstigste Verbindung zwischen zwei
-  bekannten Flugpunkten (Dijkstra ueber `sTaxiPathSetBySource`), laeuft hin und
-  startet den Flug selbst. Nur, wenn er einen einstellbaren Anteil der
+  **bekannten** Flugpunkten (Dijkstra ueber `sTaxiPathSetBySource`), laeuft hin
+  und startet den Flug selbst. Nur, wenn er einen einstellbaren Anteil der
   Laufstrecke spart und unter der Preisgrenze bleibt.
+
+  Bekannt heisst: er steht in der Flugpunktmaske des Charakters. Das ist
+  dieselbe Maske, die `.cheat taxi on` vollstaendig setzt -- ein Spielleiter mit
+  Taxi-Cheat hat damit alle Punkte, und die Automatik benutzt sie. Das braucht
+  keinen Sonderfall im Code: die Maske ist die einzige Wahrheit, und der Core
+  prueft sie beim Abflug noch einmal selbst.
+
+  Auch Flugverbindungen aus dem Knotengraphen von mod-playerbots werden gegen
+  diese Maske geprueft, **bevor** die Reise beginnt. Der Graph beschreibt, was
+  es an Verbindungen gibt, nicht, was ein bestimmter Charakter nehmen kann.
+  Faellt eine durch, wird sie gesperrt und die Route neu gesucht.
 * **Zeppelin, Schiff, Tiefenbahn**: das Modul bringt den Charakter zum Anleger
   und pausiert. Steht er auf einem Transport, wird gewartet; steigt er aus,
   wird von der neuen Position aus weitergerechnet. Einsteigen muss der Spieler
@@ -245,6 +256,30 @@ zwischenzeitlich von `OnLogout` auf `OnPlayerLogout` umbenannt; ein Modul, das
 sie verwendet, baut je nach Corestand nicht mehr. Noetig sind sie nicht: die
 Clientkontrolle wird nicht gespeichert und steht nach jedem Login wieder beim
 Client, und verwaiste Sitzungen raeumt der Takt selbst ab.
+
+---
+
+## Pruefen ohne Server
+
+Neben dem Modul liegt `autotravel-tools/`. Damit lassen sich Modul und Addon
+pruefen, ohne AzerothCore zu bauen und ohne den Client zu starten:
+
+```
+./pipeline.sh              nur pruefen
+./pipeline.sh --fix        autotravel.conf.dist neu erzeugen, dann pruefen
+./pipeline.sh --package    nach bestandener Pruefung die Zips bauen
+```
+
+Fuenf Schritte: Uebersetzen gegen Attrappen der Core-Schnittstelle (beide
+Auspraegungen von `sTaxiPathSetBySource`), Lua-Syntax, rund fuenfzig
+Durchlaufpruefungen in einer nachgebauten Oberflaeche, Modul und Addon
+gegeneinander halten, Konfigurationsdatei gegen die Registry.
+
+`conf/autotravel.conf.dist` wird dabei nicht gepflegt, sondern **erzeugt**.
+Wer einen Wert hinzufuegt, traegt ihn in `struct ATConfig`, in `sOptions[]` und
+in die Gruppierung in `gen/gen_conf.py` ein und ruft `./pipeline.sh --fix`.
+
+Einzelheiten stehen in `autotravel-tools/README.md`.
 
 ---
 
