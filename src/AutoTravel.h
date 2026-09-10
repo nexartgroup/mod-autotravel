@@ -160,6 +160,9 @@ struct ATConfig
     // Sicherheitsnetz: meldet sich das Addon nach einer Pause gar nicht mehr
     // (Absturz, Reload, /console reloadui), endet die Reise nach dieser Zeit.
     uint32 handoverTimeoutMs  = 900000;  // 15 Minuten
+    // Solange der Autopilot faehrt, wird das AFK-Kennzeichen geloescht. Der
+    // Charakter legt ja Strecke zurueck -- er ist nicht abwesend.
+    bool   suppressAfk        = true;
 
     // --- Feststecken -------------------------------------------------------
     bool   stuckDetection     = true;

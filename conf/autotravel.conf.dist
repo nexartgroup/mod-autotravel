@@ -27,7 +27,6 @@
 
 [worldserver]
 
-
 #--------------------------------------------------------------------------
 #   Grundbetrieb
 #--------------------------------------------------------------------------
@@ -100,6 +99,11 @@ AutoTravel.ResumeAfterDeath = 0
 #    erlaubt: 10000 bis 3600000
 #    Laufzeitschluessel: handover
 AutoTravel.HandoverTimeoutMs = 900000
+
+#    AFK-Kennzeichen loeschen, solange der Autopilot faehrt
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: afk
+AutoTravel.SuppressAfk = 1
 
 #--------------------------------------------------------------------------
 #   Feststecken

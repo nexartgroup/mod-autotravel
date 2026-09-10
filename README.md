@@ -130,6 +130,12 @@ Der Playerbot wird dabei **nicht** angefasst. Das ist Absicht: pausiert der
 Autopilot wegen eines Kampfes, soll der Selbstmodus weiterlaufen und sich
 wehren koennen.
 
+Solange der Autopilot faehrt, wird ausserdem das **AFK-Kennzeichen** geloescht.
+Der Client setzt es nach ein paar Minuten ohne Tastendruck von selbst; waehrend
+einer Reise ist das falsch, und im Schlachtfeld fuehrt es zum Hinauswurf.
+Waehrend `AT_PLAYER_CONTROL` bleibt es dagegen erhalten -- dann ist der Spieler
+tatsaechlich weg. Abschaltbar mit `AutoTravel.SuppressAfk = 0`.
+
 Zurueck uebernimmt der Autopilot nur auf Ansage. Ist das Addon vorhanden,
 wartet er auch nach einem Kampf auf dessen Ruhemeldung, statt dem Spieler die
 Steuerung nach zwei Sekunden wieder wegzunehmen. Ohne Addon faehrt er nach der
@@ -168,7 +174,7 @@ die das Addon erzeugt; von Hand sind sie unpraktisch.
 
 ## Konfiguration
 
-`conf/autotravel.conf.dist` enthaelt **alle** 89 Werte mit Bereich,
+`conf/autotravel.conf.dist` enthaelt **alle** 90 Werte mit Bereich,
 Standardwert und einer Zeile Erklaerung. Jeder Wert ist zusaetzlich zur
 Laufzeit erreichbar:
 
@@ -218,6 +224,7 @@ einer dieser Stellen -- AzerothCore aendert sie gelegentlich:
 | `Player::m_taxi.IsTaximaskNodeKnown`, `Player::ActivateTaxiPathTo` | AutoTravel_Taxi.cpp |
 | `sTaxiNodesStore`, `sTaxiPathSetBySource` aus `DBCStores.h` | AutoTravel_Taxi.cpp |
 | `Player::m_movementInfo.transport.guid` | AutoTravel_Session.cpp |
+| `Player::isAFK`, `Player::ToggleAFK` | AutoTravel_Session.cpp |
 | `WorldScript::OnUpdate`, `OnAfterConfigLoad` | AutoTravel_SC.cpp |
 
 ### Ein Unterschied zwischen den Corestaenden ist bereits abgefangen

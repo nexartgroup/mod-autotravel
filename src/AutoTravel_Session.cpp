@@ -563,6 +563,27 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         return;
     }
 
+    // --- AFK-Kennzeichen -----------------------------------------------------
+    //
+    // Der Client setzt es nach ein paar Minuten ohne Tastendruck von selbst und
+    // schickt es als CHAT_MSG_AFK an den Server. Waehrend der Autopilot faehrt,
+    // ist das schlicht falsch: der Charakter legt Strecke zurueck. Sichtbar
+    // wird der Unterschied spaetestens im Schlachtfeld, wo ein AFK-Kennzeichen
+    // zum Hinauswurf fuehrt.
+    //
+    // Verhindern laesst sich das Setzen nicht -- die Entscheidung faellt im
+    // Client, und ein Addon kann seinen Leerlaufzaehler nicht zuruecksetzen.
+    // Loeschen laesst es sich hier aber sofort wieder.
+    //
+    // Bewusst NICHT waehrend AT_PLAYER_CONTROL: dort steuert der Spieler, und
+    // wenn er wirklich weggeht, soll das auch so angezeigt werden. Sobald der
+    // Autopilot uebernimmt, faellt das Kennzeichen im naechsten Takt weg.
+    if (ATConf.suppressAfk && s.state != AT_PLAYER_CONTROL && player->isAFK())
+    {
+        player->ToggleAFK();
+        Dbg(player, s, "AFK-Kennzeichen geloescht - der Autopilot faehrt gerade.");
+    }
+
     // --- Uebergabe: Kampf und Handpause ------------------------------------
     if (CheckHandover(player, s, diff))
         return;

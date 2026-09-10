@@ -226,6 +226,7 @@ namespace
         { "grace",               "AutoTravel.CombatGraceMs",           OPT_UINT,  AT_OFF(combatGraceMs),       0,       30000,     2000,    "Wartezeit nach dem Kampf (ms)" },
         { "deathresume",         "AutoTravel.ResumeAfterDeath",        OPT_BOOL,  AT_OFF(resumeAfterDeath),    0,       1,         0,       "Ziel nach dem Tod behalten" },
         { "handover",            "AutoTravel.HandoverTimeoutMs",       OPT_UINT,  AT_OFF(handoverTimeoutMs),   10000,   3600000,   900000,  "Abbruch, wenn der Spieler dauerhaft uebernimmt (ms)" },
+        { "afk",                 "AutoTravel.SuppressAfk",             OPT_BOOL,  AT_OFF(suppressAfk),         0,       1,         1,       "AFK-Kennzeichen loeschen, solange der Autopilot faehrt" },
 
         { "stuck",               "AutoTravel.StuckDetection",          OPT_BOOL,  AT_OFF(stuckDetection),      0,       1,         1,       "Feststecken erkennen" },
         { "stucktime",           "AutoTravel.StuckTimeoutMs",          OPT_UINT,  AT_OFF(stuckTimeoutMs),      1000,    60000,     5000,    "Messfenster fuer Feststecken (ms)" },
@@ -641,10 +642,11 @@ void AutoTravelMgr::SendHello(Player* player)
     _addonPlayers.insert(player->GetGUID());
 
     char b[192];
-    std::snprintf(b, sizeof(b), "[AT]H|%s|%u|%u|%u",
-                  "3.0",
+    std::snprintf(b, sizeof(b), "[AT]H|%s|%u|%u|%u|%u",
+                  "3.1",
                   ATConf.enable ? 1u : 0u,
                   uint32(NodeCount()),
-                  ATConf.useTaxi ? 1u : 0u);
+                  ATConf.useTaxi ? 1u : 0u,
+                  ATConf.suppressAfk ? 1u : 0u);
     Raw(player, b);
 }

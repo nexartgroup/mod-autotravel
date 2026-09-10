@@ -260,7 +260,104 @@ Bewegung, Wiederaufnahme, Ende, alle Slash-Befehle, Optionsseite.
 
 ---
 
-## 11. Nachtrag: Baufehler auf aktuellem AzerothCore
+## 11. Nachtrag: AFK-Kennzeichen, Bedienfenster, Botpad
+
+Vier Punkte aus der Rueckmeldung.
+
+### Das AFK-Kennzeichen ruht waehrend der Fahrt
+
+Der Client setzt es nach ein paar Minuten ohne Tastendruck von selbst und
+schickt es als `CHAT_MSG_AFK` an den Server. Waehrend der Autopilot faehrt, ist
+das schlicht falsch -- der Charakter legt Strecke zurueck. Sichtbar wird der
+Unterschied spaetestens im Schlachtfeld, wo ein AFK-Kennzeichen zum Hinauswurf
+fuehrt.
+
+Verhindern laesst sich das Setzen nicht: die Entscheidung faellt im Client, und
+ein Addon kann dessen Leerlaufzaehler nicht zuruecksetzen. Loeschen laesst es
+sich aber. `UpdateSession()` prueft im Takt (Standard 200 ms) und ruft
+`ToggleAFK()`, solange die Reise laeuft.
+
+Bewusst NICHT waehrend `AT_PLAYER_CONTROL`: dort steuert der Spieler, und wenn
+er wirklich weggeht, soll das auch so angezeigt werden. Sobald der Autopilot
+uebernimmt, faellt das Kennzeichen im naechsten Takt weg.
+
+Abschaltbar mit `AutoTravel.SuppressAfk = 0` oder `.at set afk 0`. Der
+Handschlag `[AT]H` traegt den Zustand jetzt als fuenftes Feld, damit das Addon
+ihn anzeigen kann; das Addon liest die Felder gezaehlt statt gemustert und
+kommt deshalb auch mit einem aelteren Modul zurecht, das nur vier schickt.
+
+### Ein Bedienfenster
+
+`AT_GUI.lua`, sechs Reiter: Reise, Uebergabe, Bot, Wege, Anzeige, Info. Zu
+oeffnen mit `/at gui`, ueber den Stern im Panel oder mit Umschalt+Linksklick
+auf das Minimap-Symbol. Escape schliesst es, die Position wird gemerkt.
+
+Das kleine Panel bleibt, was es war: der schmale Statusstreifen am Rand. Die
+Seite unter *Interface -> AddOns* bleibt die vollstaendige Werteliste. Alle
+drei lesen und schreiben dieselben Werte und rufen sich gegenseitig zum
+Auffrischen -- es gibt keinen zweiten Zustand.
+
+Dabei ist eine Unschoenheit aufgefallen, die es vorher schon gab: nach dem
+Handschlag schickte das Addon **alle** Serveroptionen auf einmal. Die sind aber
+serverweit und verlangen Spielleiterrechte, und der Handschlag laeuft nach
+jedem Ladebildschirm. Ein normaler Spieler haette bei jedem Zonenwechsel ein
+Dutzend Absagen im Chat bekommen, ein Spielleiter serverweite Werte auf seinen
+persoenlichen Stand zurueckgedreht. Jetzt geht nur noch `arrival` automatisch
+raus -- der Zielradius, den jeder fuer sich setzen darf. Die uebrigen wandern
+nur beim ausdruecklichen Aendern zum Server, oder ueber einen eigenen Knopf auf
+dem Reiter *Wege*.
+
+### Bot-Einstellungen bleiben, wenn der Selbstmodus schon laeuft
+
+Die alte Fassung rief beim Reisestart bedingungslos `Enable()` und damit
+`ApplyProfile()` -- also `co !`, `nc !` und danach das eigene Profil. Wer den
+Bot vorher eingerichtet hatte, verlor diese Einrichtung mit dem ersten
+Reisestart.
+
+Jetzt entscheidet `B.PrepareForTravel()` anhand eines **dreiwertigen** Zustands:
+
+```
+laeuft   -> nichts anfassen, kein nc !, kein co !, kein Profil
+aus      -> einschalten und das Profil setzen
+unbekannt-> erst fragen, dann eins von beiden
+```
+
+Das nil ist der springende Punkt. "Ich weiss es nicht" und "der Bot ist aus"
+fuehren zu gegensaetzlichem Verhalten; eine Funktion, die beides als false
+zurueckgibt, wuerde bei jedem ersten Reisestart nach dem Login die
+Einstellungen ueberschreiben. Deshalb gibt es `B.KnownState()` neben
+`B.IsRunning()`.
+
+Gefragt wird mit `nc ?` -- einer reinen Abfrage, die nichts aendert. Antwortet
+der Bot innerhalb von vier Sekunden mit einer Fluesternachricht an den eigenen
+Charakter, laeuft er. Kommt nichts, ist er aus. Die Reise wartet darauf nicht;
+sie haengt nicht am Bot.
+
+Ausgeschaltet wird am Ende nur, was AutoTravel selbst eingeschaltet hat
+(`B.turnedOnByUs`). War der Bot vorher an, bleibt er an.
+
+### Botpad laeuft daneben
+
+Drei Beruehrungspunkte, alle in `AT_Compat.lua` behandelt, ohne eine Zeile in
+Botpad zu aendern:
+
+* **Doppelte Meldungen.** Botpad hoert ebenfalls auf `CHAT_MSG_SYSTEM` und gibt
+  `[AT]M`-Zeilen selbst aus. Ein Chatfilter hilft dagegen nicht --
+  `ChatFrame_AddMessageEventFilter` greift in den Anzeigeweg ein, nicht in
+  fremde Ereignisbehandlungen. Deshalb wird `Botpad.Print` umschlossen. Die
+  Huelle laesst alles durch und unterdrueckt genau eine Sache: einen Text, den
+  AutoTravel im selben Moment schon ausgegeben hat.
+* **Wer richtet den Bot ein.** Die Regel oben gilt unabhaengig von Botpad: wer
+  den Selbstmodus einschaltet, behaelt seine Einstellungen. `B.KnownState()`
+  liest zusaetzlich `Botpad.Bot.running`, wenn AutoTravel selbst noch nichts
+  gesehen hat. Wer ausschliesslich mit Botpad arbeiten will, nimmt den Haken
+  bei "Playerbot mitsteuern" heraus.
+* **Chatfilter.** Beide verbergen ihre eigenen Botbefehle. Die Filterkette ruft
+  beide auf und es genuegt, wenn einer true liefert -- hier war nichts zu tun.
+
+---
+
+## 12. Nachtrag: Baufehler auf aktuellem AzerothCore
 
 ```
 AutoTravel_Taxi.cpp:100: member reference type 'const TaxiPathEntry *const'
@@ -300,7 +397,7 @@ Bei der Gelegenheit zwei Includes nachgezogen, die bisher nur zufaellig ueber
 
 ---
 
-## 12. Kleinigkeiten
+## 13. Kleinigkeiten
 
 * `RouteAdd()` benutzte `atoi`/`atof` auf Spielereingaben; jetzt die gepruefte
   Umwandlung, die im Rest des Moduls schon verwendet wurde.
