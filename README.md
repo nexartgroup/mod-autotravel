@@ -455,6 +455,7 @@ Eine neue Option eintragen:
 | Reisen starten spuerbar verzoegert, wenn viele gleichzeitig beginnen | Das Wegberechnungs-Budget. `.at stats` zeigt, wie oft es gegriffen hat; `AutoTravel.MaxPathsPerTick` erhoehen |
 | Spieler bleibt nach `.at set enable 0` stehen | Ab 4.0 gibt das Abschalten die Steuerung zurueck. In aelteren Staenden: `.at stop` bzw. Neuanmeldung |
 | `.at diag` meldet "Kein passender Kartenausschnitt" | Die Zonenzuordnung des Clients stimmt nicht; `/at karten` im Addon, sonst `/at karte <id>` |
+| Charakter gleitet schnell durch die Luft, schiesst am Ziel vorbei, "huepft", oder hat nach dem Wasser Minischritte | Bis 4.0 ein Abschnitt, der die Paketkodierung sprengte (siehe AENDERUNGEN.md, "4.0.1"). Ab 4.0.1 darf es ihn nicht mehr geben: mit Debug zeigen die Zeilen `Abschnitt gestartet` Laenge in yd (hoechstens etwa 440), Tempo, Wasser/Land und die Bewegungskennzeichen des Spielers. Tritt es trotzdem auf, diese Zeilen mitschicken |
 
 `AutoTravel.Debug = 1` (oder `.at debug` je Spieler) schaltet ausfuehrliche
 Ausgabe ein; fehlgeschlagene Reisen stehen mit Grund im Serverlog, sofern die

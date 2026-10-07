@@ -1,3 +1,83 @@
+# Version 4.0.1 -- Der Charakter "fliegt" ueber die Karte
+
+Gemeldet: Bei laengeren Strecken gleitet der Charakter sehr schnell durch die
+Luft, schiesst am Ziel vorbei, manchmal ueber die halbe Karte und wieder
+zurueck, bis er schliesslich landet. Nach dem Wasser sind die Schritte klein
+und schnell, oder der Charakter "huepft" durch die Luft.
+
+## Ursache (Hauptfehler)
+
+Das Modul baut je Abschnitt EINEN `MoveSpline` und begrenzte ihn nur nach der
+Zahl der NavMesh-Punkte (`ChunkPoints`, Standard 12), nicht nach seiner Laenge.
+Im offenen Gelaende bleiben vom NavMesh-Pfad nur wenige Eckpunkte uebrig, jeder
+Abstand betraegt dann leicht 80 bis 100 yd: aus 9 Punkten wurde ein Abschnitt
+von rund 750 yd (im Log: "251 Punkte, Wasser").
+
+`SMSG_MONSTER_MOVE` kann so einen Abschnitt nicht tragen. Die Zwischenpunkte
+eines gewoehnlichen Splines werden als Abstand zur Mitte von Start und Ende in
+11/11/10 Bit zu je 0,25 yd gepackt (`ByteBuffer::appendPackXYZ`,
+`WriteLinearPath`): x und y erreichen +-256 yd, z +-128 yd. Was darueber liegt,
+wird abgeschnitten. Der Core merkt es nicht -- `MoveSplineInitArgs::
+_checkPathBounds()` ist in `Validate()` auskommentiert und waere mit
+`MAX_OFFSET = 1024` selbst um den Faktor vier zu grosszuegig. Der Client baut aus
+den verstuemmelten Punkten einen anderen, laengeren Weg und laeuft ihn in der
+Zeit ab, die der Server fuer den WAHREN Weg berechnet hat: also mit dem
+Mehrfachen des Tempos, durch die Luft, an falschen Stellen. Am Ende landet er
+beim richtigen Zielpunkt (der Server hat den Charakter die ganze Zeit korrekt
+gefuehrt).
+
+Nachgerechnet mit den Zahlen aus dem Log: der 746-yd-Abschnitt wuerde vom Client
+als 2780 yd langer Weg gezeichnet (3,7-faches Tempo, Punkte bis 512 yd
+verschoben). Der 279-yd-Abschnitt davor liegt innerhalb der Grenzen und lief
+normal -- das erklaert das "teilweise".
+
+## Aenderungen
+
+* `LaunchChunk` begrenzt den Abschnitt jetzt nach der Paketkodierung
+  (`AT::SplineFitsPacket`, Grenzen 220 yd in x/y und 100 yd in z, mit Reserve
+  zu den harten 256/128 yd). Ein Segment, das darueber hinausfuehrt, beginnt den
+  naechsten Abschnitt.
+* Lange NavMesh-Segmente werden vorher in Stuecke von hoechstens 40 yd geteilt
+  (`AT::SplitLongSegments`, Hoehen linear verteilt). Sonst liesse sich ein
+  einzelnes Segment ueber den See weder begrenzen noch an der Wassergrenze
+  trennen.
+* **Wasser und Land gehen nicht mehr in einen Abschnitt.** Bisher bekam der
+  ganze Abschnitt Schwimmtempo und Schwimmkennzeichen, sobald ein einziger Punkt
+  im Wasser lag: das Landstueck davor und danach wurde mit 4,7 statt 7 (im Log
+  10,5) yd/s gelaufen, die Laufanimation passte nicht zur Geschwindigkeit
+  ("Minischritte"). Ein Segment gilt als Wasser, wenn die Mehrheit seiner Punkte
+  im Wasser liegt.
+* `ReleaseControl` und `TryMount` fragen den Wasserzustand an der echten
+  Position (`GetLiquidData`) statt `Player::IsInWater()`. Der Core fuehrt
+  `IsInWater()` nur aus Bewegungspaketen des Clients nach und verwirft diese,
+  solange ein Spline laeuft; der Wert blieb waehrend der ganzen Fahrt auf dem
+  Stand vor dem Start. Folge: Schwimmkennzeichen, das nach einer im Wasser
+  begonnenen Fahrt auf dem Land stehenblieb, und ein Aufsitzen, das nach einer
+  Schwimmstrecke verweigert wurde. Der Wert wird jetzt auch nachgefuehrt
+  (`SetInWater`).
+* Bodenabschnitte werden immer als linearer Bodenspline gesendet. Der Konstruktor
+  von `MoveSplineInit` schaltet sonst den Flugmodus ein (glatter Spline,
+  Fluganimation, ungepackt), sobald der Spieler `CAN_FLY` oder `DISABLE_GRAVITY`
+  traegt -- GM-Flug, Flugaura, Flugmount.
+* Die Debugzeile "Abschnitt gestartet" nennt jetzt die Laenge in yd und die
+  Bewegungskennzeichen des Spielers.
+
+## Was getestet wurde
+
+* Die Paketkodierung des Cores ist in `tools/tests/util_test.cpp` nachgebildet
+  (11/11/10 Bit, Vorzeichenerweiterung wie beim Client). Geprueft wird, dass
+  `SplineFitsPacket` genau die Abschnitte durchlaesst, die unversehrt ankommen,
+  und den 746-yd-Abschnitt aus dem Log abweist; mit absichtlich falscher Grenze
+  schlagen die Tests an. 109 Pruefungen, 0 Fehler.
+* Uebersetzt gegen die Header von AzerothCore `master`.
+
+Nicht getestet (hier nicht moeglich): Verhalten im Spiel. Dass der 3.3.5a-Client
+die gepackten Felder mit Vorzeichen liest, ist aus dem Kodierer und seiner
+Verwendung durch normale NPC-Pfade geschlossen, nicht am Client geprueft. Die
+Erklaerung der "Minischritte" ist eine Annahme.
+
+---
+
 # Version 4.0 -- Pruefung und Haertung
 
 Gepruefte Grundlage: AzerothCore `master` (Oktober 2026), Modul und beide Addons.
