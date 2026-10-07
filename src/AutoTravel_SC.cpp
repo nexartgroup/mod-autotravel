@@ -26,6 +26,8 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -54,6 +56,27 @@ namespace
             r += v[i];
         }
         return r;
+    }
+
+    std::string Lower(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        return s;
+    }
+
+    // Einstellungen, die selbst Rechte vergeben, duerfen auch ein Spielleiter
+    // nicht aendern: sonst koennte er ".at tp" fuer alle Spieler freischalten.
+    // Das bleibt dem Serververwalter (oder der Konfigurationsdatei) vorbehalten.
+    bool NeedsAdministrator(std::string const& key)
+    {
+        return key == "teleportsec";
+    }
+
+    // Die beiden Werte, die nur die eigene Sitzung betreffen.
+    bool IsSessionOption(std::string const& key)
+    {
+        return key == "arrival" || key == "grace";
     }
 }
 
@@ -130,6 +153,8 @@ public:
                 return true;
             }
 
+            // Erst die Berechtigung, dann die Befehlsbremse: wer ohnehin nicht
+            // teleportieren darf, soll damit auch keine Rechenzeit verbrauchen.
             if (cmd == "tp")
             {
                 if (handler->GetSession()->GetSecurity() < AccountTypes(ATConf.teleportSecurity))
@@ -137,6 +162,16 @@ public:
                     sAutoTravel->Msg(player, "Teleport ist dir nicht erlaubt.");
                     return true;
                 }
+            }
+
+            // Gewicht: ".at diag" rechnet bis zu zwoelf Wege (zehnfacher Abstand),
+            // ein Start Etappenplanung und Knotensuche (dreifacher Abstand).
+            uint32 const weight = (cmd == "diag") ? 10u : ((cmd == "start") ? 3u : 1u);
+            if (!sAutoTravel->AllowCommand(player, AT_CMD_HEAVY, weight))
+            {
+                if (cmd == "start")
+                    sAutoTravel->SyncStatus(player);   // das Addon wartet auf eine Statuszeile
+                return true;
             }
 
             if (a.size() >= 10)
@@ -184,6 +219,12 @@ public:
             // .at rstart <curMap> <cnx> <cny> <Name...>
             if (a.size() >= 4)
             {
+                if (!sAutoTravel->AllowCommand(player, AT_CMD_HEAVY, 3))
+                {
+                    sAutoTravel->SyncStatus(player);   // das Addon wartet auf eine Statuszeile
+                    return true;
+                }
+
                 uint32 curMap = 0;
                 float cnx = 0.0f, cny = 0.0f;
                 if (AT::ParseUInt(a[1], curMap) && curMap
@@ -205,7 +246,8 @@ public:
 
         if (cmd == "pause")
         {
-            sAutoTravel->PauseByPlayer(player, JoinFrom(a, 1));
+            // Der Text kommt vom Client und geht als Meldung an ihn zurueck.
+            sAutoTravel->PauseByPlayer(player, AT::SanitizeText(JoinFrom(a, 1), 96));
             return true;
         }
 
@@ -217,6 +259,8 @@ public:
 
         if (cmd == "repath")
         {
+            if (!sAutoTravel->AllowCommand(player, AT_CMD_HEAVY))
+                return true;
             sAutoTravel->Repath(player);
             return true;
         }
@@ -228,21 +272,43 @@ public:
         }
 
         // --- Auskunft ------------------------------------------------------
+        // Die Auskunftsbefehle schicken mehrere Zeilen zurueck (".at options" bis zu
+        // 41); ohne Bremse waere das ein billiger Weg, einem Spieler Pakete zu
+        // entlocken. Sie laufen deshalb durch dieselbe Befehlsbremse.
         if (cmd == "nodes")
         {
+            if (!sAutoTravel->AllowCommand(player, AT_CMD_INFO))
+                return true;
             sAutoTravel->NodeInfo(player);
             return true;
         }
 
         if (cmd == "taxi")
         {
+            if (!sAutoTravel->AllowCommand(player, AT_CMD_INFO))
+                return true;
             sAutoTravel->TaxiInfo(player);
             return true;
         }
 
         if (cmd == "options" || cmd == "opts")
         {
+            if (!sAutoTravel->AllowCommand(player, AT_CMD_INFO))
+                return true;
             sAutoTravel->ListOptions(player, a.size() > 1 ? a[1] : std::string());
+            return true;
+        }
+
+        // Zaehler und Speicherstand des Moduls. Nur fuer Spielleiter: es verraet
+        // nichts Gefaehrliches, aber auch nichts, was ein Spieler braucht.
+        if (cmd == "stats")
+        {
+            if (handler->GetSession()->GetSecurity() < SEC_GAMEMASTER)
+            {
+                sAutoTravel->Msg(player, "Nur fuer Spielleiter.");
+                return true;
+            }
+            sAutoTravel->PrintStats(player);
             return true;
         }
 
@@ -267,21 +333,36 @@ public:
                 return true;
             }
 
-            // Werte, die nur der Serververwalter aendern darf: alles, was
-            // andere Spieler mitbetrifft. Die beiden Sitzungswerte (arrival,
-            // grace) bleiben fuer jeden offen.
-            if (a[1] != "arrival" && a[1] != "grace")
+            // Der Schluessel wird VOR der Rechtepruefung kleingeschrieben. Sonst
+            // wuerde die Pruefung "arrival" erkennen, SetOption() aber auch
+            // "ARRIVAL" annehmen -- und umgekehrt ein grossgeschriebener
+            // serverweiter Schluessel an der Pruefung vorbeilaufen koennen, falls
+            // sich die beiden Stellen je auseinanderentwickeln.
+            std::string const key = Lower(a[1]);
+            AccountTypes const sec = handler->GetSession()->GetSecurity();
+
+            // Alles, was andere Spieler mitbetrifft, darf nur ein Spielleiter
+            // aendern. Die beiden Sitzungswerte (arrival, grace) bleiben fuer
+            // jeden offen.
+            if (!IsSessionOption(key))
             {
-                if (handler->GetSession()->GetSecurity() < SEC_GAMEMASTER)
+                if (sec < SEC_GAMEMASTER)
                 {
                     sAutoTravel->Msg(player,
                         "Diese Einstellung gilt fuer den ganzen Server und darf nur ein "
                         "Spielleiter aendern.");
                     return true;
                 }
+
+                if (NeedsAdministrator(key) && sec < SEC_ADMINISTRATOR)
+                {
+                    sAutoTravel->Msg(player,
+                        "Diese Einstellung vergibt Rechte und darf nur ein Administrator aendern.");
+                    return true;
+                }
             }
 
-            sAutoTravel->SetOption(player, a[1], a[2]);
+            sAutoTravel->SetOption(player, key, a[2]);
             return true;
         }
 
@@ -297,8 +378,9 @@ public:
 // Bewusst NUR WorldScript. Ein PlayerScript fuer das Ausloggen waere nett, ist
 // aber nicht noetig: die Clientkontrolle wird nicht in der Datenbank
 // gespeichert, sie steht nach jedem Login wieder beim Client. Verwaiste
-// Sitzungen raeumt der Takt selbst ab, sobald der Spieler nicht mehr in der
-// Welt ist.
+// Sitzungen raeumt der Takt selbst ab, sobald der Spieler nicht mehr
+// VERBUNDEN ist (nicht: nicht in der Welt -- das gilt auch waehrend eines
+// Ladebildschirms), und SweepOrphans() alle uebrigen GUID-Tabellen.
 //
 // Der Verzicht hat einen zweiten Grund: AzerothCore hat die PlayerScript-Hooks
 // zwischenzeitlich von OnLogout auf OnPlayerLogout umbenannt. Ein Modul, das

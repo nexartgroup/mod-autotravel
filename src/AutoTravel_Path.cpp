@@ -61,14 +61,13 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
     out.type = uint32(gen.GetPathType());
     out.points = gen.GetPath();
 
-    if (ATConf.debug)
     {
         // Vorsicht: diese Funktion laeuft auch fuer Spieler OHNE Sitzung
         // (".at diag"). Die Vorfassung griff hier mit _sessions.at() zu und
         // warf dabei std::out_of_range -- ein Absturz des Weltservers durch
-        // einen harmlosen Diagnosebefehl.
+        // einen harmlosen Diagnosebefehl. Find() liefert nullptr statt zu werfen.
         ATSession const* s = Find(player);
-        if (s)
+        if (s && DebugEnabled(*s))
         {
             char b[288];
             std::snprintf(b, sizeof(b),
@@ -115,8 +114,24 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
     uint32 offSurface = 0;
     std::vector<float> planes;
 
-    for (size_t i = 0; i < out.points.size(); ++i)
+    // Stichprobe statt jeden Punkt: jeder Punkt kostet bis zu vier VMap-Abfragen
+    // (bei einem Fehlschlag noch einmal rund neun). Der PathGenerator liefert
+    // hoechstens MAX_POINT_PATH_LENGTH = 74 Punkte, eine Wegsuche ohne Ergebnis
+    // prueft aber bis zu 62 Kandidaten -- das waren Zehntausende Strahlabfragen
+    // auf dem Weltserver-Thread. Die Entscheidung ("ein Viertel liegt nirgends
+    // auf") aendert sich durch gleichmaessig verteilte Stichproben nicht. Erster
+    // und letzter Punkt sind immer dabei; Pfade bis 24 Punkte werden weiterhin
+    // vollstaendig geprueft. Eine frueher hier stehende Grenze von 48 griff bei
+    // keinem einzelnen Pfad (74 / 48 = Schrittweite 1), nur der vorzeitige Abbruch
+    // unten half.
+    constexpr size_t MAX_SURFACE_SAMPLES = 24;
+    size_t const count = out.points.size();
+    size_t const stride = std::max<size_t>(1, (count + MAX_SURFACE_SAMPLES - 1) / MAX_SURFACE_SAMPLES);
+    size_t const samples = (count - 1 + stride - 1) / stride + 1;
+
+    for (size_t k = 0; k < samples; ++k)
     {
+        size_t const i = std::min(k * stride, count - 1);
         G3D::Vector3 const& p = out.points[i];
         bool onSurface = false;
 
@@ -141,11 +156,12 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
         }
 
         if (!onSurface)
+        {
             ++offSurface;
+            if (offSurface * 4 > samples)      // schon jetzt nicht mehr zu retten
+                return false;
+        }
     }
-
-    if (offSurface * 4 > out.points.size())
-        return false;
 
     out.incomplete = (out.type & PATHFIND_INCOMPLETE) != 0;
     out.valid = true;
@@ -336,11 +352,22 @@ float AutoTravelMgr::ScoreNaturalPath(Player* player,
     // entlang darf deshalb laenger sein als der Weg quer durch den See.
     if (ATConf.waterPenalty > 0.0f && ATConf.swim)
     {
+        // Hoechstens etwa 64 Wasserabfragen je Pfad. Zwischen zwei Stichproben
+        // gilt der zuletzt gemessene Zustand; Wasser ist ein flaechiges
+        // Merkmal, ein einzelner Punkt entscheidet nichts.
+        constexpr size_t MAX_WATER_SAMPLES = 64;
+        size_t const stride = std::max<size_t>(1, path.size() / MAX_WATER_SAMPLES);
+
         float swimYards = 0.0f;
+        bool inWater = false;
         for (size_t i = 1; i < path.size(); ++i)
         {
-            float lvl = 0.0f, grd = 0.0f;
-            if (WaterSurface(player, path[i].x, path[i].y, path[i].z + 2.0f, lvl, grd))
+            if ((i - 1) % stride == 0 || i + 1 == path.size())
+            {
+                float lvl = 0.0f, grd = 0.0f;
+                inWater = WaterSurface(player, path[i].x, path[i].y, path[i].z + 2.0f, lvl, grd);
+            }
+            if (inWater)
                 swimYards += AT::Dist2D(path[i].x, path[i].y, path[i - 1].x, path[i - 1].y);
         }
         score += swimYards * ATConf.waterPenalty;
@@ -636,14 +663,17 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 bestDestZ = zc[i];
             }
 
-            char b[256];
-            std::snprintf(b, sizeof(b),
-                          "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s Punkte=%u",
-                          straight ? "Eckpunkte" : "Geglaettet", zc[i],
-                          PathDistance(cand.points), cand.score,
-                          cand.incomplete ? "TEILWEG" : "vollstaendig",
-                          uint32(cand.points.size()));
-            Dbg(player, s, b);
+            if (DebugEnabled(s))
+            {
+                char b[256];
+                std::snprintf(b, sizeof(b),
+                              "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s Punkte=%u",
+                              straight ? "Eckpunkte" : "Geglaettet", zc[i],
+                              PathDistance(cand.points), cand.score,
+                              cand.incomplete ? "TEILWEG" : "vollstaendig",
+                              uint32(cand.points.size()));
+                Dbg(player, s, b);
+            }
         }
     }
 
@@ -666,12 +696,15 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 if (!BuildContourCandidate(player, s, offsets[oi], left, contour))
                     continue;
 
-                char b[256];
-                std::snprintf(b, sizeof(b), "Contour %s %.0f yd: Distanz=%.1f Score=%.1f Punkte=%u",
-                              left ? "links" : "rechts", offsets[oi],
-                              PathDistance(contour.points), contour.score,
-                              uint32(contour.points.size()));
-                Dbg(player, s, b);
+                if (DebugEnabled(s))
+                {
+                    char b[256];
+                    std::snprintf(b, sizeof(b), "Contour %s %.0f yd: Distanz=%.1f Score=%.1f Punkte=%u",
+                                  left ? "links" : "rechts", offsets[oi],
+                                  PathDistance(contour.points), contour.score,
+                                  uint32(contour.points.size()));
+                    Dbg(player, s, b);
+                }
 
                 if (contour.score < best.score)
                 {

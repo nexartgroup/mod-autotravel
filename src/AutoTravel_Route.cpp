@@ -15,6 +15,7 @@
 
 #include "Chat.h"
 #include "Config.h"
+#include "GameTime.h"
 #include "GridDefines.h"
 #include "Log.h"
 #include "Map.h"
@@ -88,11 +89,10 @@ namespace
     std::unordered_map<uint32, ATMapArea> sATMapAreas;
     bool sATMapAreasLoaded = false;
 
-    // Zuordnung Client-Karten-ID -> WorldMapArea-ID. Die vom Client gelieferte
-    // ID (GetCurrentMapAreaID) ist NICHT zwangslaeufig die aus dem DBC.
-    std::unordered_map<uint32, uint32> sATIdFix;
-    int32 sATIdDelta = 0;
-    bool  sATIdDeltaKnown = false;
+    // Die Zuordnung Client-Karten-ID -> WorldMapArea-ID steht NICHT hier,
+    // sondern je Spieler in AutoTravelMgr::_calib: die vom Client gelieferte ID
+    // (GetCurrentMapAreaID) ist nicht zwangslaeufig die aus dem DBC, und die
+    // Angaben, aus denen sie gelernt wird, stammen vom Client.
 
     void ApplyArea(ATMapArea const& e, bool swapped, float mx, float my, float& wx, float& wy)
     {
@@ -182,9 +182,7 @@ void AutoTravelMgr::LoadMapAreas()
 {
     sATMapAreas.clear();
     sATMapAreasLoaded = false;
-    sATIdFix.clear();
-    sATIdDelta = 0;
-    sATIdDeltaKnown = false;
+    _calib.clear();
 
     std::string dataDir = sConfigMgr->GetOption<std::string>("DataDir", ".");
     if (!dataDir.empty() && dataDir[dataDir.size() - 1] != '/' && dataDir[dataDir.size() - 1] != '\\')
@@ -229,10 +227,14 @@ void AutoTravelMgr::LoadMapAreas()
 
 void AutoTravelMgr::LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny)
 {
-    if (!sATMapAreasLoaded || !clientMapId || pnx <= 0.0f || pny <= 0.0f)
+    if (!player || !sATMapAreasLoaded || !clientMapId || pnx <= 0.0f || pny <= 0.0f)
         return;
-    if (sATIdFix.find(clientMapId) != sATIdFix.end())
+
+    ATCalibration& cal = _calib[player->GetGUID()];
+    if (cal.fix.find(clientMapId) != cal.fix.end())
         return;
+    if (cal.fix.size() >= MAX_CALIB_ENTRIES)
+        return;                            // ein Client darf nicht unbegrenzt Karten melden
 
     float bestErr = 1.0e9f;
     uint32 bestId = 0;
@@ -256,13 +258,13 @@ void AutoTravelMgr::LearnMapId(Player* player, uint32 clientMapId, float pnx, fl
 
     if (bestId && bestErr <= 250.0f)
     {
-        sATIdFix[clientMapId] = bestId;
-        sATIdDelta = int32(bestId) - int32(clientMapId);
-        sATIdDeltaKnown = true;
+        cal.fix[clientMapId] = bestId;
+        cal.delta = int32(int64(bestId) - int64(clientMapId));
+        cal.deltaKnown = true;
         if (bestId != clientMapId)
-            LOG_INFO("module", "mod-autotravel: Karten-ID {} des Clients entspricht "
-                               "WorldMapArea {} (Abweichung {:.1f} yd).",
-                     clientMapId, bestId, bestErr);
+            LOG_DEBUG("module", "mod-autotravel: {}: Karten-ID {} des Clients entspricht "
+                                "WorldMapArea {} (Abweichung {:.1f} yd).",
+                      player->GetName(), clientMapId, bestId, bestErr);
     }
 }
 
@@ -279,6 +281,18 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
         err = "Serverseitig konnte WorldMapArea.dbc nicht geladen werden - siehe Serverlog.";
         return false;
     }
+
+    // Gelernte Zuordnung dieses Spielers merken. Begrenzt, und nur fuer ihn:
+    // die Angaben, aus denen sie entsteht, stammen vom Client.
+    auto remember = [&](uint32 clientId, uint32 areaId)
+    {
+        ATCalibration& cal = _calib[player->GetGUID()];
+        if (cal.fix.find(clientId) == cal.fix.end() && cal.fix.size() >= MAX_CALIB_ENTRIES)
+            return;
+        cal.fix[clientId] = areaId;
+        cal.delta = int32(int64(areaId) - int64(clientId));
+        cal.deltaKnown = true;
+    };
 
     uint32 chosen = 0;
     bool   swapped = false;
@@ -320,13 +334,12 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
             return false;
         }
 
-        if (bestId != uiMapId && sATIdFix.find(uiMapId) == sATIdFix.end())
-            LOG_INFO("module", "mod-autotravel: Karten-ID {} des Clients entspricht "
-                               "WorldMapArea {} (Abweichung {:.1f} yd).", uiMapId, bestId, bestErr);
+        if (bestId != uiMapId)
+            LOG_DEBUG("module", "mod-autotravel: {}: Karten-ID {} des Clients entspricht "
+                                "WorldMapArea {} (Abweichung {:.1f} yd).",
+                      player->GetName(), uiMapId, bestId, bestErr);
 
-        sATIdFix[uiMapId] = bestId;
-        sATIdDelta = int32(bestId) - int32(uiMapId);
-        sATIdDeltaKnown = true;
+        remember(uiMapId, bestId);
 
         chosen = bestId;
         swapped = bestSwapped;
@@ -336,14 +349,19 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
     {
         uint32 tryId = uiMapId;
 
-        auto fix = sATIdFix.find(uiMapId);
-        if (fix != sATIdFix.end())
-            tryId = fix->second;
-        else if (sATIdDeltaKnown)
+        auto cit = _calib.find(player->GetGUID());
+        if (cit != _calib.end())
         {
-            uint32 shifted = uint32(int32(uiMapId) + sATIdDelta);
-            if (sATMapAreas.find(shifted) != sATMapAreas.end())
-                tryId = shifted;
+            auto fix = cit->second.fix.find(uiMapId);
+            if (fix != cit->second.fix.end())
+                tryId = fix->second;
+            else if (cit->second.deltaKnown)
+            {
+                int64 shifted = int64(uiMapId) + int64(cit->second.delta);
+                if (shifted > 0 && shifted <= int64(0xFFFFFFFFu)
+                    && sATMapAreas.find(uint32(shifted)) != sATMapAreas.end())
+                    tryId = uint32(shifted);
+            }
         }
 
         auto it = sATMapAreas.find(tryId);
@@ -391,11 +409,10 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 
                     if (player->GetMap()->GetZoneId(player->GetPhaseMask(), ax, ay, az) == alt->second.areaId)
                     {
-                        sATIdFix[uiMapId] = alt->first;
-                        sATIdDelta = int32(alt->first) - int32(uiMapId);
-                        sATIdDeltaKnown = true;
-                        LOG_INFO("module", "mod-autotravel: Karten-ID {} ueber die Zonenpruefung "
-                                           "auf WorldMapArea {} korrigiert.", uiMapId, alt->first);
+                        remember(uiMapId, alt->first);
+                        LOG_DEBUG("module", "mod-autotravel: {}: Karten-ID {} ueber die Zonenpruefung "
+                                            "auf WorldMapArea {} korrigiert.",
+                                  player->GetName(), uiMapId, alt->first);
                         outX = ax;
                         outY = ay;
                         return true;
@@ -636,6 +653,7 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
     {
         Msg(player, "Kein brauchbarer Stuetzpunkt in der Route.");
         _sessions.erase(player->GetGUID());
+        SyncStatus(player);
         return false;
     }
 
@@ -643,6 +661,7 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
     s.lastX = player->GetPositionX();
     s.lastY = player->GetPositionY();
     s.lastZ = player->GetPositionZ();
+    ++_statTravelsStarted;
 
     if (s.startDistance <= 0.0f)
         s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
@@ -657,6 +676,7 @@ bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
 {
     ++s.legIdx;
     s.repathAttempts = 0;
+    s.stuckStrikes = 0;
     s.mountTried = false;
     s.path.clear();
     s.idx = 0;
@@ -714,8 +734,14 @@ namespace
 bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
                           bool hasCalib, float pnx, float pny, std::string const& name)
 {
+    // Jede Absage endet mit SyncStatus(): das Addon wechselt beim Absenden in
+    // "Startet" und wartet auf eine Statuszeile. Eine Absage kommt aber nur als
+    // Text; ohne die Statuszeile bliebe es dort haengen.
     if (!CanStart(this, player))
+    {
+        SyncStatus(player);
         return false;
+    }
 
     float wx = 0.0f, wy = 0.0f, wz = 0.0f;
     uint32 tmpMap = 0;
@@ -723,6 +749,7 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err))
     {
         Msg(player, err);
+        SyncStatus(player);
         return false;
     }
 
@@ -739,7 +766,9 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     s.graceOverride = keepGrace;
     s.arrivalOverride = keepArrival;
     s.mapId = player->GetMapId();
-    s.destName = name.empty() ? "Ziel" : name;
+    s.destName = AT::SanitizeText(name, 48);
+    if (s.destName.empty())
+        s.destName = "Ziel";
 
     ATLeg leg;
     leg.uiMapId = uiMapId;
@@ -768,11 +797,15 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     if (it == _pendingRoutes.end() || it->second.empty())
     {
         Msg(player, "Keine Route empfangen.");
+        SyncStatus(player);
         return false;
     }
 
     if (!CanStart(this, player))
+    {
+        SyncStatus(player);
         return false;
+    }
 
     ATSession& s = _sessions[player->GetGUID()];
     bool wasDebug = s.debug;
@@ -787,8 +820,16 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     s.graceOverride = keepGrace;
     s.arrivalOverride = keepArrival;
     s.mapId = player->GetMapId();
-    s.destName = name.empty() ? "Ziel" : name;
-    s.route = it->second;
+    s.destName = AT::SanitizeText(name, 48);
+    if (s.destName.empty())
+        s.destName = "Ziel";
+
+    // Die empfangene Route gehoert jetzt der Sitzung. Sie bleibt nicht als
+    // Kopie in _pendingRoutes zurueck: das Addon sendet sie bei jedem Start neu,
+    // und eine liegengebliebene Route koennte sonst von einem spaeteren
+    // ".at rstart" ohne neue Uebertragung unbemerkt wiederverwendet werden.
+    s.route = std::move(it->second);
+    _pendingRoutes.erase(it);
     s.legIdx = 0;
 
     char buf[160];
@@ -806,8 +847,6 @@ void AutoTravelMgr::Stop(Player* player, std::string const& reason, bool silent)
     {
         if (!silent)
             Msg(player, "AutoTravel ist nicht aktiv.");
-        if (it != _sessions.end() && it->second.state == AT_IDLE)
-            return;
         return;
     }
 
@@ -854,25 +893,74 @@ void AutoTravelMgr::Repath(Player* player)
     s->path.clear();
     s->idx = 0;
     s->flying = false;
+    s->repathAttempts = 0;                 // ein ausdruecklicher Neubeginn: frische Zaehler
+    s->stuckStrikes = 0;
     s->state = AT_CALCULATE_PATH;
     Msg(player, "Pfad wird neu berechnet.");
     PushStatus(player, *s);
 }
 
-void AutoTravelMgr::OnPlayerLeave(Player* player)
+// ---------------------------------------------------------------------------
+// Aufraeumen
+// ---------------------------------------------------------------------------
+//
+// Das Modul registriert bewusst kein PlayerScript (siehe AutoTravel_SC.cpp),
+// bekommt also kein Ausloggen gemeldet. Die Sitzungen raeumt Update() selbst ab;
+// alle uebrigen GUID-Tabellen raeumt dieser Durchlauf alle 30 Sekunden ab.
+// Ohne ihn wuerde jeder Spieler, der je eine Route oder einen Handschlag
+// geschickt hat, bis zum Neustart des Servers einen Eintrag hinterlassen.
+
+void AutoTravelMgr::SweepOrphans()
 {
-    auto it = _sessions.find(player->GetGUID());
-    if (it == _sessions.end())
-        return;
+    auto gone = [](ObjectGuid const& guid)
+    {
+        return ObjectAccessor::FindConnectedPlayer(guid) == nullptr;
+    };
 
-    // Kontrolle IMMER zurueckgeben. Bliebe sie beim Server, saesse der Spieler
-    // beim naechsten Login unter Umstaenden bewegungsunfaehig da.
-    if (it->second.controlTaken)
-        ReleaseControl(player, it->second);
+    std::erase_if(_pendingRoutes, [&](auto const& kv) { return gone(kv.first); });
+    std::erase_if(_calib,         [&](auto const& kv) { return gone(kv.first); });
+    std::erase_if(_addonPlayers,  [&](ObjectGuid const& guid) { return gone(guid); });
 
-    _sessions.erase(it);
-    _pendingRoutes.erase(player->GetGUID());
-    _addonPlayers.erase(player->GetGUID());
+    // Zeitstempel zaehlen nur, solange sie wirken. Das gilt auch fuer Spieler,
+    // die zwischendurch ausgeloggt haben -- die Abklingzeit soll sich nicht
+    // durch Neuanmelden umgehen lassen.
+    uint32 const nowSec = uint32(time(nullptr));
+    std::erase_if(_tpCooldown, [&](auto const& kv) { return nowSec >= kv.second; });
+
+    // Ein Eintrag der Befehlsbremse ist erst entbehrlich, wenn BEIDE Klassen auch
+    // beim groessten Gewicht abgelaufen waeren.
+    uint32 const nowMs = uint32(GameTime::GetGameTimeMS().count());
+    uint32 const longest = ATConf.commandCooldownMs * AT_CMD_MAX_WEIGHT;
+    std::erase_if(_cmdStamp, [&](auto const& kv)
+    {
+        for (uint32 stamp : kv.second)
+            if (stamp != 0 && uint32(nowMs - stamp) < longest)
+                return false;
+        return true;
+    });
+}
+
+void AutoTravelMgr::AbortAllSessions(std::string const& why)
+{
+    for (auto& kv : _sessions)
+    {
+        ATSession& s = kv.second;
+
+        // Nur Spieler in der Welt: Wer gerade die Karte wechselt, bekommt die
+        // Kontrolle vom Client beim Betreten der neuen Welt zurueck.
+        Player* player = ObjectAccessor::FindPlayer(kv.first);
+        if (!player)
+            continue;
+
+        if (s.state != AT_IDLE || s.controlTaken)
+        {
+            HaltMovement(player, s);
+            s.state = AT_IDLE;
+            PushStatus(player, s);
+            Msg(player, why);
+        }
+    }
+    _sessions.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +1001,7 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
                   s.destName.empty() ? "-" : s.destName.c_str(),
                   flags,
                   uint32(s.path.size()),
-                  s.repathAttempts,
+                  std::max(s.repathAttempts, s.stuckStrikes),
                   uint32(s.legIdx + 1),
                   uint32(s.route.size()),
                   progress);
@@ -921,12 +1009,21 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
     Raw(player, buf);
 }
 
+void AutoTravelMgr::SyncStatus(Player* player)
+{
+    ATSession* s = Find(player);
+    if (s && s->state != AT_IDLE)
+        PushStatus(player, *s);
+    else
+        Raw(player, "[AT]S|IDLE|0|-|0|0|0|0|0|0");
+}
+
 void AutoTravelMgr::PrintStatus(Player* player)
 {
     ATSession* s = Find(player);
     if (!s || s->state == AT_IDLE)
     {
-        Raw(player, "[AT]S|IDLE|0|-|0|0|0|0|0|0");
+        SyncStatus(player);
         Msg(player, "Status: bereit.");
         return;
     }
@@ -936,7 +1033,8 @@ void AutoTravelMgr::PrintStatus(Player* player)
                   "Status: %s | Ziel: %s | Etappe %u/%u | Pfadpunkte %u/%u | Versuche %u",
                   ATStateName(s->state), s->destName.c_str(),
                   uint32(s->legIdx + 1), uint32(s->route.size()),
-                  uint32(s->idx), uint32(s->path.size()), s->repathAttempts);
+                  uint32(s->idx), uint32(s->path.size()),
+                  std::max(s->repathAttempts, s->stuckStrikes));
     Msg(player, buf);
     PushStatus(player, *s);
 }
@@ -952,6 +1050,11 @@ void AutoTravelMgr::PrintStatus(Player* player)
 void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
                              bool hasCalib, float pnx, float pny, std::string const& name)
 {
+    if (!ATConf.enable)
+    {
+        Msg(player, "AutoTravel ist auf diesem Server deaktiviert.");
+        return;
+    }
     if (!ATConf.allowTeleport)
     {
         Msg(player, "Teleport ist auf diesem Server deaktiviert.");
@@ -1015,12 +1118,26 @@ void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
         _sessions.erase(it);
     }
 
+    // Abklingzeit und Erfolgsmeldung nur, wenn der Core den Teleport annimmt. Er
+    // lehnt ihn z. B. fuer ungueltige Koordinaten oder einen Spieler im Ladevorgang
+    // ab; wer dann trotzdem warten muss und "Teleport zu ..." liest, wurde nicht
+    // teleportiert.
+    if (!player->TeleportTo(mapId, x, y, z + 0.5f, player->GetOrientation()))
+    {
+        Msg(player, "Der Teleport wurde vom Server abgelehnt.");
+        SyncStatus(player);
+        return;
+    }
     _tpCooldown[player->GetGUID()] = nowSec + ATConf.teleportCooldown;
-    player->TeleportTo(mapId, x, y, z + 0.5f, player->GetOrientation());
+    SyncStatus(player);                    // die laufende Reise (falls eine lief) ist beendet
+
+    std::string shown = AT::SanitizeText(name, 48);
+    if (shown.empty())
+        shown = "Ziel";
 
     char buf[224];
     std::snprintf(buf, sizeof(buf), "Teleport zu %s (%.1f / %.1f / %.1f), %.0f yd.",
-                  name.empty() ? "Ziel" : name.c_str(), x, y, z, dist);
+                  shown.c_str(), x, y, z, dist);
     Msg(player, buf);
 }
 
@@ -1048,9 +1165,14 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
                   player->IsMounted() ? (player->CanFly() ? ", flugfaehig" : ", beritten") : "");
     Msg(player, b);
 
-    auto fix = sATIdFix.find(uiMapId);
-    std::string fixTxt = (fix != sATIdFix.end())
-        ? std::to_string(fix->second) : std::string("noch nicht gelernt");
+    std::string fixTxt = "noch nicht gelernt";
+    auto cit = _calib.find(player->GetGUID());
+    if (cit != _calib.end())
+    {
+        auto fix = cit->second.fix.find(uiMapId);
+        if (fix != cit->second.fix.end())
+            fixTxt = std::to_string(fix->second);
+    }
     std::snprintf(b, sizeof(b), "Karten-ID %u -> WorldMapArea %s | Gegenprobe: %s",
                   uiMapId, fixTxt.c_str(), hasCalib ? "vorhanden" : "fehlt");
     Msg(player, b);

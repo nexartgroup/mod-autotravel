@@ -65,6 +65,72 @@ size_t AutoTravelMgr::NodeCount() const
 // ---------------------------------------------------------------------------
 // Laden
 // ---------------------------------------------------------------------------
+//
+// ACHTUNG, warum hier erst im information_schema nachgesehen wird:
+//
+// mod-playerbots ist laut README optional. Fehlt es, fehlen auch seine Tabellen.
+// Eine einfache SELECT-Abfrage auf eine fehlende Tabelle liefert aber KEIN
+// leeres Ergebnis: MySQLConnection::_HandleMySQLErrno beendet den Core bei
+// ER_NO_SUCH_TABLE und ER_BAD_FIELD_ERROR mit ABORT, nach zehn Sekunden
+// Wartezeit ("Your database structure is not up to date"). Ein Server ohne
+// mod-playerbots waere beim Start abgestuerzt -- genau der Fall, den das Modul
+// angeblich auffaengt.
+//
+// Deshalb: Tabellen UND benoetigte Spalten vorab ueber information_schema
+// pruefen (das nie an einer fehlenden Nutzertabelle scheitert) und nur dann
+// lesen, wenn alles da ist. Ein anderes Spaltenlayout in einer kuenftigen
+// mod-playerbots-Fassung fuehrt so zu einer Warnung statt zu einem Absturz.
+
+namespace
+{
+    // Liefert die (kleingeschriebenen) Spaltennamen einer Tabelle, leer wenn die
+    // Tabelle oder Datenbank nicht existiert. db und table sind geprueft.
+    std::unordered_set<std::string> ColumnsOf(std::string const& db, char const* table)
+    {
+        std::unordered_set<std::string> cols;
+
+        std::string sql =
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '" + db +
+            "' AND TABLE_NAME = '" + table + "'";
+
+        QueryResult res = WorldDatabase.Query(sql);
+        if (!res)
+            return cols;
+
+        do
+        {
+            std::string c = res->Fetch()[0].Get<std::string>();
+            std::transform(c.begin(), c.end(), c.begin(),
+                           [](unsigned char ch) { return char(std::tolower(ch)); });
+            cols.insert(std::move(c));
+        } while (res->NextRow());
+
+        return cols;
+    }
+
+    // true, wenn die Tabelle existiert und alle Spalten hat. Sonst steht in
+    // 'why', was fehlt.
+    bool TableUsable(std::string const& db, char const* table,
+                     std::initializer_list<char const*> required, std::string& why)
+    {
+        std::unordered_set<std::string> have = ColumnsOf(db, table);
+        if (have.empty())
+        {
+            why = std::string("Tabelle '") + db + "." + table + "' nicht gefunden";
+            return false;
+        }
+
+        for (char const* c : required)
+        {
+            if (have.find(c) == have.end())
+            {
+                why = std::string("Tabelle '") + db + "." + table + "' hat keine Spalte '" + c + "'";
+                return false;
+            }
+        }
+        return true;
+    }
+}
 
 void AutoTravelMgr::LoadTravelNodes()
 {
@@ -78,14 +144,27 @@ void AutoTravelMgr::LoadTravelNodes()
         return;
     }
 
-    std::string const& db = ATNodeDb;
+    std::string const& db = ATNodeDb;      // in LoadConfig auf Namenszeichen geprueft
+
+    std::string why;
+    if (!TableUsable(db, "playerbots_travelnode",
+                     { "id", "map_id", "x", "y", "z", "name" }, why)
+        || !TableUsable(db, "playerbots_travelnode_link",
+                        { "node_id", "to_node_id", "type", "distance", "extra_cost" }, why))
+    {
+        LOG_INFO("server.loading",
+                 "mod-autotravel: Keine Reiseknoten benutzbar ({}). Ohne mod-playerbots ist das "
+                 "normal; AutoTravel benutzt dann die Carbonite-Route. Liegen die Tabellen in einer "
+                 "anderen Datenbank, AutoTravel.NodeDatabase anpassen.", why);
+        return;
+    }
 
     std::string sql = "SELECT id, map_id, x, y, z, name FROM `" + db + "`.`playerbots_travelnode`";
-    QueryResult res = WorldDatabase.Query(sql.c_str());
+    QueryResult res = WorldDatabase.Query(sql);
     if (!res)
     {
         LOG_INFO("server.loading",
-                 "mod-autotravel: Keine Reiseknoten gefunden (Datenbank '{}'). "
+                 "mod-autotravel: Die Tabelle der Reiseknoten ist leer (Datenbank '{}'). "
                  "AutoTravel benutzt weiterhin die Carbonite-Route.", db);
         return;
     }
@@ -105,7 +184,7 @@ void AutoTravelMgr::LoadTravelNodes()
 
     sql = "SELECT node_id, to_node_id, type, distance, extra_cost FROM `" + db +
           "`.`playerbots_travelnode_link`";
-    QueryResult lres = WorldDatabase.Query(sql.c_str());
+    QueryResult lres = WorldDatabase.Query(sql);
 
     uint32 linkCount = 0;
     std::unordered_map<uint32, uint32> typeCount;
@@ -127,19 +206,13 @@ void AutoTravelMgr::LoadTravelNodes()
             if (sNodes.find(from) == sNodes.end() || sNodes.find(l.to) == sNodes.end())
                 continue;
 
-            if (l.type != 1)
-            {
-                if (!ATConf.useSpecialLinks)
-                    continue;
-
-                // Sonderverbindungen kosten extra, damit sie nur benutzt
-                // werden, wenn sie wirklich viel Strecke sparen.
-                extra += ATConf.specialLinkCost;
-            }
-
-            l.cost = distance + extra;
-            if (l.cost <= 0.0f)
-                l.cost = 1.0f;
+            // Der Aufschlag fuer Sonderverbindungen (SpecialLinkCost) und der
+            // Schalter UseSpecialLinks wirken erst bei der Suche. So bleibt der
+            // Graph vollstaendig im Speicher, und .at set speciallinks /
+            // specialcost kosten keine Datenbankabfrage mehr.
+            l.baseCost = distance + extra;
+            if (!(l.baseCost > 0.0f))          // auch NaN und negative Werte
+                l.baseCost = 1.0f;
 
             sLinks[from].push_back(l);
             ++linkCount;
@@ -286,7 +359,18 @@ namespace
                 if (banned.find(EdgeId(cur.second, l.to)) != banned.end())
                     continue;
 
-                float nd = g + l.cost;
+                float cost = l.baseCost;
+                if (l.type != 1)
+                {
+                    if (!ATConf.useSpecialLinks)
+                        continue;
+
+                    // Sonderverbindungen kosten extra, damit sie nur benutzt
+                    // werden, wenn sie wirklich viel Strecke sparen.
+                    cost += ATConf.specialLinkCost;
+                }
+
+                float nd = g + cost;
                 auto old = dist.find(l.to);
                 if (old == dist.end() || nd < old->second)
                 {
@@ -576,3 +660,60 @@ void AutoTravelMgr::NodeInfo(Player* player)
                   node.id, node.name.c_str(), d, uint32(links));
     Msg(player, b);
 }
+
+// ---------------------------------------------------------------------------
+// Gesundheitsbericht (.at stats, nur Spielleiter)
+// ---------------------------------------------------------------------------
+
+void AutoTravelMgr::PrintStats(Player* player)
+{
+    char b[320];
+
+    Msg(player, "--- AutoTravel Gesundheitsbericht ---");
+
+    // Sitzungen nach Zustand
+    std::unordered_map<uint32, uint32> byState;
+    for (auto const& kv : _sessions)
+        ++byState[uint32(kv.second.state)];
+
+    std::string states;
+    for (auto const& kv : byState)
+    {
+        if (kv.first == AT_IDLE)
+            continue;
+        states += std::string(ATStateName(ATState(kv.first))) + "=" + std::to_string(kv.second) + " ";
+    }
+
+    std::snprintf(b, sizeof(b), "Sitzungen: %u gesamt | aktiv: %s",
+                  uint32(_sessions.size()), states.empty() ? "keine" : states.c_str());
+    Msg(player, b);
+
+    std::snprintf(b, sizeof(b), "Reisen seit Start: %llu begonnen, %llu angekommen, %llu fehlgeschlagen",
+                  (unsigned long long)_statTravelsStarted, (unsigned long long)_statTravelsArrived,
+                  (unsigned long long)_statTravelsFailed);
+    Msg(player, b);
+
+    std::snprintf(b, sizeof(b), "Wegberechnungen: %llu, davon %llu Mal wegen des Budgets (%u je Takt) verschoben",
+                  (unsigned long long)_statPathCalcs, (unsigned long long)_statPathDeferred,
+                  ATConf.maxPathsPerTick);
+    Msg(player, b);
+
+    std::snprintf(b, sizeof(b), "Befehlsbremse: %llu Befehle abgewiesen (Abstand %u ms)",
+                  (unsigned long long)_statCmdThrottled, ATConf.commandCooldownMs);
+    Msg(player, b);
+
+    std::snprintf(b, sizeof(b),
+                  "Speicher: %u Spieler mit Addon, %u gemerkte Routen, %u Kartenzuordnungen, "
+                  "%u Teleport-Abklingzeiten",
+                  uint32(_addonPlayers.size()), uint32(_pendingRoutes.size()),
+                  uint32(_calib.size()), uint32(_tpCooldown.size()));
+    Msg(player, b);
+
+    size_t links = 0;
+    for (auto const& kv : sLinks)
+        links += kv.second.size();
+    std::snprintf(b, sizeof(b), "Reiseknoten: %u Knoten, %u Verbindungen (Datenbank '%s')",
+                  uint32(sNodes.size()), uint32(links), ATNodeDb.c_str());
+    Msg(player, b);
+}
+

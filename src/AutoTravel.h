@@ -29,6 +29,7 @@
 #include "ObjectGuid.h"
 #include "MoveSplineInitArgs.h"
 
+#include <array>
 #include <cstddef>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,43 @@
 
 class Player;
 class Map;
+
+// ---------------------------------------------------------------------------
+// Protokoll zum Addon
+// ---------------------------------------------------------------------------
+//
+// Das Addon fragt beim Login mit ".at hello" an und bekommt
+//
+//   [AT]H|<modulversion>|<aktiv>|<knoten>|<flug>|<afk>|<protokoll>|<rechte>|<faehigkeiten>
+//
+// Die ersten fuenf Felder stammen aus aelteren Fassungen und behalten Stelle und
+// Bedeutung. <protokoll> zaehlt hoch, wenn sich Nachrichten unvertraeglich
+// aendern; ein Addon mit kleinerer Nummer als der Server (oder umgekehrt) soll
+// das melden, statt Nachrichten falsch zu lesen.
+
+constexpr uint32 AT_PROTOCOL_VERSION = 4;
+constexpr char const* AT_MODULE_VERSION = "4.0";
+
+// Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
+// Bedienelemente aus, die ohnehin abgewiesen wuerden.
+enum ATCapability : uint32
+{
+    AT_CAP_HANDOVER  = 1,    // .at pause / .at resume
+    AT_CAP_ROUTE     = 2,    // .at route / .at rstart
+    AT_CAP_TAXI      = 4,    // Flugmeister werden selbstaendig benutzt
+    AT_CAP_TELEPORT  = 8,    // .at tp ist fuer diesen Spieler erlaubt
+    AT_CAP_SETTINGS  = 16,   // serverweite Einstellungen mit .at set aenderbar
+    AT_CAP_TRANSPORT = 32    // Zeppelin, Schiff, Bahn werden begleitet
+};
+
+// Klassen der Befehlsbremse (siehe AutoTravelMgr::AllowCommand)
+enum ATCmdClass : uint8
+{
+    AT_CMD_HEAVY = 0,     // loest Wegfindung aus
+    AT_CMD_INFO  = 1      // Auskunft, schickt mehrere Zeilen zurueck
+};
+
+constexpr uint32 AT_CMD_MAX_WEIGHT = 10;   // groesster Faktor, den ein Befehl verlangen darf
 
 // ---------------------------------------------------------------------------
 // Zustaende
@@ -121,7 +159,12 @@ struct ATNodeLink
 {
     uint32 to = 0;
     uint8  type = 0;      // 1 = zu Fuss, alles andere = Sonderverbindung
-    float  cost = 0.0f;
+
+    // Kosten aus der Datenbank (Strecke + Zusatzkosten). Der Aufschlag fuer
+    // Sonderverbindungen wird erst bei der Suche addiert, damit sich
+    // SpecialLinkCost und UseSpecialLinks ohne erneutes Laden aus der
+    // Datenbank aendern lassen.
+    float  baseCost = 1.0f;
 };
 
 char const* ATLinkTypeName(uint8 t);
@@ -150,6 +193,22 @@ struct ATConfig
     uint32 chunkPoints        = 12;      // NavMesh-Punkte je Spline-Abschnitt
     float  terrainStep        = 3.0f;    // Abtastung entlang eines Abschnitts
     uint32 updateIntervalMs   = 200;     // Taktweite des Moduls
+
+    // --- Schutz des Weltservers --------------------------------------------
+    // Mindestabstand zwischen zwei aufwaendigen Befehlen EINES Spielers
+    // (start, rstart, tp, resolve, diag, repath, nodes, taxi). Jeder davon
+    // loest Wegfindung auf dem Weltserver-Thread aus.
+    uint32 commandCooldownMs  = 400;
+    // Hoechstzahl neuer Wegberechnungen je Takt, serverweit. Ueberzaehlige
+    // Sitzungen warten einen Takt; wer am laengsten wartet, kommt zuerst dran.
+    // Verhindert, dass viele gleichzeitig startende Reisen den Weltserver fuer
+    // Sekunden anhalten.
+    uint32 maxPathsPerTick    = 3;
+    // Zeitbudget je Takt fuer Wegberechnungen (ms). Eine einzelne Berechnung
+    // laeuft immer; weitere nur, solange die bisherigen zusammen unter dem Budget
+    // blieben. Das Zaehlbudget oben zaehlt Aufrufe, dieses die Kosten: eine
+    // Wegsuche ohne Ergebnis kostet ein Vielfaches einer erfolgreichen.
+    uint32 pathBudgetMs       = 40;
 
     // --- Uebergabe Spieler / Autopilot -------------------------------------
     bool   takeClientControl  = true;
@@ -189,8 +248,10 @@ struct ATConfig
     float  taxiMinSaving      = 0.60f;   // Flug muss so viel Strecke sparen
     float  taxiMaxWalkToNode  = 1200.0f; // Fussweg bis zum Flugmeister
     uint32 taxiMaxCostCopper  = 50000;   // 5 Gold je Flug
-    // Der Core laesst den Abflug nur innerhalb von 2 * INTERACTION_DISTANCE
-    // (10 Yards) zu. Der Wert bleibt bewusst darunter.
+    // Wie nah der Charakter am Flugpunkt stehen muss, bevor das Modul den Flug
+    // startet. Diese Grenze setzt das MODUL: ActivateTaxiPathTo prueft die
+    // Entfernung bei einem Aufruf ohne Flugmeister-NPC nicht (im aktuellen
+    // AzerothCore ist die frueher dort stehende Pruefung nur noch ein Kommentar).
     float  taxiBoardDistance  = 8.0f;
 
     // --- Transporte --------------------------------------------------------
@@ -306,7 +367,6 @@ struct ATSession
     bool    controlTaken = false;
     bool    swimming = false;
     bool    flying = false;             // Luftroute mit eigenem Flugmount
-    bool    flyChecked = false;
     uint32  underwaterTimer = 0;
 
     // Uebergabe
@@ -323,7 +383,19 @@ struct ATSession
     // Feststecken
     float   lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f;
     uint32  stuckTimer = 0;
-    uint32  repathAttempts = 0;
+    uint32  repathAttempts = 0;         // aufeinanderfolgende Fehlschlaege der Wegsuche
+    // Aufeinanderfolgende Messfenster ohne Fortschritt. Bewusst EIGENER Zaehler:
+    // repathAttempts wird nach jeder erfolgreichen Wegsuche auf 0 gesetzt, und
+    // eine Wegsuche gelingt auch dann, wenn der Charakter an derselben Stelle
+    // festhaengt. Mit einem gemeinsamen Zaehler wuerde das Aufgeben nie eintreten.
+    uint32  stuckStrikes = 0;
+
+    // Wegberechnung: wartet die Sitzung auf ihr Budget? Je Takt vergibt Update()
+    // die Berechnungen zuerst an die, die am laengsten gewartet haben. Ohne diese
+    // Alterung koennten wenige Sitzungen mit unerreichbarem Ziel das Budget
+    // jedes Takts aufbrauchen und alle anderen dauerhaft aussperren.
+    uint32  pathWaitTicks = 0;
+    bool    pathGranted = false;
 
     // Reittier
     uint32  mountTimer = 0;
@@ -415,12 +487,32 @@ public:
 
     void NodeInfo(Player* player);
     void TaxiInfo(Player* player);
+    void PrintStats(Player* player);      // Gesundheitsbericht fuer Spielleiter
     size_t NodeCount() const;
 
     bool IsActive(Player* player) const;
 
+    // Rate-Limit fuer Befehle. Liefert false (und meldet es dem Spieler), wenn der
+    // Befehl zu dicht auf den vorigen DERSELBEN Klasse folgt. Die Klassen haben je
+    // einen eigenen Zeitgeber, damit ein Auskunftsbefehl nicht eine Reise
+    // blockiert; 'weight' vervielfacht den Mindestabstand fuer besonders teure
+    // Befehle (".at diag" rechnet bis zu zwoelf Wege).
+    bool AllowCommand(Player* player, ATCmdClass cls = AT_CMD_HEAVY, uint32 weight = 1);
+
+    // Schickt dem Addon den tatsaechlichen Zustand: die laufende Reise oder IDLE.
+    // Gebraucht nach einem abgewiesenen Start. Das Addon wechselt beim Absenden
+    // in "Startet" und wartet auf eine Statuszeile; ohne diese bliebe es dort
+    // haengen, weil eine Absage nur als Text kommt.
+    void SyncStatus(Player* player);
+
+    // Rechte des Spielers als Faehigkeitsmaske fuer die Hello-Antwort.
+    uint32 CapabilitiesFor(Player* player) const;
+
     // --- Aufraeumen --------------------------------------------------------
-    void OnPlayerLeave(Player* player);
+    // Beendet alle Reisen und gibt die Clientkontrolle zurueck. Wird gebraucht,
+    // wenn das Modul zur Laufzeit abgeschaltet wird: ohne das bliebe jeder
+    // fahrende Spieler ohne Steuerung zurueck.
+    void AbortAllSessions(std::string const& why);
 
     // --- Knotengraph (in AutoTravel_Nodes.cpp) -----------------------------
     bool BuildNodeRoute(Player* player, uint32 destMap, float dx, float dy, float dz,
@@ -521,6 +613,11 @@ private:
     ATSession* Find(Player* player);
     ATSession const* Find(Player* player) const;
 
+    // Debugausgabe ist global (AutoTravel.Debug) oder je Sitzung (.at debug)
+    // einschaltbar. Aufrufer mit teurer Textaufbereitung pruefen das VORHER,
+    // statt Zeilen zu formatieren, die dann verworfen werden.
+    static bool DebugEnabled(ATSession const& s) { return ATConf.debug || s.debug; }
+
     // Spieler, deren Addon sich gemeldet hat. Nur bei ihnen wartet der
     // Autopilot nach einem Kampf auf die Ruhemeldung des Clients, statt von
     // sich aus wieder zu uebernehmen -- ohne Addon gaebe es niemanden, der
@@ -530,10 +627,41 @@ private:
     std::unordered_map<ObjectGuid, ATSession> _sessions;
     std::unordered_map<ObjectGuid, uint32> _tpCooldown;
     std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
+    // Rate-Limit: je Spieler und Befehlsklasse der Zeitpunkt des letzten Befehls
+    std::unordered_map<ObjectGuid, std::array<uint32, 2>> _cmdStamp;
+
+    // Zuordnung "Karten-ID des Clients -> WorldMapArea-ID", die der Server aus
+    // der echten Spielerposition gelernt hat. Pro SPIELER gehalten: die Angaben
+    // stammen vom Client, und ein gemeinsamer Speicher haette es jedem Spieler
+    // erlaubt, die Aufloesung fuer alle anderen zu verstellen (und ihn mit
+    // beliebigen Karten-IDs unbegrenzt wachsen zu lassen).
+    struct ATCalibration
+    {
+        std::unordered_map<uint32, uint32> fix;
+        int32 delta = 0;
+        bool  deltaKnown = false;
+    };
+    mutable std::unordered_map<ObjectGuid, ATCalibration> _calib;
+    static constexpr size_t MAX_CALIB_ENTRIES = 64;
+
+    // Raeumt Eintraege von Spielern ab, die nicht mehr verbunden sind. Ohne
+    // PlayerScript (siehe AutoTravel_SC.cpp) ist das der einzige Weg, die
+    // GUID-Tabellen am Wachsen zu hindern.
+    void SweepOrphans();
 
     uint32 _tick = 0;
+    uint32 _sweepTimer = 0;
+    uint32 _pathSpentUs = 0;     // bisher in diesem Takt fuer Wegberechnungen verbraucht
+    uint32 _pathCalls = 0;       // Wegberechnungen in diesem Takt
 
-    friend struct ATOptionAccess;
+    // Zaehler seit dem Start, nur fuer ".at stats"
+    uint64 _statTravelsStarted = 0;
+    uint64 _statTravelsArrived = 0;
+    uint64 _statTravelsFailed  = 0;
+    uint64 _statPathCalcs      = 0;
+    uint64 _statPathDeferred   = 0;   // Takte, in denen das Budget eine Sitzung warten liess
+    uint64 _statCmdThrottled   = 0;
+
 };
 
 #define sAutoTravel AutoTravelMgr::instance()
@@ -548,10 +676,19 @@ namespace AT
     std::string PathTypeName(uint32 t);
 
     bool ParseUInt(std::string const& in, uint32& out);
-    bool ParseInt(std::string const& in, int32& out);
     bool ParseFloat(std::string const& in, float& out);
     bool ParseBool(std::string const& in, bool& out);
     bool ParseNorm(std::string const& in, float& out);
+
+    // Macht Text vom Client fuer das Zeilenprotokoll unschaedlich: keine
+    // Steuerzeichen, kein '|' (Feldtrenner im Protokoll und Escape-Zeichen im
+    // Chat), hoechstens maxBytes Bytes, nie mitten in einem UTF-8-Zeichen
+    // abgeschnitten.
+    std::string SanitizeText(std::string const& in, size_t maxBytes);
+
+    // Datenbankname fuer die Knotentabellen: nur Buchstaben, Ziffern, '_' und
+    // '$', hoechstens 64 Zeichen. Der Name wird in SQL eingesetzt.
+    bool IsSafeIdentifier(std::string const& in);
 }
 
 #endif // MOD_AUTOTRAVEL_H
