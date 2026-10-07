@@ -1,0 +1,28 @@
+name: check
+
+# Uebersetzt das Modul gegen die Header des aktuellen AzerothCore, fuehrt die
+# Unit-Tests aus und prueft die Konfigurationsdatei (siehe tools/check.sh).
+# Das ersetzt keinen echten Bau des Servers.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Abhaengigkeiten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ python3 libboost-all-dev libmysqlclient-dev \
+            libssl-dev libreadline-dev zlib1g-dev libbz2-dev libncurses-dev
+
+      - name: Header von AzerothCore holen
+        run: git clone --depth 1 https://github.com/azerothcore/azerothcore-wotlk /tmp/azerothcore
+
+      - name: Pruefen
+        run: tools/check.sh /tmp/azerothcore
