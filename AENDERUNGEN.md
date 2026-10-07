@@ -1,4 +1,142 @@
+# Version 4.0 -- Pruefung und Haertung
+
+Gepruefte Grundlage: AzerothCore `master` (Oktober 2026), Modul und beide Addons.
+Alle Aussagen ueber den Core stammen aus dessen Quelltext, nicht aus dem
+Gedaechtnis. Was getestet wurde und was nicht, steht am Ende.
+
+## Fehler, die den Weltserver beenden konnten
+
+**Fehlende mod-playerbots-Tabellen beendeten den Server beim Start.** Die README
+versprach, das Modul falle ohne mod-playerbots auf die Carbonite-Route zurueck.
+Tatsaechlich fragte `LoadTravelNodes()` die Tabelle `playerbots_travelnode` mit
+einem einfachen SELECT ab, und `MySQLConnection::_HandleMySQLErrno` ruft bei
+`ER_NO_SUCH_TABLE` und `ER_BAD_FIELD_ERROR` `ABORT` auf. Jetzt wird zuerst
+`information_schema` nach Tabellen und Spalten gefragt; fehlt etwas, steht der
+Grund im Log. Der Datenbankname wird vor dem Einsetzen in SQL geprueft.
+
+**`IsTaximaskNodeKnown` ohne Bereichspruefung.** Der Core indiziert die
+Flugpunktmaske ohne Grenze: Knoten 0 landet auf Feld 255, jeder Knoten ueber 448
+hinter dem Array. Die Knotennummern stammen aus DBC-Daten. `NodeKnownBy()` prueft
+jetzt den Bereich.
+
+## Fehler im Ablauf
+
+* **Der Autopilot gab nie auf, wenn der Charakter festhing.** Der Zaehler fuer
+  "festgefahren" war derselbe wie der fuer "Wegsuche fehlgeschlagen", und der
+  wurde nach jeder erfolgreichen Wegsuche auf 0 gesetzt -- die gelingt auch an
+  derselben Stelle. Ergebnis: Endlosschleife aus Festhaengen und Neuberechnen.
+  Jetzt eigener Zaehler (`stuckStrikes`), der nur durch echten Fortschritt endet.
+* **Reisen ueber einen Kartenwechsel rissen ab.** `Update()` warf jede Sitzung
+  weg, fuer die `ObjectAccessor::FindPlayer` nichts lieferte -- und das liefert
+  nur Spieler *in der Welt*. Waehrend des Ladebildschirms eines Portals oder
+  Zeppelins ist der Spieler verbunden, aber kurz nicht in der Welt. Die Sitzung
+  verschwand genau dann, wenn sie weitergehen sollte. Jetzt
+  `FindConnectedPlayer`; solange der Spieler laedt, ruht die Sitzung.
+* **`.at set enable 0` liess fahrende Spieler ohne Steuerung zurueck.** Der Takt
+  kehrte bei abgeschaltetem Modul sofort zurueck und gab die Kontrolle nie
+  frei. Jetzt beendet `AbortAllSessions()` alle Reisen sauber.
+* **Flug starten.** `StartTaxi()` rief `ActivateTaxiPathTo(nodes, nullptr, 0)`.
+  Mit `spellid == 0` und `InstantFlightPaths = 1` bucht der Core den vollen
+  Fahrpreis ab, versetzt den Spieler ans Ziel und gibt trotzdem `false` zurueck;
+  das Modul meldete "Flug kam nicht zustande" und rechnete von der falschen
+  Stelle weiter. Jetzt `spellid = 1` (die Konvention des Cores fuer eigene
+  Aufrufer). Die dabei entfallende Pruefung des Reittiermodells
+  (`GetTaxiMountDisplayId`) macht das Modul vorher selbst, damit kein
+  unsichtbarer Flug entsteht.
+* `Pause` wird serverseitig geprueft: waehrend Flug oder Transport steuert
+  niemand, das Umschalten haette die Sitzung im naechsten Takt nur
+  zurueckgesetzt.
+* Sicherung gegen eine ungueltige Etappe (`legIdx` ausserhalb der Route).
+
+## Sicherheit
+
+* **Clientangaben lagen in gemeinsamem Speicher.** Die gelernte Zuordnung
+  "Karten-ID des Clients -> WorldMapArea-ID" war global und wurde aus Angaben des
+  Clients gespeist. Jeder Spieler konnte die Zielaufloesung fuer alle anderen
+  verstellen und die Tabelle mit beliebigen IDs unbegrenzt wachsen lassen. Jetzt
+  je Spieler und auf 64 Eintraege begrenzt.
+* **Keine Bremse fuer aufwaendige Befehle.** `.at diag` berechnet bis zu zwoelf
+  Wege auf dem Weltserver-Thread. Jetzt Mindestabstand je Spieler
+  (`CommandCooldownMs`, Standard 400 ms), getrennt nach zwei Klassen: Auskunft
+  (`nodes`, `taxi`, `options`) und aufwaendige Befehle. Ein Befehl kostet ein
+  Mehrfaches des Abstands (`diag` zehnfach, `start`/`rstart` dreifach, sonst
+  einfach), sodass ein Spieler mit `.at diag` nicht schneller sein kann als mit
+  einem Statusbefehl. Dazu ein serverweites Wegberechnungs-Budget je Takt
+  (`MaxPathsPerTick` Wege und `PathBudgetMs` Rechenzeit); wartende Sitzungen
+  kommen nach Wartezeit zuerst dran, damit keine verhungert.
+* **`teleportsec` ueber `.at set`.** Ein Spielleiter konnte die Rechtestufe fuer
+  `.at tp` auf 0 setzen und den Teleport damit fuer alle freischalten. Jetzt
+  nur Administratoren. Der Schluessel wird ausserdem vor der Rechtepruefung
+  kleingeschrieben.
+* Texte vom Client (Zielname) werden vor dem Einsetzen ins Zeilenprotokoll
+  bereinigt; die Zahlenparser lehnen Vorzeichen, Leerraum, Hexschreibweise und
+  Werte ausserhalb des Bereichs ab (`strtoul("-18446744073709551615")` ergab
+  still 1).
+* GUID-Tabellen (`_pendingRoutes`, `_addonPlayers`, Kartenzuordnungen) wuchsen
+  fuer jeden Spieler, der je etwas geschickt hatte, bis zum Neustart. Jetzt
+  Aufraeumdurchlauf alle 30 Sekunden; eine verwendete Route wird sofort
+  entfernt.
+
+## Leistung
+
+* Die Plausibilitaetspruefung der NavMesh-Punkte kostete bis zu vier
+  VMap-Abfragen je Punkt und Kandidat -- bei zwoelf bis vierzehn Kandidaten
+  Zehntausende Strahlabfragen je Wegberechnung. Jetzt hoechstens 24 gleichmaessig
+  verteilte Stichproben mit vorzeitigem Abbruch; kurze Wege werden weiter
+  vollstaendig geprueft. Die Wasserauswertung ebenso (64). Zur Einordnung: der
+  `PathGenerator` des Cores liefert ohnehin hoechstens 74 Punkte je Weg
+  (`MAX_POINT_PATH_LENGTH`); die Zahl der Punkte ist also nach oben begrenzt, die
+  Kosten je Punkt waren das Problem.
+* Debugzeilen wurden auch bei ausgeschaltetem Debug formatiert (samt erneuter
+  Streckenberechnung je Kandidat). Jetzt nur noch bei Bedarf.
+* `.at set speciallinks/specialcost` las frueher den gesamten Knotengraphen neu
+  aus der Datenbank. Der Aufschlag wird jetzt erst bei der Suche addiert.
+
+## Protokoll
+
+* Der Handschlag meldet jetzt Protokollnummer, Rechtestufe und eine
+  Faehigkeitsmaske (siehe README, "Protokoll"). Die ersten fuenf Felder
+  behalten Stelle und Bedeutung; das Statusformat ist unveraendert.
+* Der Server schickt nach dem Handschlag, nach jeder abgewiesenen oder
+  gedrosselten Startanfrage (`start`, `rstart`) und nach einem Teleport eine
+  Statuszeile (`SyncStatus`). Ein Addon, das auf einen Start wartet, erfaehrt so
+  die Absage, statt in "Startet" zu haengen.
+* Neu: `.at stats` (Spielleiter) -- Sitzungen je Zustand, Zaehler,
+  Speicherstand. Fehlgeschlagene Reisen stehen mit Grund im Log
+  (`LOG_DEBUG`, Kategorie `module`).
+
+## Werkzeuge
+
+Die README verwies auf ein Verzeichnis `autotravel-tools/`, das nie eingecheckt
+wurde. Jetzt gibt es `tools/check.sh` (Konfigurationsabgleich, Uebersetzen
+gegen die Header des echten Cores, Unit-Tests) und `tools/gen_conf.py`. Die
+Konfigurationsdatei ist damit tatsaechlich erzeugt statt von Hand gepflegt.
+
+## Was getestet wurde
+
+Getestet (ausgefuehrt):
+* alle Quelldateien gegen die Header von AzerothCore `master` uebersetzt
+  (`-fsyntax-only`, gnu++20), ohne Warnungen in den eigenen Dateien
+* die Unit-Tests der Eingabefunktionen (80 Pruefungen), dazu mit absichtlich
+  eingebauten Fehlern gegengeprueft, dass sie auch anschlagen
+* die Konfigurationsdatei gegen die Registry
+
+Nicht getestet (hier nicht moeglich): Linken, Starten eines Servers,
+tatsaechliches Laufen auf einer Karte, Zusammenspiel mit einem echten Client.
+Die Aenderungen am Zustandsautomaten (Festhaengen, Kartenwechsel) sind
+Codepruefung gegen den Core, kein Laufzeitnachweis.
+
+---
+
 # Was sich geaendert hat
+
+> **Aelterer Abschnitt.** Er stammt aus der vorangegangenen Ueberarbeitung und
+> ist unveraendert uebernommen. Zahlen darin (etwa "89 Eintraege") und einzelne
+> Dateien sind inzwischen ueberholt: die Registry hat 93 Werte, und das dort
+> beschriebene Bedienfenster `AT_GUI.lua` (`/at gui`) liegt nicht im
+> Addon-Repository. Dort gibt es das Panel (`AT_UI.lua`) und die Optionsseite
+> (`AT_Options.lua`). Massgeblich fuer den heutigen Stand ist der Abschnitt
+> "Version 4.0" oben.
 
 Modul und Addon wurden neu geschrieben. Die im Spiel erprobten Loesungen der
 Vorfassung sind erhalten geblieben -- die streckenbasierte Bergstrafe, die
@@ -154,10 +292,14 @@ Zwei Bedingungen, beide einstellbar: der Flug muss mindestens 60 Prozent der
 verbleibenden **Laufstrecke** sparen (die Flugstrecke selbst zaehlt nicht als
 Laufweg), und er darf hoechstens 5 Gold kosten.
 
-Eine Feinheit, die leicht uebersehen wird: der Core laesst den Abflug nur
-innerhalb von `2 * INTERACTION_DISTANCE`, also 10 Yards, zu. Der normale
-Etappenradius von 15 Yards haette jeden Flug mit "zu weit weg" abgelehnt.
-Deshalb gilt vor einem Flugmeister ein eigener, kleinerer Radius.
+Eine Feinheit: vor einem Flugmeister gilt ein eigener, kleinerer Radius
+(`TaxiBoardDistance`, 8 Yards) statt des Etappenradius von 15. Die Fassung 3.x
+begruendete das damit, der Core lasse den Abflug nur innerhalb von
+`2 * INTERACTION_DISTANCE` zu. **Das stimmt im aktuellen AzerothCore nicht
+mehr**: `Player::ActivateTaxiPathTo` prueft die Entfernung bei einem Aufruf ohne
+Flugmeister-NPC nicht. Der kleinere Radius bleibt trotzdem sinnvoll -- er stellt
+sicher, dass der Charakter wirklich am Flugpunkt steht, bevor der Flug
+beginnt -- ist aber eine Entscheidung des Moduls, keine Vorgabe des Cores.
 
 ### Eigenes Flugmount
 
