@@ -247,13 +247,16 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
     player->SetFallInformation(0, player->GetPositionZ());
 
-    char buf[224];
-    std::snprintf(buf, sizeof(buf),
-                  "Abschnitt gestartet: %u Punkte, Schrittweite %.2f, Tempo %.1f, Index %u/%u%s",
-                  uint32(chunk.size()), terrainStep, velocity,
-                  uint32(s.idx), uint32(s.path.size()),
-                  s.flying ? ", Flug" : (water ? ", Wasser" : ""));
-    Dbg(player, s, buf);
+    if (DebugEnabled(s))
+    {
+        char buf[224];
+        std::snprintf(buf, sizeof(buf),
+                      "Abschnitt gestartet: %u Punkte, Schrittweite %.2f, Tempo %.1f, Index %u/%u%s",
+                      uint32(chunk.size()), terrainStep, velocity,
+                      uint32(s.idx), uint32(s.path.size()),
+                      s.flying ? ", Flug" : (water ? ", Wasser" : ""));
+        Dbg(player, s, buf);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +365,6 @@ bool AutoTravelMgr::TryMount(Player* player, ATSession& s)
 
     s.state = AT_MOUNTING;
     s.mountTimer = 0;
-    s.flyChecked = false;
     Dbg(player, s, triedFlying ? "Flugmount wird gerufen." : "Reittier wird gerufen.");
     return true;
 }

@@ -17,8 +17,10 @@
 
 #include "Chat.h"
 #include "Config.h"
+#include "GameTime.h"
 #include "Log.h"
 #include "Player.h"
+#include "WorldSession.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -87,95 +89,6 @@ char const* ATLinkTypeName(uint8 t)
 }
 
 // ---------------------------------------------------------------------------
-// Kleine Helfer
-// ---------------------------------------------------------------------------
-
-namespace AT
-{
-    float Dist2D(float ax, float ay, float bx, float by)
-    {
-        float dx = ax - bx;
-        float dy = ay - by;
-        return std::sqrt(dx * dx + dy * dy);
-    }
-
-    std::string PathTypeName(uint32 t)
-    {
-        std::string out;
-        if (t & 0x01) out += "NORMAL ";
-        if (t & 0x02) out += "SHORTCUT ";
-        if (t & 0x04) out += "INCOMPLETE ";
-        if (t & 0x08) out += "NOPATH ";
-        if (t & 0x10) out += "NOT_USING_PATH ";
-        if (t & 0x20) out += "SHORT ";
-        if (t & 0x40) out += "FARFROMPOLY ";
-        if (out.empty()) out = "BLANK";
-        return out;
-    }
-
-    bool ParseUInt(std::string const& in, uint32& out)
-    {
-        if (in.empty())
-            return false;
-        char* end = nullptr;
-        errno = 0;
-        unsigned long v = std::strtoul(in.c_str(), &end, 10);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0')
-            return false;
-        if (v > 0xFFFFFFFFul)
-            return false;
-        out = uint32(v);
-        return true;
-    }
-
-    bool ParseInt(std::string const& in, int32& out)
-    {
-        if (in.empty())
-            return false;
-        char* end = nullptr;
-        errno = 0;
-        long v = std::strtol(in.c_str(), &end, 10);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0')
-            return false;
-        out = int32(v);
-        return true;
-    }
-
-    bool ParseFloat(std::string const& in, float& out)
-    {
-        if (in.empty())
-            return false;
-        char* end = nullptr;
-        errno = 0;
-        double v = std::strtod(in.c_str(), &end);
-        if (errno == ERANGE || end == in.c_str() || *end != '\0')
-            return false;
-        if (!std::isfinite(v))
-            return false;
-        out = float(v);
-        return true;
-    }
-
-    bool ParseBool(std::string const& in, bool& out)
-    {
-        if (in == "on" || in == "true" || in == "yes" || in == "an")  { out = true;  return true; }
-        if (in == "off" || in == "false" || in == "no" || in == "aus") { out = false; return true; }
-        uint32 v = 0;
-        if (!ParseUInt(in, v) || v > 1)
-            return false;
-        out = (v != 0);
-        return true;
-    }
-
-    bool ParseNorm(std::string const& in, float& out)
-    {
-        if (!ParseFloat(in, out))
-            return false;
-        return out >= 0.0f && out <= 1.0f;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Optionsregistry
 // ---------------------------------------------------------------------------
 //
@@ -219,6 +132,9 @@ namespace
         { "chunk",               "AutoTravel.ChunkPoints",             OPT_UINT,  AT_OFF(chunkPoints),         2,       60,        12,      "NavMesh-Punkte je Spline-Abschnitt" },
         { "step",                "AutoTravel.TerrainStep",             OPT_FLOAT, AT_OFF(terrainStep),         0.5,     10,        3,       "Abtastweite entlang eines Abschnitts (yd)" },
         { "tick",                "AutoTravel.UpdateIntervalMs",        OPT_UINT,  AT_OFF(updateIntervalMs),    50,      1000,      200,     "Taktweite des Moduls (ms)" },
+        { "cmdcooldown",         "AutoTravel.CommandCooldownMs",       OPT_UINT,  AT_OFF(commandCooldownMs),   0,       10000,     400,     "Mindestabstand aufwaendiger Befehle je Spieler (ms, 0 = aus)" },
+        { "pathbudget",          "AutoTravel.MaxPathsPerTick",         OPT_UINT,  AT_OFF(maxPathsPerTick),     1,       50,        3,       "neue Wegberechnungen je Takt, serverweit" },
+        { "pathbudgetms",        "AutoTravel.PathBudgetMs",            OPT_UINT,  AT_OFF(pathBudgetMs),        1,       1000,      40,      "Zeitbudget je Takt fuer Wegberechnungen (ms)" },
 
         { "control",             "AutoTravel.TakeClientControl",       OPT_BOOL,  AT_OFF(takeClientControl),   0,       1,         1,       "Clientkontrolle waehrend der Fahrt uebernehmen" },
         { "combatpause",         "AutoTravel.PauseInCombat",           OPT_BOOL,  AT_OFF(pauseInCombat),       0,       1,         1,       "im Kampf pausieren und Kontrolle abgeben" },
@@ -403,6 +319,16 @@ void AutoTravelMgr::LoadConfig()
                 break;
         }
 
+        // Eine Konfigurationszeile "nan" oder "inf" laeuft an der Bereichsgrenze
+        // vorbei: jeder Vergleich mit NaN ist falsch, begrenzt wuerde also nichts.
+        if (!std::isfinite(v))
+        {
+            LOG_WARN("server.loading",
+                     "mod-autotravel: '{}' ist keine endliche Zahl; es gilt der Standardwert {}.",
+                     o.confName, Format(o.defV, o.type));
+            v = o.defV;
+        }
+
         double applied = v;
         if (!WriteOption(o, v, applied))
         {
@@ -413,7 +339,20 @@ void AutoTravelMgr::LoadConfig()
     }
 
     // Werte, die keine Zahl sind, liegen ausserhalb der Registry.
+    //
+    // Der Datenbankname landet spaeter woertlich in SQL. Eine Konfiguration ist
+    // zwar vertrauenswuerdig, aber ein Tippfehler mit Hochkomma oder Strichpunkt
+    // soll nicht als SQL-Fehler enden -- und der Core beendet sich bei manchen
+    // SQL-Fehlern selbst (siehe LoadTravelNodes).
     ATNodeDb = sConfigMgr->GetOption<std::string>("AutoTravel.NodeDatabase", "acore_playerbots");
+    if (!AT::IsSafeIdentifier(ATNodeDb))
+    {
+        LOG_WARN("server.loading",
+                 "mod-autotravel: AutoTravel.NodeDatabase '{}' ist kein gueltiger Datenbankname "
+                 "(erlaubt: Buchstaben, Ziffern, '_', '$' und '-'). Es gilt 'acore_playerbots'.",
+                 ATNodeDb);
+        ATNodeDb = "acore_playerbots";
+    }
 
     // --- Gegenpruefungen ---------------------------------------------------
     // Zwoelf Plausibilitaetspruefungen der Schwellwerte gegeneinander. Sie
@@ -520,7 +459,7 @@ bool AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
     ATOption const* o = FindOption(k);
     if (!o)
     {
-        Msg(player, "Unbekannte Option '" + key + "'. '.at options' zeigt alle.");
+        Msg(player, "Unbekannte Option '" + AT::SanitizeText(key, 32) + "'. '.at options' zeigt alle.");
         return false;
     }
 
@@ -557,8 +496,10 @@ bool AutoTravelMgr::SetOption(Player* player, std::string const& key, std::strin
                       k.c_str(), Format(applied, o->type).c_str());
     Msg(player, b);
 
-    // Werte, die die Ladezeit betreffen, sofort wirksam machen.
-    if (k == "nodes" || k == "speciallinks" || k == "specialcost")
+    // Nur das Einschalten der Knoten braucht einen Ladevorgang. Die Optionen
+    // speciallinks und specialcost wirken erst bei der Suche (siehe
+    // AutoTravel_Nodes.cpp) und kosten deshalb keine Datenbankabfrage mehr.
+    if (k == "nodes")
         LoadTravelNodes();
 
     return true;
@@ -619,7 +560,7 @@ void AutoTravelMgr::Msg(Player* player, std::string const& text) const
 
 void AutoTravelMgr::Dbg(Player* player, ATSession const& s, std::string const& text) const
 {
-    if (!ATConf.debug && !s.debug)
+    if (!DebugEnabled(s))
         return;
     Raw(player, "[AT]D|" + text);
 }
@@ -633,20 +574,88 @@ void AutoTravelMgr::SetDebug(Player* player, bool on)
         _sessions.erase(player->GetGUID());
 }
 
+uint32 AutoTravelMgr::CapabilitiesFor(Player* player) const
+{
+    uint32 caps = AT_CAP_HANDOVER | AT_CAP_ROUTE;
+    if (ATConf.useTaxi)
+        caps |= AT_CAP_TAXI;
+    if (ATConf.useTransports)
+        caps |= AT_CAP_TRANSPORT;
+
+    WorldSession* session = player ? player->GetSession() : nullptr;
+    AccountTypes sec = session ? session->GetSecurity() : SEC_PLAYER;
+
+    if (ATConf.allowTeleport && sec >= AccountTypes(ATConf.teleportSecurity))
+        caps |= AT_CAP_TELEPORT;
+    if (sec >= SEC_GAMEMASTER)
+        caps |= AT_CAP_SETTINGS;
+    return caps;
+}
+
 // Handshake: das Addon schickt beim Login ".at hello" und wartet auf diese
-// Antwort, bevor es weitere Befehle sendet. Ohne den Handshake wuerde ein
-// fehlendes Servermodul dazu fuehren, dass der Charakter ".at start ..." laut
-// im Chat sagt.
+// Antwort, bevor es weitere Befehle sendet.
+//
+// Warum: fehlt das Servermodul, antwortet AzerothCore auf jeden ".at ..."-Befehl
+// eines normalen Spielers mit "Es gibt keinen solchen Befehl" -- bei jedem Klick.
+// Auf Servern mit AllowPlayerCommands = 0 (nicht Standard) behandelt der Core den
+// Befehl sogar als gewoehnlichen Text, und der Charakter riefe ihn in /sagen
+// (ChatHandler::_ParseCommands). Dazu kommt der eigentliche Nutzen: das Addon
+// erfaehrt Version, Protokoll und Berechtigungen, bevor es etwas sendet.
+//
+//   [AT]H|<modulversion>|<aktiv>|<knoten>|<flug>|<afk>|<protokoll>|<rechte>|<faehigkeiten>
 void AutoTravelMgr::SendHello(Player* player)
 {
     _addonPlayers.insert(player->GetGUID());
 
+    WorldSession* session = player->GetSession();
+    uint32 sec = session ? uint32(session->GetSecurity()) : 0u;
+
     char b[192];
-    std::snprintf(b, sizeof(b), "[AT]H|%s|%u|%u|%u|%u",
-                  "3.2",
+    std::snprintf(b, sizeof(b), "[AT]H|%s|%u|%u|%u|%u|%u|%u|%u",
+                  AT_MODULE_VERSION,
                   ATConf.enable ? 1u : 0u,
                   uint32(NodeCount()),
                   ATConf.useTaxi ? 1u : 0u,
-                  ATConf.suppressAfk ? 1u : 0u);
+                  ATConf.suppressAfk ? 1u : 0u,
+                  AT_PROTOCOL_VERSION,
+                  sec,
+                  CapabilitiesFor(player));
     Raw(player, b);
+
+    // Eine Reise ueberlebt ein Neuladen der Oberflaeche (/reload); das Addon
+    // dagegen beginnt bei IDLE. Mit dem aktuellen Zustand direkt hinter dem
+    // Handschlag stimmt die Anzeige sofort wieder, statt erst bei der naechsten
+    // regulaeren Statuszeile.
+    SyncStatus(player);
+}
+
+// ---------------------------------------------------------------------------
+// Befehlsbremse
+// ---------------------------------------------------------------------------
+//
+// Jeder aufwaendige Befehl startet Wegfindung auf dem Weltserver-Thread. Ein
+// Spieler, der ".at diag" in eine Schleife legt, koennte damit allen anderen
+// die Tickrate nehmen. Die Bremse ist bewusst einfach: ein Mindestabstand je
+// Spieler.
+
+bool AutoTravelMgr::AllowCommand(Player* player, ATCmdClass cls, uint32 weight)
+{
+    uint32 const base = ATConf.commandCooldownMs;
+    if (!base || !player)
+        return true;
+
+    uint32 const cooldown = base * std::min(std::max<uint32>(weight, 1), AT_CMD_MAX_WEIGHT);
+    uint32 const now = uint32(GameTime::GetGameTimeMS().count());
+    uint32& last = _cmdStamp[player->GetGUID()][uint32(cls) & 1];
+
+    // Differenz in uint32: ueberlaeuft die Uhr, stimmt sie trotzdem.
+    if (last != 0 && uint32(now - last) < cooldown)
+    {
+        ++_statCmdThrottled;
+        Msg(player, "Zu schnell - bitte einen Augenblick warten.");
+        return false;
+    }
+
+    last = now ? now : 1;                 // 0 bedeutet "noch nie"
+    return true;
 }

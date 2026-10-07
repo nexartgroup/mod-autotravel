@@ -2,7 +2,7 @@
 # mod-autotravel  --  Konfiguration
 # ---------------------------------------------------------------------------
 # ERZEUGTE DATEI. Nicht von Hand aendern -- sie entsteht aus der Optionsregistry
-# in src/AutoTravel_Config.cpp (Werkzeug: autotravel-tools/gen/gen_conf.py).
+# in src/AutoTravel_Config.cpp (Werkzeug: tools/gen_conf.py).
 #
 # Diese Datei nach autotravel.conf kopieren und DORT aendern. Die .dist wird
 # bei einem Update ueberschrieben, die .conf nicht.
@@ -15,7 +15,8 @@
 #
 # Aenderungen im laufenden Betrieb gelten bis zum naechsten Serverneustart und
 # brauchen Spielleiterrechte. Ausgenommen sind 'arrival' und 'grace': die
-# gelten nur fuer die eigene Reise und darf jeder Spieler setzen.
+# gelten nur fuer die eigene Reise und darf jeder Spieler setzen. 'teleportsec'
+# vergibt Rechte und braucht Administratorrechte.
 #
 # VORAUSSETZUNGEN
 #   * mmaps muessen erzeugt und in worldserver.conf aktiviert sein
@@ -29,7 +30,6 @@
 # ---------------------------------------------------------------------------
 
 [worldserver]
-
 
 #--------------------------------------------------------------------------
 #   Grundbetrieb
@@ -69,6 +69,21 @@ AutoTravel.TerrainStep = 3
 #    erlaubt: 50 bis 1000
 #    Laufzeitschluessel: tick
 AutoTravel.UpdateIntervalMs = 200
+
+#    Mindestabstand aufwaendiger Befehle je Spieler (ms, 0 = aus)
+#    erlaubt: 0 bis 10000
+#    Laufzeitschluessel: cmdcooldown
+AutoTravel.CommandCooldownMs = 400
+
+#    neue Wegberechnungen je Takt, serverweit
+#    erlaubt: 1 bis 50
+#    Laufzeitschluessel: pathbudget
+AutoTravel.MaxPathsPerTick = 3
+
+#    Zeitbudget je Takt fuer Wegberechnungen (ms)
+#    erlaubt: 1 bis 1000
+#    Laufzeitschluessel: pathbudgetms
+AutoTravel.PathBudgetMs = 40
 
 #--------------------------------------------------------------------------
 #   Uebergabe zwischen Spieler und Autopilot
@@ -480,7 +495,7 @@ AutoTravel.StrongTurnPenalty = 5
 AutoTravel.ExtremeTurnPenalty = 12
 
 #    Aufschlag fuer Teilwege
-#    erlaubt: 0 bis 1e+06
+#    erlaubt: 0 bis 1000000
 #    Laufzeitschluessel: incomplete
 AutoTravel.IncompletePathPenalty = 10000
 
@@ -539,5 +554,6 @@ AutoTravel.ContourMaxDistanceFactor = 2.5
 
 #    Datenbank, in der mod-playerbots die Tabellen playerbots_travelnode
 #    und playerbots_travelnode_link haelt. Der Weltserver braucht dort
-#    Leserecht.
+#    Leserecht. Erlaubt sind Buchstaben, Ziffern, '_' und '$'; sonst gilt
+#    der Standardwert.
 AutoTravel.NodeDatabase = "acore_playerbots"

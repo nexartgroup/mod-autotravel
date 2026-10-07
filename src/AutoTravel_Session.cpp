@@ -23,6 +23,7 @@
 #include "AutoTravel.h"
 
 #include "GridDefines.h"
+#include "Log.h"
 #include "Map.h"
 #include "MoveSpline.h"
 #include "ObjectAccessor.h"
@@ -32,8 +33,10 @@
 #include "World.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Takt
@@ -41,8 +44,25 @@
 
 void AutoTravelMgr::Update(uint32 diff)
 {
+    // Das Aufraeumen laeuft auch bei abgeschaltetem Modul: ".at hello", ".at route"
+    // und die Befehlsbremse arbeiten weiter und legen dabei Eintraege je Spieler
+    // an.
+    _sweepTimer += diff;
+    if (_sweepTimer >= 30000)
+    {
+        _sweepTimer = 0;
+        SweepOrphans();
+    }
+
     if (!ATConf.enable)
+    {
+        // Wurde das Modul zur Laufzeit abgeschaltet (.at set enable 0), darf kein
+        // Spieler mit entzogener Steuerung zurueckbleiben: der Takt wuerde ihn
+        // sonst nie wieder anfassen.
+        if (!_sessions.empty())
+            AbortAllSessions("AutoTravel wurde abgeschaltet - die Reise endet.");
         return;
+    }
 
     _tick += diff;
     if (_tick < ATConf.updateIntervalMs)
@@ -51,12 +71,51 @@ void AutoTravelMgr::Update(uint32 diff)
     uint32 d = _tick;
     _tick = 0;
 
+    // --- Wegberechnungen verteilen ------------------------------------------
+    //
+    // Wegberechnungen sind der teuerste Teil eines Taktes. Es gibt zwei Grenzen:
+    // eine Zahl (MaxPathsPerTick) und ein Zeitbudget (PathBudgetMs). Wer an der
+    // Reihe ist, entscheidet die Wartezeit: die Sitzung, die am laengsten wartet,
+    // bekommt zuerst. Ohne das haette die Reihenfolge der Sitzungstabelle den
+    // Ausschlag gegeben, und ein paar Konten mit unerreichbarem Ziel (jede
+    // fehlgeschlagene Berechnung kostet ein Vielfaches einer erfolgreichen)
+    // haetten das Budget jedes Takts aufbrauchen und alle anderen aussperren
+    // koennen.
+    _pathSpentUs = 0;
+    _pathCalls = 0;
+
+    std::vector<ATSession*> waiting;
+    for (auto& kv : _sessions)
+    {
+        kv.second.pathGranted = false;
+        if (kv.second.state == AT_CALCULATE_PATH)
+            waiting.push_back(&kv.second);
+    }
+
+    std::stable_sort(waiting.begin(), waiting.end(),
+                     [](ATSession const* l, ATSession const* r) { return l->pathWaitTicks > r->pathWaitTicks; });
+
+    size_t const grants = std::min<size_t>(waiting.size(), std::max<uint32>(1, ATConf.maxPathsPerTick));
+    for (size_t i = 0; i < grants; ++i)
+        waiting[i]->pathGranted = true;
+
     for (auto it = _sessions.begin(); it != _sessions.end(); )
     {
-        Player* player = ObjectAccessor::FindPlayer(it->first);
-        if (!player || !player->IsInWorld())
+        // FindPlayer() liefert nur Spieler IN der Welt. Wer gerade die Karte
+        // wechselt (Ladebildschirm bei Portal, Zeppelin, Schiff), ist verbunden,
+        // aber kurz nicht in der Welt -- genau der Augenblick, an dem die
+        // Reise weitergehen soll. Die Sitzung darf deshalb nur verschwinden,
+        // wenn der Spieler wirklich nicht mehr verbunden ist.
+        Player* player = ObjectAccessor::FindConnectedPlayer(it->first);
+        if (!player)
         {
             it = _sessions.erase(it);
+            continue;
+        }
+
+        if (!player->IsInWorld())
+        {
+            ++it;                          // Ladebildschirm: im naechsten Takt weiter
             continue;
         }
 
@@ -86,6 +145,16 @@ void AutoTravelMgr::Update(uint32 diff)
 
 void AutoTravelMgr::Finish(Player* player, ATSession& s, std::string const& text, bool ok)
 {
+    if (ok)
+        ++_statTravelsArrived;
+    else
+    {
+        ++_statTravelsFailed;
+        // Fuer die Fehlersuche auf dem Server: warum hat welche Reise geendet?
+        LOG_DEBUG("module", "mod-autotravel: {}: Reise nach '{}' beendet - {}",
+                  player->GetName(), s.destName, text);
+    }
+
     HaltMovement(player, s);
     s.state = ok ? AT_ARRIVED : AT_FAILED;
     PushStatus(player, s);
@@ -110,6 +179,17 @@ void AutoTravelMgr::PauseByPlayer(Player* player, std::string const& why)
 
     if (s->state == AT_PLAYER_CONTROL)
         return;                            // schon uebergeben, nichts zu tun
+
+    // Der Client ist keine Autoritaet: ein Addon (oder jemand, der den Befehl von
+    // Hand tippt) kann ".at pause" in jedem Zustand schicken. Waehrend eines
+    // Fluges oder auf einem Transport steuert ohnehin niemand, und die Sitzung
+    // wuerde im naechsten Takt in denselben Zustand zurueckkehren -- also gar
+    // nicht erst umschalten.
+    if (s->state == AT_WAIT_TAXI || s->state == AT_WAIT_TRANSPORT || s->state == AT_WAIT_MANUAL)
+    {
+        Msg(player, "Jetzt nicht moeglich: in diesem Abschnitt steuert niemand.");
+        return;
+    }
 
     HaltMovement(player, *s);
 
@@ -149,12 +229,14 @@ void AutoTravelMgr::ResumeByPlayer(Player* player)
         s->state = AT_COMBAT_PAUSED;
         s->pausedByPlayer = false;
         s->combatTimer = 0;
+        PushStatus(player, *s);            // sonst zeigt das Addon weiter "Du steuerst"
         return;
     }
 
     s->pausedByPlayer = false;
     s->handoverTimer = 0;
     s->repathAttempts = 0;
+    s->stuckStrikes = 0;
     s->mountTried = false;
     s->rescueCount = 0;
     s->state = AT_CALCULATE_PATH;
@@ -186,7 +268,18 @@ bool AutoTravelMgr::CheckHandover(Player* player, ATSession& s, uint32 diff)
             PushStatus(player, s);
         }
         else
+        {
             s.combatTimer = 0;
+
+            // Waehrend der Kampfpause kam bisher keine Statuszeile mehr: ein Addon,
+            // das mittendrin neu geladen wurde, zeigte bis zum Kampfende IDLE.
+            s.statusTimer += diff;
+            if (s.statusTimer >= 3000)
+            {
+                s.statusTimer = 0;
+                PushStatus(player, s);
+            }
+        }
         return true;
     }
 
@@ -227,6 +320,7 @@ bool AutoTravelMgr::CheckHandover(Player* player, ATSession& s, uint32 diff)
             s.pausedByPlayer = false;
             s.handoverTimer = 0;
             s.repathAttempts = 0;
+            s.stuckStrikes = 0;
             s.mountTried = false;
             Msg(player, "Kampf beendet. Der Autopilot uebernimmt wieder, sobald du ihn laesst.");
             PushStatus(player, s);
@@ -236,6 +330,7 @@ bool AutoTravelMgr::CheckHandover(Player* player, ATSession& s, uint32 diff)
         Msg(player, "Kampf beendet - der Weg wird von hier aus neu berechnet.");
         s.state = AT_CALCULATE_PATH;
         s.repathAttempts = 0;
+        s.stuckStrikes = 0;
         s.mountTried = false;
         PushStatus(player, s);
         return true;
@@ -472,6 +567,7 @@ bool AutoTravelMgr::CheckTransport(Player* player, ATSession& s, uint32 diff)
         }
 
         s.repathAttempts = 0;
+        s.stuckStrikes = 0;
         s.mountTried = false;
         PushStatus(player, s);
         return true;
@@ -503,6 +599,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             Msg(player, "Flug laeuft - AutoTravel wartet auf die Landung.");
             PushStatus(player, s);
         }
+        return;
+    }
+
+    // Sicherung: alles Folgende greift auf s.route[s.legIdx] zu. Die Aufrufer von
+    // AdvanceLeg() beenden die Reise, wenn die Route erschoepft ist; sollte
+    // trotzdem je ein Zustand mit ungueltiger Etappe entstehen, endet die Reise
+    // hier sauber, statt ausserhalb des Vektors zu lesen.
+    if (s.legIdx >= s.route.size())
+    {
+        Finish(player, s, "Interner Fehler: keine gueltige Etappe - Reise beendet.", false);
         return;
     }
 
@@ -626,10 +732,10 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     if (s.flying && !lastLeg)
         radius = std::max(radius, 25.0f);
 
-    // Vor einem Flugmeister muss der Radius dagegen KLEINER sein: der Core
-    // laesst den Abflug nur innerhalb von zwei Interaktionsdistanzen zu. Mit
-    // dem normalen Etappenradius von 15 Yards wuerde der Flug jedes Mal mit
-    // "zu weit weg" abgelehnt.
+    // Vor einem Flugmeister muss der Radius dagegen KLEINER sein. Der Core
+    // prueft die Entfernung bei einem Abflug ohne Flugmeister-NPC (so ruft das
+    // Modul ihn) nicht -- das Modul stellt selbst sicher, dass der Charakter am
+    // Flugpunkt steht, bevor es den Flug startet (taxiBoardDistance).
     if (!lastLeg && s.legIdx < s.route.size() && s.route[s.legIdx].kind == AT_LEG_TAXI)
         radius = std::min(radius, ATConf.taxiBoardDistance);
 
@@ -731,6 +837,8 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             if (s.waitTimer > 8000)
             {
                 s.waitTimer = 0;
+                s.repathAttempts = 0;
+                s.stuckStrikes = 0;
                 s.state = AT_CALCULATE_PATH;
             }
             return;
@@ -824,7 +932,30 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                     return;
             }
 
-            if (!CalculatePath(player, s))
+            // Wegberechnung ist der teuerste Teil des Taktes. Ohne Zuteilung (siehe
+            // Update()) oder bei verbrauchtem Zeitbudget wartet diese Sitzung bis
+            // zum naechsten Takt -- und rueckt dabei in der Reihenfolge vor. Die
+            // erste Berechnung eines Taktes laeuft immer, damit das Zeitbudget
+            // niemanden dauerhaft aussperren kann.
+            if (!s.pathGranted
+                || (_pathCalls > 0 && _pathSpentUs >= ATConf.pathBudgetMs * 1000u))
+            {
+                ++s.pathWaitTicks;
+                ++_statPathDeferred;
+                return;
+            }
+            s.pathGranted = false;
+            s.pathWaitTicks = 0;
+            ++_statPathCalcs;
+            ++_pathCalls;
+
+            auto const pathStart = std::chrono::steady_clock::now();
+            bool const pathOk = CalculatePath(player, s);
+            _pathSpentUs += uint32(std::min<int64>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - pathStart).count(), 0x7FFFFFFF));
+
+            if (!pathOk)
             {
                 ++s.repathAttempts;
 
@@ -908,16 +1039,21 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                     if (moved < ATConf.stuckMinDistance)
                     {
-                        ++s.repathAttempts;
+                        // Eigener Zaehler, nicht repathAttempts: der wird nach
+                        // jeder erfolgreichen Wegsuche zurueckgesetzt, und die
+                        // gelingt auch dann, wenn der Charakter an derselben
+                        // Stelle festhaengt. Das Aufgeben trat damit nie ein --
+                        // der Autopilot rechnete endlos neu.
+                        ++s.stuckStrikes;
 
                         char buf[192];
                         std::snprintf(buf, sizeof(buf),
                                       "Festgefahren (%.1f yd in %u ms) - Versuch %u von %u.",
                                       moved, ATConf.stuckTimeoutMs,
-                                      s.repathAttempts, ATConf.maxRepathAttempts);
+                                      s.stuckStrikes, ATConf.maxRepathAttempts);
                         Msg(player, buf);
 
-                        if (s.repathAttempts >= ATConf.maxRepathAttempts)
+                        if (s.stuckStrikes >= ATConf.maxRepathAttempts)
                         {
                             Finish(player, s, "Kein Fortschritt moeglich - der Autopilot gibt auf.", false);
                             return;
@@ -930,6 +1066,9 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                         s.state = AT_CALCULATE_PATH;
                         return;
                     }
+
+                    // Das Messfenster hat Fortschritt gezeigt: die Serie ist vorbei.
+                    s.stuckStrikes = 0;
                 }
             }
 

@@ -43,6 +43,7 @@
 #include "DBCStores.h"
 #include "Log.h"
 #include "Map.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "SpellAuraDefines.h"
 
@@ -96,6 +97,14 @@ namespace
 
     bool NodeKnownBy(uint32 nodeId, Player* player)
     {
+        // PlayerTaxi::IsTaximaskNodeKnown() indiziert die Maske ohne
+        // Bereichspruefung: Knoten 0 landet auf Feld 255, jeder Knoten ueber
+        // 32 * TaxiMaskSize hinter dem Array. Die Knotennummern stammen aus
+        // DBC-Daten, die bei einem Server mit angepassten DBCs durchaus groesser
+        // sein koennen als die Maske -- dann wird eben "unbekannt" gemeldet,
+        // statt ausserhalb des Speichers zu lesen.
+        if (nodeId == 0 || nodeId > TaxiMaskSize * 32)
+            return false;
         return player->m_taxi.IsTaximaskNodeKnown(nodeId);
     }
 
@@ -551,8 +560,9 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
         return false;
     }
 
-    // Der Core verlangt: nicht beritten, Kontrolle beim Client, nah genug am
-    // Flugpunkt. Die ersten beiden Punkte werden hier hergestellt.
+    // Der Core verlangt: nicht beritten (bei Aufruf mit NPC), Kontrolle beim
+    // Client. Beides wird hier hergestellt; die Naehe zum Flugpunkt stellt der
+    // Aufrufer (UpdateSession) vor dem Aufruf sicher.
     ReleaseControl(player, s);
 
     if (player->IsMounted())
@@ -579,7 +589,22 @@ bool AutoTravelMgr::StartTaxi(Player* player, ATSession& s, ATLeg const& leg)
         return false;
     }
 
-    if (!player->ActivateTaxiPathTo(nodes, nullptr, 0))
+    // Ohne Reittiermodell fuer diesen Flugpunkt wuerde der Flug mit Modell 0
+    // starten -- der Charakter flaege unsichtbar. Die Pruefung nimmt der Core
+    // nur vor, wenn man ihm spellid 0 uebergibt (siehe unten); sie wird deshalb
+    // hier selbst gemacht.
+    if (sObjectMgr->GetTaxiMountDisplayId(nodes[0], player->GetTeamId(true), true) == 0)
+    {
+        Dbg(player, s, "Flug nicht moeglich: fuer diesen Flugpunkt gibt es kein Reittiermodell.");
+        return false;
+    }
+
+    // spellid 1 ist die Konvention des Cores fuer eigene Aufrufer ("custom calls
+    // use spellid = 1", Player.cpp). Mit 0 wuerde ein Server mit
+    // InstantFlightPaths = 1 den vollen Fahrpreis abbuchen, den Spieler ans Ziel
+    // versetzen und trotzdem false zurueckgeben -- das Modul haette dann "Flug
+    // kam nicht zustande" gemeldet und von der falschen Stelle aus weitergerechnet.
+    if (!player->ActivateTaxiPathTo(nodes, nullptr, 1))
     {
         Dbg(player, s, "ActivateTaxiPathTo wurde vom Core abgelehnt.");
         return false;
