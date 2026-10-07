@@ -165,4 +165,88 @@ namespace AT
         }
         return true;
     }
+    bool SplineFitsPacket(Movement::PointsArray const& pts)
+    {
+        size_t const n = pts.size();
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (!std::isfinite(pts[i].x) || !std::isfinite(pts[i].y) || !std::isfinite(pts[i].z))
+                return false;
+        }
+
+        if (n < 3)
+            return true;                       // ohne Zwischenpunkte wird nichts gepackt
+
+        G3D::Vector3 const mid = (pts.front() + pts.back()) * 0.5f;
+
+        // Wie WriteLinearPath: nur die Zwischenpunkte werden kodiert.
+        for (size_t i = 1; i + 1 < n; ++i)
+        {
+            if (std::fabs(pts[i].x - mid.x) > SPLINE_PACK_LIMIT_XY
+                || std::fabs(pts[i].y - mid.y) > SPLINE_PACK_LIMIT_XY
+                || std::fabs(pts[i].z - mid.z) > SPLINE_PACK_LIMIT_Z)
+                return false;
+        }
+        return true;
+    }
+
+    bool SplitLongSegments(Movement::PointsArray& path, size_t from,
+                           G3D::Vector3 const& origin, float maxLen)
+    {
+        if (!(maxLen > 1.0f) || from >= path.size())
+            return false;
+
+        // Erst feststellen, ob ueberhaupt etwas zu tun ist: der Normalfall
+        // (kurze Segmente) soll nichts kopieren.
+        bool needed = false;
+        float px = origin.x;
+        float py = origin.y;
+        for (size_t i = from; i < path.size(); ++i)
+        {
+            if (Dist2D(path[i].x, path[i].y, px, py) > maxLen)
+            {
+                needed = true;
+                break;
+            }
+            px = path[i].x;
+            py = path[i].y;
+        }
+        if (!needed)
+            return false;
+
+        Movement::PointsArray out(path.begin(), path.begin() + from);
+        out.reserve(path.size() + 32);
+
+        float startX = origin.x;
+        float startY = origin.y;
+        float startZ = (from > 0) ? path[from - 1].z : origin.z;
+
+        for (size_t i = from; i < path.size(); ++i)
+        {
+            G3D::Vector3 const t = path[i];
+            float const len = Dist2D(t.x, t.y, startX, startY);
+
+            // Obergrenze gegen Ausreisser: 400 Stuecke sind 16 km bei 40 yd.
+            uint32 pieces = std::max<uint32>(1, uint32(std::ceil(len / maxLen)));
+            if (pieces > 400)
+                pieces = 400;
+
+            for (uint32 k = 1; k < pieces; ++k)
+            {
+                float const f = float(k) / float(pieces);
+                out.push_back(G3D::Vector3(startX + (t.x - startX) * f,
+                                           startY + (t.y - startY) * f,
+                                           startZ + (t.z - startZ) * f));
+            }
+            out.push_back(t);
+
+            startX = t.x;
+            startY = t.y;
+            startZ = t.z;
+        }
+
+        path.swap(out);
+        return true;
+    }
 }

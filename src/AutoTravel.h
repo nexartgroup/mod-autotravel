@@ -689,6 +689,37 @@ namespace AT
     // Datenbankname fuer die Knotentabellen: nur Buchstaben, Ziffern, '_' und
     // '$', hoechstens 64 Zeichen. Der Name wird in SQL eingesetzt.
     bool IsSafeIdentifier(std::string const& in);
+
+    // --- Grenzen der Spline-Pakete ------------------------------------------
+    //
+    // SMSG_MONSTER_MOVE kodiert die Zwischenpunkte eines gewoehnlichen (nicht
+    // glatten) Splines als Abstand zur MITTE von erstem und letztem Punkt, in
+    // 11 / 11 / 10 Bit zu je 0,25 yd: x und y erreichen +-256 yd, z +-128 yd.
+    // Was darueber liegt, wird abgeschnitten, und der Client zeichnet einen
+    // voellig anderen Weg -- er "fliegt" mit dem Mehrfachen des Tempos ueber die
+    // Karte, weil die Dauer aus dem WAHREN Weg berechnet wurde. Der Core prueft
+    // das nicht (MoveSplineInitArgs::_checkPathBounds ist auskommentiert).
+    //
+    // Die Grenzen hier liegen mit Absicht deutlich unter den harten Werten.
+    constexpr float SPLINE_PACK_LIMIT_XY = 220.0f;
+    constexpr float SPLINE_PACK_LIMIT_Z  = 100.0f;
+
+    // Laengstes Wegsegment (horizontal, yd), das als EIN Stueck in einen Abschnitt
+    // geht. Laengere werden vorher geteilt: ein Segment ueber den ganzen See
+    // waere sonst nicht zerlegbar, und Wasser/Land liesse sich nicht trennen.
+    constexpr float SPLINE_MAX_SEGMENT = 40.0f;
+
+    // Passen alle Zwischenpunkte in die Paketkodierung (siehe oben)?
+    bool SplineFitsPacket(Movement::PointsArray const& pts);
+
+    // Teilt jedes Segment ab Index 'from', das horizontal laenger als maxLen ist,
+    // in gleich lange Stuecke. Das erste Segment beginnt bei 'origin' (der
+    // Spielerposition), die folgenden beim vorigen Punkt. Hoehen werden linear
+    // zwischen den Segmentenden verteilt -- wie es LaunchChunk fuer die Sollhoehe
+    // ohnehin tut, die Auswahl der Bodenflaeche aendert sich dadurch nicht.
+    // Rueckgabe: true, wenn etwas geteilt wurde. 'from' bleibt gueltig.
+    bool SplitLongSegments(Movement::PointsArray& path, size_t from,
+                           G3D::Vector3 const& origin, float maxLen);
 }
 
 #endif // MOD_AUTOTRAVEL_H
