@@ -232,13 +232,23 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
             else
                 z = expectedZ;                 // gar keine Hoehe: Route glauben
 
-            // Wasser: die Reisehoehe ist die Oberflaeche, nicht der Grund.
-            float base = (ground > INVALID_HEIGHT) ? ground : z;
-            float travel = TravelZ(player, x, y, base);
-            if (travel > z)
+            // Wasser: die Reisehoehe ist die Oberflaeche, nicht der Grund. Ob der
+            // Punkt nass ist, wird DIREKT erfragt und nicht daran abgelesen, ob die
+            // Hoehe angehoben wurde: BestGroundZ() liefert ueber tiefem Wasser schon
+            // die Oberflaeche, TravelZ() hob dann nichts mehr an, und der Punkt
+            // zaehlte als Land -- der See waere mit Landtempo gelaufen.
+            float const base = (ground > INVALID_HEIGHT) ? ground : z;
+            float level = INVALID_HEIGHT;
+            float bed = INVALID_HEIGHT;
+            if (WaterSurface(player, x, y, base + 2.0f, level, bed))
             {
-                z = travel;
-                ++waterSamples;
+                float const swimZ = level - ATConf.swimSurfaceOffset;
+                if (swimZ > bed)
+                {
+                    ++waterSamples;
+                    if (swimZ > z)
+                        z = swimZ;
+                }
             }
 
             chunk.push_back(G3D::Vector3(x, y, z));
