@@ -1,3 +1,63 @@
+# Version 4.0.2 -- Ziele auf einem anderen Kontinent
+
+Gemeldet: `.at start` auf ein Ziel in den Oestlichen Koenigreichen, waehrend der
+Charakter in Kalimdor steht, brach mit "Das Ziel liegt auf einer anderen Karte
+(Map 0)." ab.
+
+## Ursache
+
+Die README versprach seit 4.0, ein Ziel auf einer anderen Karte werde "ueber den
+Knotengraphen oder einen Transport erreicht". Die Routenplanung kann das auch:
+`BuildNodeRoute` nimmt eine Zielkarte entgegen, die Knoten tragen ihre Karte,
+und mod-playerbots erzeugt Schiffs-, Zeppelin- und Portalverbindungen ueber
+Kartengrenzen (`TravelNodeMap::generateTransportNodes`). Nur kam die Planung nie
+zum Zug: `Start()` loeste das Ziel zuerst ueber `ResolveWorld` auf, und das
+verlangte, dass es auf der Karte des Spielers liegt.
+
+## Aenderungen
+
+* `MapToWorld` und `ResolveWorld` koennen ein Ziel auf einer anderen Karte
+  aufloesen (nur auf ausdrueckliche Anfrage; `.at tp`, `.at diag` und
+  `.at resolve` bleiben bei der alten Regel). Aus der Zone des Ziels ergibt sich
+  die Karte und x/y; die Hoehe laesst sich dort nicht abfragen, denn das
+  Gelaende ist nur fuer die Karte des Spielers geladen.
+* `ApplyPlannedRoute` plant bei einem Ziel auf einer anderen Karte nur noch ueber
+  den Knotengraphen: kein Flugplan (der bliebe auf der Karte), keine
+  Carbonite-Stuetzpunkte als Rueckfall (ein Kontinent ist nicht zu Fuss zu
+  erreichen). Gibt es keine Verbindung, bricht die Reise mit einer klaren
+  Meldung ab, die nennt, was fehlt (Knoten nicht geladen, kein Knoten in
+  Reichweite, keine Verbindung).
+* Der Zielpunkt merkt sich, dass seine Hoehe fehlt (`ATLeg::groundPending`).
+  Sobald die Reise ihn erreicht und der Spieler auf der Zielkarte steht, wird er
+  vollstaendig aufgeloest -- mit Hoehe und der Zonenpruefung, die eine um eins
+  verschobene Karten-ID korrigiert. Bis dahin gilt die vorlaeufige x/y-Position
+  fuer die Wahl des letzten Knotens.
+* Statuszeile: ueber eine Kartengrenze sind Koordinaten nicht vergleichbar. Die
+  Restentfernung gilt dann bis zur aktuellen Etappe (oder zum Endziel, sobald der
+  Spieler auf dessen Karte steht), der Fortschritt kommt aus der Etappenzahl.
+* Der Ablauf an Anlegern und Portalen war vorhanden und bleibt unveraendert:
+  AutoTravel bringt den Charakter hin, **Schiff, Zeppelin oder Portal betritt der
+  Spieler selbst**, nach dem Aussteigen oder dem Kartenwechsel geht es weiter.
+
+## Voraussetzungen und Grenzen
+
+* Die Reiseknoten von mod-playerbots muessen geladen sein (`.at nodes` zeigt es),
+  und der Graph muss eine Verbindung zwischen den Karten enthalten. Das Modul
+  erzeugt keine eigenen Verbindungen.
+* Fehlt dem Charakter ein Flugpunkt, den die Route braucht, sperrt die Planung
+  die Verbindung und sucht neu (wie bisher).
+
+## Was getestet wurde
+
+Uebersetzt gegen die Header von AzerothCore `master`; die Zuordnung der
+Verbindungstypen (1 Laufen, 2 Portal, 3 Transport, 4 Flug, 5 Zauber -> manuell)
+wurde gegen den Quelltext von mod-playerbots geprueft. **Nicht getestet** ist die
+Reise selbst: weder mit einer echten Reiseknoten-Datenbank noch im Spiel. Ob der
+Graph auf dem Server eine nutzbare Verbindung zwischen Kalimdor und den
+Oestlichen Koenigreichen enthaelt, laesst sich nur dort feststellen.
+
+---
+
 # Version 4.0.1 -- Der Charakter "fliegt" ueber die Karte
 
 Gemeldet: Bei laengeren Strecken gleitet der Charakter sehr schnell durch die
