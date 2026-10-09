@@ -397,7 +397,7 @@ bool AutoTravelMgr::BuildTaxiPlan(Player* player, uint32 destMap,
         note = "hier gibt es keine Flugrouten";
         return false;
     }
-    if (!destMap)
+    if (destMap == AT_NO_MAP)
         destMap = player->GetMapId();
 
     float const walkDirect = player->GetExactDist2d(dx, dy);

@@ -431,7 +431,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
     }
 
     uint32 startMap = player->GetMapId();
-    if (!destMap)
+    if (destMap == AT_NO_MAP)
         destMap = startMap;
 
     float dStart = 0.0f, dEnd = 0.0f;
