@@ -448,7 +448,7 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
         return false;
     }
 
-    uint32 areaMap = 0;
+    uint32 areaMap = AT_NO_MAP;
     if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err,
                     allowOtherMap ? &areaMap : nullptr))
         return false;
@@ -457,7 +457,7 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
 
     // Ziel auf einer anderen Karte: x/y stehen fest, die Hoehe laesst sich dort
     // nicht abfragen (das Gelaende ist nur fuer die Karte des Spielers geladen).
-    if (allowOtherMap && areaMap && areaMap != player->GetMapId())
+    if (allowOtherMap && areaMap != AT_NO_MAP && areaMap != player->GetMapId())
     {
         mapId = areaMap;
         z = 0.0f;
@@ -587,14 +587,14 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
 
         // Etappen auf einer anderen Karte kann der Laeufer nicht anfahren. Sie
         // gehoeren zu einem Transport oder Portal und werden dort behandelt.
-        if (leg.mapId && leg.mapId != player->GetMapId() && leg.kind == AT_LEG_WALK)
+        if (leg.mapId != AT_NO_MAP && leg.mapId != player->GetMapId() && leg.kind == AT_LEG_WALK)
         {
             Dbg(player, s, "Stuetzpunkt liegt auf einer anderen Karte - uebersprungen.");
             ++s.legIdx;
             continue;
         }
 
-        s.mapId = leg.mapId ? leg.mapId : player->GetMapId();
+        s.mapId = (leg.mapId != AT_NO_MAP) ? leg.mapId : player->GetMapId();
         s.destX = leg.wx;
         s.destY = leg.wy;
         s.destZ = leg.wz;
@@ -636,7 +636,7 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
     // Liegt das Ziel auf einer anderen Karte, sind Koordinaten nicht vergleichbar:
     // keine Luftlinie, kein Flug dorthin, und die Carbonite-Stuetzpunkte helfen
     // nicht -- ein Kontinent ist nur ueber Schiff, Zeppelin oder Portal erreichbar.
-    bool const crossMap = (last.mapId && last.mapId != player->GetMapId());
+    bool const crossMap = (last.mapId != AT_NO_MAP && last.mapId != player->GetMapId());
 
     s.finalMapId = last.mapId;
     s.finalX = last.wx;
@@ -754,7 +754,7 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 
     // Bei einem Kartenwechsel gibt es keine vergleichbare Luftlinie; der
     // Fortschritt kommt dann aus der Etappenzahl (RemainingForStatus).
-    if (s.startDistance <= 0.0f && (!s.finalMapId || s.finalMapId == s.startMapId))
+    if (s.startDistance <= 0.0f && (s.finalMapId == AT_NO_MAP || s.finalMapId == s.startMapId))
         s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
 
     Msg(player, "Reise gestartet: " + s.destName);
@@ -1082,7 +1082,8 @@ void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
     dist = 0.0f;
     progress = 0;
 
-    bool const crossMap = s.finalMapId && s.startMapId && s.finalMapId != s.startMapId;
+    bool const crossMap = s.finalMapId != AT_NO_MAP && s.startMapId != AT_NO_MAP
+                          && s.finalMapId != s.startMapId;
 
     if (!crossMap)
     {

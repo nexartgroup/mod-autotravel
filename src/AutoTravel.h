@@ -119,6 +119,12 @@ enum ATLegKind : uint8
     AT_LEG_MANUAL         // Sonderverbindung ohne Automatik
 };
 
+// "Karte nicht bekannt". NICHT 0: die Karte 0 sind die Oestlichen Koenigreiche
+// (Sturmwind, Eisenschmiede ...). Mit 0 als Platzhalter galt jedes Ziel dort als
+// "gleiche Karte wie der Spieler" -- ein Charakter in Kalimdor lief dann zu den
+// Koordinaten von Sturmwind, die dort irgendwo im Sueden liegen.
+constexpr uint32 AT_NO_MAP = 0xFFFFFFFFu;
+
 struct ATLeg
 {
     // Quelle A: Kartenkoordinaten vom Addon
@@ -126,7 +132,7 @@ struct ATLeg
     float  nx = 0.0f, ny = 0.0f;
 
     // Quelle B: fertige Weltkoordinaten
-    uint32 mapId = 0;
+    uint32 mapId = AT_NO_MAP;
     float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
     bool   resolved = false;
 
@@ -352,7 +358,7 @@ struct ATSession
     ATState state = AT_IDLE;
 
     // Reiseziel (Endpunkt der Route)
-    uint32  finalMapId = 0;
+    uint32  finalMapId = AT_NO_MAP;
     float   finalX = 0.0f, finalY = 0.0f, finalZ = 0.0f;
     std::string destName;
 
@@ -414,7 +420,7 @@ struct ATSession
     // Anzeige
     uint32  statusTimer = 0;
     float   startDistance = 0.0f;
-    uint32  startMapId = 0;             // Karte beim Start; ungleich finalMapId = Kartenwechsel
+    uint32  startMapId = AT_NO_MAP;     // Karte beim Start; ungleich finalMapId = Kartenwechsel
 
     // Sitzungsbezogene Uebersteuerungen
     float   arrivalOverride = 0.0f;

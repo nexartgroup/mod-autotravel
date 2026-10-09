@@ -1,3 +1,44 @@
+# Version 4.0.3 -- Karte 0 galt als "keine Karte"
+
+Gemeldet: Ziel Hafen von Sturmwind, Charakter bei Ratschet (Kalimdor). Die Reise
+startete, der Charakter lief aber nach Sueden. Der Teleport meldete "Das Ziel
+liegt auf einer anderen Karte (Map 0)".
+
+## Ursache
+
+Die Karten-ID 0 sind die Oestlichen Koenigreiche -- Sturmwind, Eisenschmiede,
+Booty Bay. An mehreren Stellen stand 0 aber fuer "Karte unbekannt":
+
+* `ResolveWorld` (neu in 4.0.2) pruefte `areaMap && areaMap != Spielerkarte`.
+  Fuer Sturmwind (Karte 0) war das falsch, das Ziel galt als Ziel auf der
+  Karte des Spielers, und die Hoehe wurde auf Kalimdor abgefragt, an den
+  Koordinaten von Sturmwind. Dort liegt irgendwo im Sueden von Ratschet etwas,
+  das eine Hoehe lieferte, und der Charakter lief darauf zu.
+* Aus demselben Grund war `crossMap` in `ApplyPlannedRoute` falsch, die
+  Knotenroute wurde nie ueber die Kartengrenze gesucht, und `BuildNodeRoute` und
+  `BuildTaxiPlan` ersetzten eine Zielkarte 0 durch die Karte des Spielers.
+* `SetLegTarget` (aelter) ordnete jeder Etappe auf Karte 0 die Karte des Spielers
+  zu und ueberging die Pruefung "andere Karte".
+
+## Aenderungen
+
+* Neue Konstante `AT_NO_MAP` (0xFFFFFFFF) steht fuer "Karte unbekannt"; sie ist
+  der Standardwert fuer `ATLeg::mapId`, `ATSession::finalMapId` und `startMapId`.
+  Alle Pruefungen darauf wurden umgestellt, auch in `BuildNodeRoute` und
+  `BuildTaxiPlan`.
+* Nicht geaendert: `.at tp` springt weiterhin nur innerhalb einer Karte. Ein
+  Teleport auf einen anderen Kontinent braeuchte eine Hoehe, die sich dort nicht
+  abfragen laesst.
+
+## Was getestet wurde
+
+Uebersetzt gegen die Header von AzerothCore `master`. Die Aenderung betrifft
+Funktionen, die einen Spieler und eine Karte brauchen; sie sind nicht als
+Unit-Test abgedeckt. **Nicht getestet** ist die Reise selbst, weder im Spiel noch
+mit einer echten Reiseknoten-Datenbank.
+
+---
+
 # Version 4.0.2 -- Ziele auf einem anderen Kontinent
 
 Gemeldet: `.at start` auf ein Ziel in den Oestlichen Koenigreichen, waehrend der
