@@ -274,7 +274,8 @@ void AutoTravelMgr::LearnMapId(Player* player, uint32 clientMapId, float pnx, fl
 
 bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                bool hasCalib, float pnx, float pny,
-                               float& outX, float& outY, std::string& err) const
+                               float& outX, float& outY, std::string& err,
+                               uint32* targetMap) const
 {
     if (!sATMapAreasLoaded)
     {
@@ -370,7 +371,9 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
             err = "Unbekannte Karten-ID " + std::to_string(uiMapId) + ".";
             return false;
         }
-        if (it->second.mapId != player->GetMapId())
+        // Ein Ziel auf einer anderen Karte (anderer Kontinent, Instanz) ist nur
+        // dann ein Fehler, wenn der Aufrufer damit nicht umgehen kann.
+        if (it->second.mapId != player->GetMapId() && !targetMap)
         {
             err = "Das Ziel liegt auf einer anderen Karte (Map " +
                   std::to_string(it->second.mapId) + ").";
@@ -381,6 +384,15 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 
     ATMapArea const& e = sATMapAreas.find(chosen)->second;
     ApplyArea(e, swapped, nx, ny, outX, outY);
+
+    if (targetMap)
+        *targetMap = e.mapId;
+
+    // Auf einer fremden Karte gibt es fuer diesen Spieler kein Gelaende, gegen das
+    // sich die Zone pruefen liesse. Das holt ResolveWorld nach, sobald der
+    // Spieler dort ist (SetLegTarget).
+    if (e.mapId != player->GetMapId())
+        return true;
 
     // --- Gegenprobe ueber die Zone -----------------------------------------
     // Der aufgeloeste Punkt muss in der Zone liegen, die zu diesem
@@ -428,7 +440,7 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                  bool hasCalib, float pnx, float pny,
                                  float& x, float& y, float& z, uint32& mapId,
-                                 std::string& err) const
+                                 std::string& err, bool allowOtherMap) const
 {
     if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f)
     {
@@ -436,10 +448,21 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
         return false;
     }
 
-    if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err))
+    uint32 areaMap = 0;
+    if (!MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, err,
+                    allowOtherMap ? &areaMap : nullptr))
         return false;
 
     mapId = player->GetMapId();
+
+    // Ziel auf einer anderen Karte: x/y stehen fest, die Hoehe laesst sich dort
+    // nicht abfragen (das Gelaende ist nur fuer die Karte des Spielers geladen).
+    if (allowOtherMap && areaMap && areaMap != player->GetMapId())
+    {
+        mapId = areaMap;
+        z = 0.0f;
+        return true;
+    }
 
     z = BestGroundZ(player, x, y);
     if (z <= INVALID_HEIGHT)
@@ -537,6 +560,31 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
             leg.resolved = true;
         }
 
+        // Ziel auf einer anderen Karte: jetzt, auf der Zielkarte, laesst sich der
+        // Punkt vollstaendig aufloesen -- mit Zonenpruefung und Hoehe.
+        if (leg.groundPending && leg.mapId == player->GetMapId())
+        {
+            uint32 mapId = 0;
+            std::string err;
+            float x = leg.wx, y = leg.wy, z = 0.0f;
+            if (leg.uiMapId
+                && ResolveWorld(player, leg.uiMapId, leg.nx, leg.ny, false, 0.0f, 0.0f,
+                                x, y, z, mapId, err))
+            {
+                leg.wx = x;
+                leg.wy = y;
+                leg.wz = z;
+            }
+            else
+            {
+                float const gz = BestGroundZ(player, leg.wx, leg.wy);
+                leg.wz = (gz > INVALID_HEIGHT) ? gz : player->GetPositionZ();
+                Dbg(player, s, "Zielpunkt auf der neuen Karte nicht neu aufloesbar (" + err +
+                               ") - bleibt bei den bisherigen Koordinaten.");
+            }
+            leg.groundPending = false;
+        }
+
         // Etappen auf einer anderen Karte kann der Laeufer nicht anfahren. Sie
         // gehoeren zu einem Transport oder Portal und werden dort behandelt.
         if (leg.mapId && leg.mapId != player->GetMapId() && leg.kind == AT_LEG_WALK)
@@ -567,33 +615,41 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
 //
 // Das eigentliche Ziel bleibt in jedem Fall der letzte Carbonite-Punkt.
 
-void AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s)
+bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string& err)
 {
     if (s.route.empty())
-        return;
+        return true;
 
     ATLeg last = s.route.back();
     if (!last.resolved)
     {
         uint32 m = 0;
-        std::string err;
+        std::string resolveErr;
         if (!ResolveWorld(player, last.uiMapId, last.nx, last.ny, false, 0.0f, 0.0f,
-                          last.wx, last.wy, last.wz, m, err))
-            return;
+                          last.wx, last.wy, last.wz, m, resolveErr, true))
+            return true;                   // die Etappen laufen einzeln weiter
         last.mapId = m;
         last.resolved = true;
+        last.groundPending = (m != player->GetMapId());
     }
+
+    // Liegt das Ziel auf einer anderen Karte, sind Koordinaten nicht vergleichbar:
+    // keine Luftlinie, kein Flug dorthin, und die Carbonite-Stuetzpunkte helfen
+    // nicht -- ein Kontinent ist nur ueber Schiff, Zeppelin oder Portal erreichbar.
+    bool const crossMap = (last.mapId && last.mapId != player->GetMapId());
 
     s.finalMapId = last.mapId;
     s.finalX = last.wx;
     s.finalY = last.wy;
     s.finalZ = last.wz;
 
-    float direct = player->GetExactDist2d(last.wx, last.wy);
+    float direct = crossMap ? 0.0f : player->GetExactDist2d(last.wx, last.wy);
     s.startDistance = direct;
 
     // --- 1. Flugmeister ----------------------------------------------------
-    if (ATConf.useTaxi && direct >= ATConf.taxiMinDistance)
+    // Der Knotengraph kennt Flugverbindungen ebenfalls; ein direkter Flugplan
+    // gibt es nur innerhalb einer Karte.
+    if (!crossMap && ATConf.useTaxi && direct >= ATConf.taxiMinDistance)
     {
         std::vector<ATLeg> plan;
         std::string note;
@@ -603,17 +659,21 @@ void AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s)
             s.route = plan;
             s.legIdx = 0;
             Msg(player, "Flugroute geplant: " + note);
-            return;
+            return true;
         }
         Dbg(player, s, "Kein sinnvoller Flug (" + note + ").");
     }
 
     // --- 2. Knotengraph ----------------------------------------------------
-    if (ATConf.useTravelNodes && direct >= ATConf.nodeMinDistance)
+    std::string nodeNote;
+    if (!ATConf.useTravelNodes)
+        nodeNote = "AutoTravel.UseTravelNodes ist abgeschaltet";
+    else if (!crossMap && direct < ATConf.nodeMinDistance)
+        nodeNote = "die Strecke ist zu kurz";
+    else
     {
         std::vector<ATLeg> nodeLegs;
-        std::string note;
-        if (BuildNodeRoute(player, last.mapId, last.wx, last.wy, last.wz, nodeLegs, note))
+        if (BuildNodeRoute(player, last.mapId, last.wx, last.wy, last.wz, nodeLegs, nodeNote))
         {
             nodeLegs.push_back(last);
             s.route = nodeLegs;
@@ -625,29 +685,58 @@ void AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s)
                     ++special;
 
             char b[256];
-            std::snprintf(b, sizeof(b), "Knotenroute: %s%s", note.c_str(),
+            std::snprintf(b, sizeof(b), "Knotenroute: %s%s", nodeNote.c_str(),
                           special ? " (enthaelt Sonderverbindungen)" : "");
             Dbg(player, s, b);
 
-            if (special)
+            if (crossMap)
+            {
+                std::snprintf(b, sizeof(b),
+                              "Das Ziel liegt auf einer anderen Karte (Map %u). AutoTravel plant den "
+                              "Weg ueber %u Sonderverbindung(en) -- Schiff, Zeppelin oder Portal "
+                              "musst du am Anleger selbst betreten.", last.mapId, special);
+                Msg(player, b);
+            }
+            else if (special)
             {
                 std::snprintf(b, sizeof(b),
                               "Die Route benutzt %u Sonderverbindung(en). AutoTravel bringt dich "
                               "hin und macht danach von selbst weiter.", special);
                 Msg(player, b);
             }
-            return;
+            return true;
         }
-        Dbg(player, s, "Knotenroute nicht nutzbar (" + note + ") - benutze die Carbonite-Stuetzpunkte.");
+        if (!crossMap)
+            Dbg(player, s, "Knotenroute nicht nutzbar (" + nodeNote + ") - benutze die Carbonite-Stuetzpunkte.");
     }
 
     // --- 3. Carbonite ------------------------------------------------------
-    // s.route bleibt, wie es ist.
+    // s.route bleibt, wie es ist -- ausser bei einem Ziel auf einer anderen Karte:
+    // dort gibt es ohne Knotenroute keinen Weg.
+    if (crossMap)
+    {
+        err = "Das Ziel liegt auf einer anderen Karte (Map " + std::to_string(last.mapId) +
+              "), und AutoTravel findet keine Verbindung dorthin: " + nodeNote + ". Ein Kontinent "
+              "ist nur ueber Schiff, Zeppelin oder Portal erreichbar; dafuer braucht das Modul die "
+              "Reiseknoten von mod-playerbots (siehe '.at nodes').";
+        return false;
+    }
+
+    return true;
 }
 
 bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 {
-    ApplyPlannedRoute(player, s);
+    s.startMapId = player->GetMapId();
+
+    std::string planErr;
+    if (!ApplyPlannedRoute(player, s, planErr))
+    {
+        Msg(player, planErr);
+        _sessions.erase(player->GetGUID());
+        SyncStatus(player);
+        return false;
+    }
 
     if (!SetLegTarget(player, s))
     {
@@ -663,7 +752,9 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
     s.lastZ = player->GetPositionZ();
     ++_statTravelsStarted;
 
-    if (s.startDistance <= 0.0f)
+    // Bei einem Kartenwechsel gibt es keine vergleichbare Luftlinie; der
+    // Fortschritt kommt dann aus der Etappenzahl (RemainingForStatus).
+    if (s.startDistance <= 0.0f && (!s.finalMapId || s.finalMapId == s.startMapId))
         s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
 
     Msg(player, "Reise gestartet: " + s.destName);
@@ -746,7 +837,9 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     float wx = 0.0f, wy = 0.0f, wz = 0.0f;
     uint32 tmpMap = 0;
     std::string err;
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err))
+    // Das Ziel darf auf einer anderen Karte liegen (anderer Kontinent): ob und wie
+    // man dorthin kommt, entscheidet die Routenplanung (Knotengraph).
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err, true))
     {
         Msg(player, err);
         SyncStatus(player);
@@ -779,13 +872,18 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     leg.wy = wy;
     leg.wz = wz;
     leg.resolved = true;
+    leg.groundPending = (tmpMap != player->GetMapId());
     leg.name = s.destName;
     s.route.push_back(leg);
     s.legIdx = 0;
 
     char buf[224];
-    std::snprintf(buf, sizeof(buf), "Ziel: Map %u | X %.2f Y %.2f Z %.2f | %.0f yd",
-                  s.mapId, wx, wy, wz, player->GetExactDist2d(wx, wy));
+    if (leg.groundPending)
+        std::snprintf(buf, sizeof(buf), "Ziel: Map %u (andere Karte) | X %.2f Y %.2f",
+                      tmpMap, wx, wy);
+    else
+        std::snprintf(buf, sizeof(buf), "Ziel: Map %u | X %.2f Y %.2f Z %.2f | %.0f yd",
+                      s.mapId, wx, wy, wz, player->GetExactDist2d(wx, wy));
     Dbg(player, s, buf);
 
     return BeginTravel(player, s);
@@ -972,13 +1070,49 @@ void AutoTravelMgr::AbortAllSessions(std::string const& why)
 // flags: 1 = beritten, 2 = fliegt, 4 = schwimmt, 8 = Server steuert,
 //        16 = vom Spieler pausiert
 
+// Restentfernung und Fortschritt fuer die Statuszeile.
+//
+// Auf einer Karte ist beides die Luftlinie zum Endziel. Ueber eine Kartengrenze
+// hinweg sind Koordinaten nicht vergleichbar: dann zaehlt die Strecke bis zur
+// aktuellen Etappe (oder bis zum Endziel, sobald der Spieler auf dessen Karte
+// ist), und der Fortschritt kommt aus der Zahl der Etappen.
+void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
+                                       float& dist, uint32& progress) const
+{
+    dist = 0.0f;
+    progress = 0;
+
+    bool const crossMap = s.finalMapId && s.startMapId && s.finalMapId != s.startMapId;
+
+    if (!crossMap)
+    {
+        dist = player->GetExactDist2d(s.finalX ? s.finalX : s.destX,
+                                      s.finalX ? s.finalY : s.destY);
+        if (s.startDistance > 1.0f)
+        {
+            float frac = 1.0f - (dist / s.startDistance);
+            progress = uint32(std::max(0.0f, std::min(1.0f, frac)) * 100.0f);
+        }
+        return;
+    }
+
+    if (s.finalMapId == player->GetMapId())
+        dist = player->GetExactDist2d(s.finalX, s.finalY);
+    else if (s.mapId == player->GetMapId() && (s.destX != 0.0f || s.destY != 0.0f))
+        dist = player->GetExactDist2d(s.destX, s.destY);
+
+    if (!s.route.empty())
+        progress = uint32(std::min<size_t>(99, (s.legIdx * 100) / s.route.size()));
+}
+
 void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
 {
     if (!player || !player->GetSession())
         return;
 
-    float dist = player->GetExactDist2d(s.finalX ? s.finalX : s.destX,
-                                        s.finalX ? s.finalY : s.destY);
+    float dist = 0.0f;
+    uint32 progress = 0;
+    RemainingForStatus(player, s, dist, progress);
 
     uint32 flags = 0;
     if (player->IsMounted())  flags |= 1;
@@ -986,13 +1120,6 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
     if (s.swimming)           flags |= 4;
     if (s.controlTaken)       flags |= 8;
     if (s.pausedByPlayer)     flags |= 16;
-
-    uint32 progress = 0;
-    if (s.startDistance > 1.0f)
-    {
-        float frac = 1.0f - (dist / s.startDistance);
-        progress = uint32(std::max(0.0f, std::min(1.0f, frac)) * 100.0f);
-    }
 
     char buf[512];
     std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u|%u|%u|%u",

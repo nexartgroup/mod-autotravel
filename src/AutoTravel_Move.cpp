@@ -26,6 +26,37 @@
 #include <cmath>
 #include <cstdio>
 
+namespace
+{
+    // Steht der Charakter wirklich im Wasser? Player::IsInWater() ist dafuer
+    // ungeeignet: der Core fuehrt es ausschliesslich aus Bewegungspaketen des
+    // CLIENTS nach (SetInWater wird nur in MovementHandler gerufen), und die
+    // verwirft er, solange ein Spline laeuft. Der Wert bleibt waehrend der ganzen
+    // Fahrt auf dem Stand vor dem Start stehen. Die Fluessigkeitsdaten des Spielers
+    // werden dagegen mit jedem Schritt des Splines nachgefuehrt.
+    bool InLiquid(Player* player)
+    {
+        return (player->GetLiquidData().Status & MAP_LIQUID_STATUS_SWIMMING) != 0;
+    }
+
+    // MoveSplineInit schaltet im Konstruktor den Flugmodus (glatter Spline,
+    // Fluganimation) ein, sobald die Einheit MOVEMENTFLAG_CAN_FLY oder
+    // MOVEMENTFLAG_DISABLE_GRAVITY traegt -- GM-Flug, eine Flugaura, ein
+    // Flugmount in einer Flugzone. Ein Bodenabschnitt wuerde dann als
+    // Flug-Spline gesendet: der Charakter schwebt in Flugpose ueber dem Boden.
+    // Das Modul entscheidet selbst (s.flying), ob geflogen wird.
+    struct SplineInit : public Movement::MoveSplineInit
+    {
+        explicit SplineInit(Unit* unit) : Movement::MoveSplineInit(unit) { }
+
+        void ForceGround()
+        {
+            args.flags.raw() &= ~uint32(Movement::MoveSplineFlag::Flying
+                                        | Movement::MoveSplineFlag::Catmullrom);
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Kontrolle
 // ---------------------------------------------------------------------------
@@ -49,8 +80,16 @@ void AutoTravelMgr::ReleaseControl(Player* player, ATSession& s)
     // und der Charakter huepft an Ort und Stelle.
     player->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR);
 
-    if (s.swimming && !player->IsInWater())
+    // Zustand des Wassers an der ECHTEN Position (siehe InLiquid) und den vom
+    // Core nachgefuehrten Wert wieder in Einklang bringen. Mit dem alten
+    // IsInWater() blieb das Schwimmkennzeichen nach einer Fahrt, die im Wasser
+    // begann, auf dem Land stehen -- und umgekehrt.
+    bool const inLiquid = InLiquid(player);
+    if (!inLiquid)
         player->RemoveUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    else if (s.swimming)
+        player->AddUnitMovementFlag(MOVEMENTFLAG_SWIMMING);
+    player->SetInWater(inLiquid);
     s.swimming = false;
 
     player->SetFallInformation(0, player->GetPositionZ());
@@ -89,6 +128,25 @@ void AutoTravelMgr::HaltMovement(Player* player, ATSession& s)
 //
 // Im Flugmodus entfaellt die Projektion vollstaendig -- dort sind die Punkte
 // bereits Flughoehen.
+//
+// Ein Abschnitt ist an drei Stellen begrenzt, und die beiden letzten sind der
+// Grund, warum Charaktere frueher ueber die Karte "flogen":
+//
+//   1. chunkPoints NavMesh-Punkte (Rechenaufwand),
+//   2. die Paketkodierung: SMSG_MONSTER_MOVE traegt die Zwischenpunkte als
+//      11/11/10-Bit-Abstand zur Mitte von Start und Ende (+-256 yd, z +-128 yd).
+//      Was darueber hinausgeht, wird abgeschnitten, der Client zeichnet einen
+//      anderen Weg und laeuft ihn in der vom Server berechneten Zeit ab -- also
+//      mit dem Mehrfachen des Tempos. Der Core prueft das nicht. Zaehlte man nur
+//      die Punkte, wurde aus wenigen Eckpunkten im offenen Gelaende ein Abschnitt
+//      von 700 yd und mehr,
+//   3. Wasser und Land gehen nicht in einen Abschnitt: er hat nur EIN Tempo und
+//      EIN Schwimm-Kennzeichen. Mit Schwimmtempo ueber Land (oder umgekehrt)
+//      stimmt die Laufanimation nicht zur Geschwindigkeit ("Minischritte").
+//
+// Dafuer werden lange Segmente vorher geteilt (SplitLongSegments), und ein
+// Segment, das den Abschnitt ueber eine der Grenzen brachte, wird zurueckgenommen
+// und beginnt den naechsten.
 
 void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 {
@@ -103,8 +161,15 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     G3D::Vector3 current(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
     chunk.push_back(current);
 
+    // Wasser/Land des Abschnitts (bestimmt vom ersten Segment) und Zahl der
+    // uebernommenen Segmente.
     bool water = false;
     uint32 sourcePoints = 0;
+
+    // Lange Segmente teilen, damit sich Paketgrenze und Wassergrenze einhalten
+    // lassen. Im Flug gilt die unkomprimierte Kodierung, dort entfaellt es.
+    if (!s.flying)
+        AT::SplitLongSegments(s.path, s.idx, current, AT::SPLINE_MAX_SEGMENT);
 
     // Hoehe, an der das aktuelle Segment beginnt -- aus der Route, nicht aus
     // der Spielerposition.
@@ -126,6 +191,13 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
             ++sourcePoints;
             continue;
         }
+
+        // Stand vor dem Segment, falls es zurueckgenommen werden muss.
+        size_t const chunkBefore = chunk.size();
+        G3D::Vector3 const currentBefore = current;
+        float const segStartBefore = segStartZ;
+        float const prevPlaneBefore = prevPlane;
+        uint32 waterSamples = 0;
 
         float horizontal = AT::Dist2D(target.x, target.y, current.x, current.y);
 
@@ -160,19 +232,52 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
             else
                 z = expectedZ;                 // gar keine Hoehe: Route glauben
 
-            // Wasser: die Reisehoehe ist die Oberflaeche, nicht der Grund.
-            float base = (ground > INVALID_HEIGHT) ? ground : z;
-            float travel = TravelZ(player, x, y, base);
-            if (travel > z)
+            // Wasser: die Reisehoehe ist die Oberflaeche, nicht der Grund. Ob der
+            // Punkt nass ist, wird DIREKT erfragt und nicht daran abgelesen, ob die
+            // Hoehe angehoben wurde: BestGroundZ() liefert ueber tiefem Wasser schon
+            // die Oberflaeche, TravelZ() hob dann nichts mehr an, und der Punkt
+            // zaehlte als Land -- der See waere mit Landtempo gelaufen.
+            float const base = (ground > INVALID_HEIGHT) ? ground : z;
+            float level = INVALID_HEIGHT;
+            float bed = INVALID_HEIGHT;
+            if (WaterSurface(player, x, y, base + 2.0f, level, bed))
             {
-                z = travel;
-                water = true;
+                float const swimZ = level - ATConf.swimSurfaceOffset;
+                if (swimZ > bed)
+                {
+                    ++waterSamples;
+                    if (swimZ > z)
+                        z = swimZ;
+                }
             }
 
             chunk.push_back(G3D::Vector3(x, y, z));
 
             if (ground > INVALID_HEIGHT)
                 prevPlane = ground;
+        }
+
+        // Ein Segment gilt als Wasser, wenn die Mehrheit seiner Punkte im Wasser
+        // liegt. Ein einzelner Punkt am Ufer soll keinen Abschnitt trennen.
+        bool const segWater = (waterSamples * 2 > steps);
+
+        if (sourcePoints > 0)
+        {
+            // Abschnitt endet VOR diesem Segment: Wechsel zwischen Wasser und
+            // Land, oder die Paketkodierung wuerde ueberschritten.
+            bool const stop = (segWater != water) || !AT::SplineFitsPacket(chunk);
+            if (stop)
+            {
+                chunk.erase(chunk.begin() + chunkBefore, chunk.end());
+                current = currentBefore;
+                segStartZ = segStartBefore;
+                prevPlane = prevPlaneBefore;
+                break;
+            }
+        }
+        else
+        {
+            water = segWater;
         }
 
         // current ist die tatsaechlich erzeugte Terrainposition, damit das
@@ -222,13 +327,15 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
     if (velocity < 0.1f)
         velocity = 7.0f;                       // Notnagel, falls etwas fehlt
 
-    Movement::MoveSplineInit init(player);
+    SplineInit init(player);
     init.MovebyPath(chunk);
     init.SetWalk(false);
     init.SetVelocity(velocity);
 
     if (s.flying)
         init.SetFly();
+    else
+        init.ForceGround();                   // linearer Bodenspline, siehe SplineInit
 
     // Am Ende des Abschnitts in Fahrtrichtung schauen. Ohne das dreht sich der
     // Charakter beim Anhalten in die zuletzt vom Client gemeldete Richtung --
@@ -249,12 +356,23 @@ void AutoTravelMgr::LaunchChunk(Player* player, ATSession& s)
 
     if (DebugEnabled(s))
     {
-        char buf[224];
+        float yards = 0.0f;
+        for (size_t i = 1; i < chunk.size(); ++i)
+            yards += (chunk[i] - chunk[i - 1]).length();
+
+        // Bewegungskennzeichen des Spielers mit ausgeben: CAN_FLY (0x01000000) und
+        // DISABLE_GRAVITY (0x00000400) wuerden einen Bodenabschnitt zum
+        // Flugspline machen, wenn er nicht erzwungen wuerde; SWIMMING ist
+        // 0x00200000, FLYING 0x02000000.
+        uint32 const moveFlags = player->m_movementInfo.GetMovementFlags();
+
+        char buf[288];
         std::snprintf(buf, sizeof(buf),
-                      "Abschnitt gestartet: %u Punkte, Schrittweite %.2f, Tempo %.1f, Index %u/%u%s",
-                      uint32(chunk.size()), terrainStep, velocity,
+                      "Abschnitt gestartet: %u Punkte, %.0f yd, Schrittweite %.2f, Tempo %.1f, "
+                      "Index %u/%u%s, Flags 0x%X",
+                      uint32(chunk.size()), yards, terrainStep, velocity,
                       uint32(s.idx), uint32(s.path.size()),
-                      s.flying ? ", Flug" : (water ? ", Wasser" : ""));
+                      s.flying ? ", Flug" : (water ? ", Wasser" : ""), moveFlags);
         Dbg(player, s, buf);
     }
 }
@@ -319,7 +437,7 @@ bool AutoTravelMgr::TryMount(Player* player, ATSession& s)
 {
     if (!ATConf.autoMount || player->IsMounted() || player->IsInCombat())
         return false;
-    if (!player->IsOutdoors() || player->IsInWater() || player->IsInFlight())
+    if (!player->IsOutdoors() || InLiquid(player) || player->IsInFlight())
         return false;
     if (player->GetMap()->IsBattlegroundOrArena() || player->GetMap()->IsDungeon())
         return false;

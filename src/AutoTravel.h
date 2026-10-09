@@ -130,6 +130,11 @@ struct ATLeg
     float  wx = 0.0f, wy = 0.0f, wz = 0.0f;
     bool   resolved = false;
 
+    // Das Ziel liegt auf einer anderen Karte als der Spieler: x/y sind bekannt,
+    // die Hoehe nicht (das Gelaende dort ist fuer diesen Spieler nicht geladen).
+    // Sie wird nachgetragen, sobald die Etappe an der Reihe ist.
+    bool   groundPending = false;
+
     ATLegKind kind = AT_LEG_WALK;
 
     // Nur fuer AT_LEG_TAXI belegt
@@ -409,6 +414,7 @@ struct ATSession
     // Anzeige
     uint32  statusTimer = 0;
     float   startDistance = 0.0f;
+    uint32  startMapId = 0;             // Karte beim Start; ungleich finalMapId = Kartenwechsel
 
     // Sitzungsbezogene Uebersteuerungen
     float   arrivalOverride = 0.0f;
@@ -543,7 +549,8 @@ private:
     bool BeginTravel(Player* player, ATSession& s);
     bool SetLegTarget(Player* player, ATSession& s);
     bool AdvanceLeg(Player* player, ATSession& s);
-    void ApplyPlannedRoute(Player* player, ATSession& s);
+    bool ApplyPlannedRoute(Player* player, ATSession& s, std::string& err);
+    void RemainingForStatus(Player* player, ATSession const& s, float& dist, uint32& progress) const;
     void Finish(Player* player, ATSession& s, std::string const& text, bool ok);
 
     bool CheckHandover(Player* player, ATSession& s, uint32 diff);
@@ -589,13 +596,19 @@ private:
     bool  CalculatePath(Player* player, ATSession& s);
 
     // --- Karten (AutoTravel_Route.cpp) -------------------------------------
+    // Mit 'targetMap' darf das Ziel auf einer anderen Karte als der des Spielers
+    // liegen; die Karte des Ziels kommt dann dort heraus. Ohne den Zeiger ist es
+    // ein Fehler, wie bisher.
     bool MapToWorld(Player* player, uint32 uiMapId, float nx, float ny,
                     bool hasCalib, float pnx, float pny,
-                    float& outX, float& outY, std::string& err) const;
+                    float& outX, float& outY, std::string& err,
+                    uint32* targetMap = nullptr) const;
+    // Mit allowOtherMap liefert eine Zielkarte != Karte des Spielers Erfolg mit
+    // z = 0: die Hoehe laesst sich nur auf der eigenen Karte abfragen.
     bool ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
                       bool hasCalib, float pnx, float pny,
                       float& x, float& y, float& z, uint32& mapId,
-                      std::string& err) const;
+                      std::string& err, bool allowOtherMap = false) const;
 
     // --- Meldungen (AutoTravel_Config.cpp) ---------------------------------
 public:
@@ -689,6 +702,37 @@ namespace AT
     // Datenbankname fuer die Knotentabellen: nur Buchstaben, Ziffern, '_' und
     // '$', hoechstens 64 Zeichen. Der Name wird in SQL eingesetzt.
     bool IsSafeIdentifier(std::string const& in);
+
+    // --- Grenzen der Spline-Pakete ------------------------------------------
+    //
+    // SMSG_MONSTER_MOVE kodiert die Zwischenpunkte eines gewoehnlichen (nicht
+    // glatten) Splines als Abstand zur MITTE von erstem und letztem Punkt, in
+    // 11 / 11 / 10 Bit zu je 0,25 yd: x und y erreichen +-256 yd, z +-128 yd.
+    // Was darueber liegt, wird abgeschnitten, und der Client zeichnet einen
+    // voellig anderen Weg -- er "fliegt" mit dem Mehrfachen des Tempos ueber die
+    // Karte, weil die Dauer aus dem WAHREN Weg berechnet wurde. Der Core prueft
+    // das nicht (MoveSplineInitArgs::_checkPathBounds ist auskommentiert).
+    //
+    // Die Grenzen hier liegen mit Absicht deutlich unter den harten Werten.
+    constexpr float SPLINE_PACK_LIMIT_XY = 220.0f;
+    constexpr float SPLINE_PACK_LIMIT_Z  = 100.0f;
+
+    // Laengstes Wegsegment (horizontal, yd), das als EIN Stueck in einen Abschnitt
+    // geht. Laengere werden vorher geteilt: ein Segment ueber den ganzen See
+    // waere sonst nicht zerlegbar, und Wasser/Land liesse sich nicht trennen.
+    constexpr float SPLINE_MAX_SEGMENT = 40.0f;
+
+    // Passen alle Zwischenpunkte in die Paketkodierung (siehe oben)?
+    bool SplineFitsPacket(Movement::PointsArray const& pts);
+
+    // Teilt jedes Segment ab Index 'from', das horizontal laenger als maxLen ist,
+    // in gleich lange Stuecke. Das erste Segment beginnt bei 'origin' (der
+    // Spielerposition), die folgenden beim vorigen Punkt. Hoehen werden linear
+    // zwischen den Segmentenden verteilt -- wie es LaunchChunk fuer die Sollhoehe
+    // ohnehin tut, die Auswahl der Bodenflaeche aendert sich dadurch nicht.
+    // Rueckgabe: true, wenn etwas geteilt wurde. 'from' bleibt gueltig.
+    bool SplitLongSegments(Movement::PointsArray& path, size_t from,
+                           G3D::Vector3 const& origin, float maxLen);
 }
 
 #endif // MOD_AUTOTRAVEL_H

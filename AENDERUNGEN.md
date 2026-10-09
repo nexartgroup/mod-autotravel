@@ -1,3 +1,143 @@
+# Version 4.0.2 -- Ziele auf einem anderen Kontinent
+
+Gemeldet: `.at start` auf ein Ziel in den Oestlichen Koenigreichen, waehrend der
+Charakter in Kalimdor steht, brach mit "Das Ziel liegt auf einer anderen Karte
+(Map 0)." ab.
+
+## Ursache
+
+Die README versprach seit 4.0, ein Ziel auf einer anderen Karte werde "ueber den
+Knotengraphen oder einen Transport erreicht". Die Routenplanung kann das auch:
+`BuildNodeRoute` nimmt eine Zielkarte entgegen, die Knoten tragen ihre Karte,
+und mod-playerbots erzeugt Schiffs-, Zeppelin- und Portalverbindungen ueber
+Kartengrenzen (`TravelNodeMap::generateTransportNodes`). Nur kam die Planung nie
+zum Zug: `Start()` loeste das Ziel zuerst ueber `ResolveWorld` auf, und das
+verlangte, dass es auf der Karte des Spielers liegt.
+
+## Aenderungen
+
+* `MapToWorld` und `ResolveWorld` koennen ein Ziel auf einer anderen Karte
+  aufloesen (nur auf ausdrueckliche Anfrage; `.at tp`, `.at diag` und
+  `.at resolve` bleiben bei der alten Regel). Aus der Zone des Ziels ergibt sich
+  die Karte und x/y; die Hoehe laesst sich dort nicht abfragen, denn das
+  Gelaende ist nur fuer die Karte des Spielers geladen.
+* `ApplyPlannedRoute` plant bei einem Ziel auf einer anderen Karte nur noch ueber
+  den Knotengraphen: kein Flugplan (der bliebe auf der Karte), keine
+  Carbonite-Stuetzpunkte als Rueckfall (ein Kontinent ist nicht zu Fuss zu
+  erreichen). Gibt es keine Verbindung, bricht die Reise mit einer klaren
+  Meldung ab, die nennt, was fehlt (Knoten nicht geladen, kein Knoten in
+  Reichweite, keine Verbindung).
+* Der Zielpunkt merkt sich, dass seine Hoehe fehlt (`ATLeg::groundPending`).
+  Sobald die Reise ihn erreicht und der Spieler auf der Zielkarte steht, wird er
+  vollstaendig aufgeloest -- mit Hoehe und der Zonenpruefung, die eine um eins
+  verschobene Karten-ID korrigiert. Bis dahin gilt die vorlaeufige x/y-Position
+  fuer die Wahl des letzten Knotens.
+* Statuszeile: ueber eine Kartengrenze sind Koordinaten nicht vergleichbar. Die
+  Restentfernung gilt dann bis zur aktuellen Etappe (oder zum Endziel, sobald der
+  Spieler auf dessen Karte steht), der Fortschritt kommt aus der Etappenzahl.
+* Der Ablauf an Anlegern und Portalen war vorhanden und bleibt unveraendert:
+  AutoTravel bringt den Charakter hin, **Schiff, Zeppelin oder Portal betritt der
+  Spieler selbst**, nach dem Aussteigen oder dem Kartenwechsel geht es weiter.
+
+## Voraussetzungen und Grenzen
+
+* Die Reiseknoten von mod-playerbots muessen geladen sein (`.at nodes` zeigt es),
+  und der Graph muss eine Verbindung zwischen den Karten enthalten. Das Modul
+  erzeugt keine eigenen Verbindungen.
+* Fehlt dem Charakter ein Flugpunkt, den die Route braucht, sperrt die Planung
+  die Verbindung und sucht neu (wie bisher).
+
+## Was getestet wurde
+
+Uebersetzt gegen die Header von AzerothCore `master`; die Zuordnung der
+Verbindungstypen (1 Laufen, 2 Portal, 3 Transport, 4 Flug, 5 Zauber -> manuell)
+wurde gegen den Quelltext von mod-playerbots geprueft. **Nicht getestet** ist die
+Reise selbst: weder mit einer echten Reiseknoten-Datenbank noch im Spiel. Ob der
+Graph auf dem Server eine nutzbare Verbindung zwischen Kalimdor und den
+Oestlichen Koenigreichen enthaelt, laesst sich nur dort feststellen.
+
+---
+
+# Version 4.0.1 -- Der Charakter "fliegt" ueber die Karte
+
+Gemeldet: Bei laengeren Strecken gleitet der Charakter sehr schnell durch die
+Luft, schiesst am Ziel vorbei, manchmal ueber die halbe Karte und wieder
+zurueck, bis er schliesslich landet. Nach dem Wasser sind die Schritte klein
+und schnell, oder der Charakter "huepft" durch die Luft.
+
+## Ursache (Hauptfehler)
+
+Das Modul baut je Abschnitt EINEN `MoveSpline` und begrenzte ihn nur nach der
+Zahl der NavMesh-Punkte (`ChunkPoints`, Standard 12), nicht nach seiner Laenge.
+Im offenen Gelaende bleiben vom NavMesh-Pfad nur wenige Eckpunkte uebrig, jeder
+Abstand betraegt dann leicht 80 bis 100 yd: aus 9 Punkten wurde ein Abschnitt
+von rund 750 yd (im Log: "251 Punkte, Wasser").
+
+`SMSG_MONSTER_MOVE` kann so einen Abschnitt nicht tragen. Die Zwischenpunkte
+eines gewoehnlichen Splines werden als Abstand zur Mitte von Start und Ende in
+11/11/10 Bit zu je 0,25 yd gepackt (`ByteBuffer::appendPackXYZ`,
+`WriteLinearPath`): x und y erreichen +-256 yd, z +-128 yd. Was darueber liegt,
+wird abgeschnitten. Der Core merkt es nicht -- `MoveSplineInitArgs::
+_checkPathBounds()` ist in `Validate()` auskommentiert und waere mit
+`MAX_OFFSET = 1024` selbst um den Faktor vier zu grosszuegig. Der Client baut aus
+den verstuemmelten Punkten einen anderen, laengeren Weg und laeuft ihn in der
+Zeit ab, die der Server fuer den WAHREN Weg berechnet hat: also mit dem
+Mehrfachen des Tempos, durch die Luft, an falschen Stellen. Am Ende landet er
+beim richtigen Zielpunkt (der Server hat den Charakter die ganze Zeit korrekt
+gefuehrt).
+
+Nachgerechnet mit den Zahlen aus dem Log: der 746-yd-Abschnitt wuerde vom Client
+als 2780 yd langer Weg gezeichnet (3,7-faches Tempo, Punkte bis 512 yd
+verschoben). Der 279-yd-Abschnitt davor liegt innerhalb der Grenzen und lief
+normal -- das erklaert das "teilweise".
+
+## Aenderungen
+
+* `LaunchChunk` begrenzt den Abschnitt jetzt nach der Paketkodierung
+  (`AT::SplineFitsPacket`, Grenzen 220 yd in x/y und 100 yd in z, mit Reserve
+  zu den harten 256/128 yd). Ein Segment, das darueber hinausfuehrt, beginnt den
+  naechsten Abschnitt.
+* Lange NavMesh-Segmente werden vorher in Stuecke von hoechstens 40 yd geteilt
+  (`AT::SplitLongSegments`, Hoehen linear verteilt). Sonst liesse sich ein
+  einzelnes Segment ueber den See weder begrenzen noch an der Wassergrenze
+  trennen.
+* **Wasser und Land gehen nicht mehr in einen Abschnitt.** Bisher bekam der
+  ganze Abschnitt Schwimmtempo und Schwimmkennzeichen, sobald ein einziger Punkt
+  im Wasser lag: das Landstueck davor und danach wurde mit 4,7 statt 7 (im Log
+  10,5) yd/s gelaufen, die Laufanimation passte nicht zur Geschwindigkeit
+  ("Minischritte"). Ein Segment gilt als Wasser, wenn die Mehrheit seiner Punkte
+  im Wasser liegt.
+* `ReleaseControl` und `TryMount` fragen den Wasserzustand an der echten
+  Position (`GetLiquidData`) statt `Player::IsInWater()`. Der Core fuehrt
+  `IsInWater()` nur aus Bewegungspaketen des Clients nach und verwirft diese,
+  solange ein Spline laeuft; der Wert blieb waehrend der ganzen Fahrt auf dem
+  Stand vor dem Start. Folge: Schwimmkennzeichen, das nach einer im Wasser
+  begonnenen Fahrt auf dem Land stehenblieb, und ein Aufsitzen, das nach einer
+  Schwimmstrecke verweigert wurde. Der Wert wird jetzt auch nachgefuehrt
+  (`SetInWater`).
+* Bodenabschnitte werden immer als linearer Bodenspline gesendet. Der Konstruktor
+  von `MoveSplineInit` schaltet sonst den Flugmodus ein (glatter Spline,
+  Fluganimation, ungepackt), sobald der Spieler `CAN_FLY` oder `DISABLE_GRAVITY`
+  traegt -- GM-Flug, Flugaura, Flugmount.
+* Die Debugzeile "Abschnitt gestartet" nennt jetzt die Laenge in yd und die
+  Bewegungskennzeichen des Spielers.
+
+## Was getestet wurde
+
+* Die Paketkodierung des Cores ist in `tools/tests/util_test.cpp` nachgebildet
+  (11/11/10 Bit, Vorzeichenerweiterung wie beim Client). Geprueft wird, dass
+  `SplineFitsPacket` genau die Abschnitte durchlaesst, die unversehrt ankommen,
+  und den 746-yd-Abschnitt aus dem Log abweist; mit absichtlich falscher Grenze
+  schlagen die Tests an. 109 Pruefungen, 0 Fehler.
+* Uebersetzt gegen die Header von AzerothCore `master`.
+
+Nicht getestet (hier nicht moeglich): Verhalten im Spiel. Dass der 3.3.5a-Client
+die gepackten Felder mit Vorzeichen liest, ist aus dem Kodierer und seiner
+Verwendung durch normale NPC-Pfade geschlossen, nicht am Client geprueft. Die
+Erklaerung der "Minischritte" ist eine Annahme.
+
+---
+
 # Version 4.0 -- Pruefung und Haertung
 
 Gepruefte Grundlage: AzerothCore `master` (Oktober 2026), Modul und beide Addons.
