@@ -30,6 +30,11 @@ Spielen.
   zaehlt dann die erste Etappe.
 * `ATSession::mapId` beginnt mit `AT_NO_MAP` statt 0.
 
+* Der Handschlag meldet jetzt die volle Fassung (`4.0.4`) statt `4.0`. Das Addon zeigt
+  sie nur an ("Server 4.0.4 ..." im Chat nach dem Anmelden), damit sich ein Fehlerbericht
+  einer Fassung zuordnen laesst; ueber die Vertraeglichkeit entscheidet weiter allein die
+  Protokollnummer.
+
 ## Was getestet wurde
 
 Uebersetzt gegen die Header von AzerothCore `master`; die 109 Pruefungen aus

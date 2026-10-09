@@ -53,7 +53,9 @@ class Map;
 // das melden, statt Nachrichten falsch zu lesen.
 
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
-constexpr char const* AT_MODULE_VERSION = "4.0";
+// Nur zur Anzeige ("Server 4.0.4" im Addon, damit sich ein Fehlerbericht einer Fassung
+// zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
+constexpr char const* AT_MODULE_VERSION = "4.0.4";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
