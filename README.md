@@ -471,6 +471,11 @@ Kategorie `module` auf Debug steht.
   Portal als Sonderverbindung), sonst gar nicht: ohne geladene Knoten oder ohne
   Verbindung zwischen den Karten bricht die Reise mit einer Meldung ab, die sagt,
   was fehlt. Das Betreten des Transports ist Sache des Spielers. Ab 4.0.2.
+  Seit 4.0.5 fuehrt die Route nur durch Oestliche Koenigreiche, Kalimdor und die
+  Tiefenbahn (Outland, Nordend und Instanzen nur, wenn Start oder Ziel dort liegen);
+  Zeppeline gelten als Horde, Schiffe als Allianz (ausser Ratchet - Booty Bay).
+  **Nicht** beruecksichtigt sind Fusswege durch feindliche Hauptstaedte, Portale der
+  anderen Fraktion und die Stufe des Gebiets.
 * **Einsteigen** in Zeppelin und Schiff macht der Spieler selbst. Der Autopilot
   bringt ihn zum Anleger und wartet.
 * **Clipping auf Treppen** laesst sich nicht restlos beseitigen. Es entsteht,

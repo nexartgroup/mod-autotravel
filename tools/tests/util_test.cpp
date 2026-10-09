@@ -16,6 +16,9 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 static int sFailures = 0;
 static int sChecks = 0;
@@ -332,6 +335,300 @@ static void TestSplitLongSegments()
     CHECK(fitsEverywhere);
 }
 
+// ---------------------------------------------------------------------------
+// Kuerzester Weg im Knotengraphen
+// ---------------------------------------------------------------------------
+//
+// Ein kleiner Graph nach dem Fall aus einem Spielerbericht: Brachland (Karte 1) nach
+// dem Hafen von Sturmwind (Karte 0).
+//
+//   Karte 1:   0 Brachland (!)  - 1 Zeppelinturm  - 2 Ratchet
+//   Karte 571: 10 Kriegshymnenfeste - 11 Valianzfeste
+//   Karte 0:   21 Booty Bay - 22 Dunkelwald - 20 Hafen Sturmwind
+//   Karte 369: 30 Tiefenbahn Ost - 31 Tiefenbahn West
+//   Karte 429: 40 Dire Maul (Instanz)
+//
+// Der Knoten 0 ist mit Absicht der Start: die Knoten-ID 0 ist ein echter Knoten.
+//   Nordend:  0 -> 1 (100) -> Zeppelin -> 10 -> 11 (1300) -> Schiff -> 20     ~2200
+//   Ratchet:  0 -> 2 (500) -> Schiff -> 21 -> 22 (4000) -> 20 (4000)          ~9300
+
+namespace
+{
+    struct TestGraph
+    {
+        std::unordered_map<uint32, ATNode> nodes;
+        std::unordered_map<uint32, std::vector<ATNodeLink>> links;
+
+        void Node(uint32 id, uint32 map)
+        {
+            ATNode n;
+            n.id = id;
+            n.mapId = map;
+            n.name = "n" + std::to_string(id);
+            nodes[id] = n;
+        }
+        void Link(uint32 a, uint32 b, uint8 type, float cost, uint32 object = 0, bool both = true)
+        {
+            ATNodeLink l;
+            l.to = b;
+            l.type = type;
+            l.baseCost = cost;
+            l.object = object;
+            links[a].push_back(l);
+            if (both)
+            {
+                l.to = a;
+                links[b].push_back(l);
+            }
+        }
+    };
+
+    TestGraph MakeGraph()
+    {
+        TestGraph g;
+        g.Node(0, 1); g.Node(1, 1); g.Node(2, 1);
+        g.Node(10, 571); g.Node(11, 571);
+        g.Node(21, 0); g.Node(22, 0); g.Node(20, 0);
+        g.Node(30, 369); g.Node(31, 369);
+        g.Node(40, 429);
+
+        g.Link(0, 1, 1, 100);
+        g.Link(0, 2, 1, 500);
+        g.Link(1, 10, 3, 1);                // Zeppelin nach Nordend
+        g.Link(10, 11, 1, 1300);
+        g.Link(11, 20, 3, 1);               // Schiff nach Sturmwind
+        g.Link(2, 21, 3, 1);                // Schiff Ratchet -> Booty Bay
+        g.Link(21, 22, 1, 4000);
+        g.Link(22, 20, 1, 4000);
+        return g;
+    }
+
+    bool Has(std::vector<uint32> const& chain, uint32 id)
+    {
+        return std::find(chain.begin(), chain.end(), id) != chain.end();
+    }
+
+    AT::ChainRules Rules(std::initializer_list<uint32> maps)
+    {
+        AT::ChainRules r;
+        r.allowedMaps.insert(maps.begin(), maps.end());
+        return r;
+    }
+}
+
+static void TestShortestChain()
+{
+    std::vector<uint32> chain;
+    std::unordered_map<uint32, uint8> types;
+    std::unordered_set<uint64> none;
+    std::string note;
+
+    // --- ohne Kartenfilter nimmt die Suche den billigsten Weg: ueber Nordend ------
+    {
+        TestGraph g = MakeGraph();
+        AT::ChainRules open;                                  // leer = alle Karten
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, open, chain, types, note));
+        CHECK(!chain.empty() && chain.front() == 0 && chain.back() == 20);   // Knoten 0 als Start
+        CHECK(Has(chain, 10) && Has(chain, 11));
+        CHECK(types[10] == 3 && types[20] == 3 && types[1] == 1);
+    }
+
+    // --- mit dem Filter: Ratchet, nicht Nordend -----------------------------------
+    {
+        TestGraph g = MakeGraph();
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, r, chain, types, note));
+        CHECK(!Has(chain, 10) && !Has(chain, 11));
+        CHECK(Has(chain, 2) && Has(chain, 21) && Has(chain, 22));
+        CHECK(chain.size() == 5);                             // 0, 2, 21, 22, 20
+        CHECK(types[21] == 3);
+
+        // Start oder Ziel in Nordend: dann ist es erlaubt
+        AT::ChainRules north = Rules({ 0, 1, 369, 571 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 11, none, north, chain, types, note));
+        CHECK(Has(chain, 10));
+        AT::ChainRules noNorth = Rules({ 0, 1, 369 });
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 0, 11, none, noNorth, chain, types, note));
+        CHECK(chain.empty());
+    }
+
+    // --- Instanzen sind nur Ziel, nie Abkuerzung ----------------------------------
+    {
+        TestGraph g = MakeGraph();
+        g.Link(1, 40, 2, 1);                 // Eingang ...
+        g.Link(40, 22, 2, 1);                // ... und ein "Ausgang" mitten in Sturmwinds Hinterland
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, r, chain, types, note));
+        CHECK(!Has(chain, 40));
+        AT::ChainRules inInstance = Rules({ 0, 1, 369, 429 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 40, none, inInstance, chain, types, note));
+        CHECK(chain.back() == 40);
+    }
+
+    // --- Tiefenbahn (369) bleibt als Durchgang erlaubt ----------------------------
+    {
+        TestGraph g = MakeGraph();
+        g.Link(22, 30, 2, 1);                // Eingang
+        g.Link(30, 31, 3, 1);                // Bahn
+        g.Link(31, 20, 2, 1);                // Ausgang direkt am Hafen
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 21, 20, none, r, chain, types, note));
+        CHECK(Has(chain, 30) && Has(chain, 31));
+    }
+
+    // --- gesperrte Kanten ----------------------------------------------------------
+    {
+        TestGraph g = MakeGraph();
+        AT::ChainRules open;
+        std::unordered_set<uint64> banned;
+        banned.insert(AT::EdgeId(1, 10));                     // der Zeppelin faellt weg
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, banned, open, chain, types, note));
+        CHECK(!Has(chain, 10) && Has(chain, 21));
+        banned.insert(AT::EdgeId(2, 21));
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 0, 20, banned, open, chain, types, note));
+        CHECK(!note.empty());
+    }
+
+    // --- Pruefung je Sonderverbindung (Flug, Portal) --------------------------------
+    {
+        TestGraph g = MakeGraph();
+        g.Link(0, 22, 4, 1);                 // ein "Flug" direkt hin
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        int asked = 0;
+        r.linkUsable = [&](uint32, ATNodeLink const& l) { ++asked; return l.type != 4; };
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, r, chain, types, note));
+        CHECK(asked > 0);                                     // die Flugkante wurde geprueft
+        CHECK(types[22] == 1);                                // aber nicht ueber die Flugkante
+
+        AT::ChainRules ok = Rules({ 0, 1, 369 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, ok, chain, types, note));
+        CHECK(types[22] == 4);                                // erlaubt: der Flug ist billiger
+    }
+
+    // --- Portale mit "object" ----------------------------------------------------
+    {
+        TestGraph g = MakeGraph();
+        g.Link(0, 21, 2, 1, 1103);           // "Portal" direkt nach Booty Bay
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        r.linkUsable = [](uint32, ATNodeLink const& l) { return !(l.type == 2 && l.object == 1103); };
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, r, chain, types, note));
+        CHECK(types[21] == 3);                                // ueber das Schiff, nicht das tote Portal
+    }
+
+    // --- unbekannter Verbindungstyp, nur zu Fuss ---------------------------------
+    {
+        TestGraph g = MakeGraph();
+        g.Link(0, 20, 5, 1);                 // Typ 5: nicht benutzbar
+        g.Link(0, 20, 0, 1);                 // Typ 0: ebenso
+        AT::ChainRules r = Rules({ 0, 1, 369 });
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, r, chain, types, note));
+        CHECK(chain.size() == 5);
+
+        AT::ChainRules walk = Rules({ 0, 1, 369 });
+        walk.useSpecialLinks = false;
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 0, 20, none, walk, chain, types, note));   // ohne Schiff kein Weg
+
+        // Sonderverbindungen kosten Aufschlag: ein langer Fussweg schlaegt eine teure Verbindung
+        TestGraph h;
+        h.Node(1, 0); h.Node(2, 0); h.Node(3, 0);
+        h.Link(1, 2, 3, 10);                 // Schiff: 10 + 400
+        h.Link(2, 3, 1, 10);
+        h.Link(1, 3, 1, 300);                // zu Fuss: 300
+        AT::ChainRules cost;
+        CHECK(AT::ShortestChain(h.nodes, h.links, 1, 3, none, cost, chain, types, note));
+        CHECK(chain.size() == 2);            // direkt
+        cost.specialLinkCost = 0.0f;
+        CHECK(AT::ShortestChain(h.nodes, h.links, 1, 3, none, cost, chain, types, note));
+        CHECK(chain.size() == 3);            // ohne Aufschlag wird das Schiff genommen
+    }
+
+    // --- Fraktion der Transporte ----------------------------------------------------
+    {
+        CHECK(AT::TransportFaction(175080) == 2);             // Iron Eagle: Horde
+        CHECK(AT::TransportFaction(186238) == 2);             // Mighty Wind: Horde
+        CHECK(AT::TransportFaction(190536) == 1);             // Stormwind's Pride: Allianz
+        CHECK(AT::TransportFaction(176310) == 1);             // The Bravery: Allianz
+        CHECK(AT::TransportFaction(20808) == 0);              // The Maiden's Fancy: beide
+        CHECK(AT::TransportFaction(0) == 0);
+        CHECK(AT::TransportFaction(999999) == 0);
+
+        // Allianzcharakter im Brachland: kein Zeppelin, der Weg geht ueber Ratchet
+        TestGraph g = MakeGraph();
+        g.links.clear();
+        g.Link(0, 1, 1, 100);
+        g.Link(0, 2, 1, 500);
+        g.Link(1, 22, 3, 1, 175080);          // Horde-Zeppelin nach Sturmwind (billig)
+        g.Link(2, 21, 3, 1, 20808);           // Schiff fuer beide
+        g.Link(21, 22, 1, 4000);
+        g.Link(22, 20, 1, 100);
+        AT::ChainRules ally = Rules({ 0, 1, 369 });
+        ally.linkUsable = [](uint32, ATNodeLink const& l)
+        {
+            if (l.type != 3)
+                return true;
+            uint8 const f = AT::TransportFaction(l.object);
+            return f == 0 || f == 1;           // Allianz
+        };
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, ally, chain, types, note));
+        CHECK(Has(chain, 2) && Has(chain, 21) && !Has(chain, 1));
+
+        AT::ChainRules horde = Rules({ 0, 1, 369 });
+        horde.linkUsable = [](uint32, ATNodeLink const& l)
+        {
+            if (l.type != 3)
+                return true;
+            uint8 const f = AT::TransportFaction(l.object);
+            return f == 0 || f == 2;           // Horde
+        };
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, horde, chain, types, note));
+        CHECK(Has(chain, 1) && !Has(chain, 2));
+    }
+
+    // --- Randfaelle ----------------------------------------------------------------
+    {
+        TestGraph g = MakeGraph();
+        AT::ChainRules open;
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 0, 999, none, open, chain, types, note));   // Ziel fehlt
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 999, 20, none, open, chain, types, note));  // Start fehlt
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 0, none, open, chain, types, note));      // Start = Ziel
+        CHECK(chain.size() == 1 && chain[0] == 0);
+
+        AT::ChainRules tiny;
+        tiny.maxVisited = 2;
+        CHECK(!AT::ShortestChain(g.nodes, g.links, 0, 20, none, tiny, chain, types, note));    // Obergrenze greift
+
+        // Kante auf einen Knoten ohne Eintrag
+        g.Link(0, 777, 1, 1, 0, false);
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 20, none, open, chain, types, note));
+
+        // Kette ueber 400 Knoten wird abgelehnt
+        TestGraph longG;
+        for (uint32 i = 0; i < 450; ++i)
+            longG.Node(i, 0);
+        for (uint32 i = 0; i + 1 < 450; ++i)
+            longG.Link(i, i + 1, 1, 1);
+        CHECK(!AT::ShortestChain(longG.nodes, longG.links, 0, 449, none, open, chain, types, note));
+        CHECK(chain.empty());
+        CHECK(AT::ShortestChain(longG.nodes, longG.links, 0, 300, none, open, chain, types, note));
+        CHECK(chain.size() == 301);
+    }
+
+    // --- Ergebnis ist die billigste Kette, nicht die mit den wenigsten Knoten ------
+    {
+        TestGraph g;
+        for (uint32 i = 0; i < 6; ++i)
+            g.Node(i, 0);
+        g.Link(0, 5, 1, 1000);               // direkt, teuer
+        g.Link(0, 1, 1, 10);
+        g.Link(1, 2, 1, 10);
+        g.Link(2, 3, 1, 10);
+        g.Link(3, 5, 1, 10);                 // vier Schritte, 40
+        AT::ChainRules open;
+        CHECK(AT::ShortestChain(g.nodes, g.links, 0, 5, none, open, chain, types, note));
+        CHECK(chain.size() == 5);
+    }
+}
+
 int main()
 {
     TestParseUInt();
@@ -343,6 +640,7 @@ int main()
     TestMisc();
     TestSplinePacket();
     TestSplitLongSegments();
+    TestShortestChain();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);
     return sFailures ? 1 : 0;

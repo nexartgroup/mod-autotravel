@@ -28,6 +28,7 @@
 #include "DatabaseEnv.h"
 #include "Log.h"
 #include "Map.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 
 #include <algorithm>
@@ -183,8 +184,15 @@ void AutoTravelMgr::LoadTravelNodes()
         sNodes[n.id] = n;
     } while (res->NextRow());
 
-    sql = "SELECT node_id, to_node_id, type, distance, extra_cost FROM `" + db +
-          "`.`playerbots_travelnode_link`";
+    // Die Spalte "object" (Areatrigger eines Portals, Eintrag eines Transports) ist
+    // nicht Pflicht: fehlt sie, bleiben Portale ungeprueft.
+    std::string whyObject;
+    bool const haveObject = TableUsable(db, "playerbots_travelnode_link",
+                                        { "node_id", "to_node_id", "type", "distance",
+                                          "extra_cost", "object" }, whyObject);
+
+    sql = std::string("SELECT node_id, to_node_id, type, distance, extra_cost") +
+          (haveObject ? ", object" : "") + " FROM `" + db + "`.`playerbots_travelnode_link`";
     QueryResult lres = WorldDatabase.Query(sql);
 
     uint32 linkCount = 0;
@@ -214,6 +222,8 @@ void AutoTravelMgr::LoadTravelNodes()
             l.baseCost = distance + extra;
             if (!(l.baseCost > 0.0f))          // auch NaN und negative Werte
                 l.baseCost = 1.0f;
+            if (haveObject)
+                l.object = f[5].Get<uint32>();
 
             sLinks[from].push_back(l);
             ++linkCount;
@@ -263,148 +273,13 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// Kuerzester Weg mit gesperrten Kanten
+// Kuerzester Weg
 // ---------------------------------------------------------------------------
 //
-// Dijkstra. Frueher stand hier A* mit der Luftlinie als Schaetzung, und die ist
-// KEINE zulaessige Schaetzung: Flug-, Schiffs- und Portalkanten kosten im Graphen
-// nur wenige Punkte, egal wie weit sie tragen, die Luftlinie ueberschaetzt dann
-// um Tausende Yards. A* mit geschlossener Menge lieferte dadurch oft Ketten, die
-// teurer waren als das Optimum (Messung am mitgelieferten Graphen: bei gut der
-// Haelfte der Zufallspaare). Der Graph hat rund 3,8 Tsd. Knoten und 15 Tsd.
-// Kanten -- Dijkstra ueber alles ist billig und braucht keine Schaetzung.
-//
-// Kanten, die der Charakter nicht benutzen kann, schliesst `edgeUsable` aus:
-//   * gesperrte Kanten (`banned`) -- erst nach dem Fund erkannte Fehlschlaege,
-//   * Flugverbindungen ohne bekannte Flugpunkte (`taxiUsable`), gleich bei der Suche.
-
-namespace
-{
-    inline uint64 EdgeId(uint32 a, uint32 b)
-    {
-        return (uint64(a) << 32) | uint64(b);
-    }
-
-    bool SearchChain(uint32 startNode, uint32 endNode,
-                     std::unordered_set<uint64> const& banned,
-                     std::function<bool(uint32 from, uint32 to)> const& taxiUsable,
-                     std::vector<uint32>& chain,
-                     std::unordered_map<uint32, uint8>& prevType,
-                     std::string& note)
-    {
-        chain.clear();
-        prevType.clear();
-
-        std::unordered_map<uint32, float> dist;
-        std::unordered_set<uint32> closed;
-        std::unordered_map<uint32, uint32> prev;
-
-        typedef std::pair<float, uint32> QE;
-        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-
-        if (sNodes.find(endNode) == sNodes.end())
-        {
-            note = "Zielknoten fehlt";
-            return false;
-        }
-
-        dist[startNode] = 0.0f;
-        pq.push(QE(0.0f, startNode));
-
-        uint32 visited = 0;
-        bool found = false;
-
-        while (!pq.empty())
-        {
-            QE cur = pq.top();
-            pq.pop();
-
-            if (cur.second == endNode)
-            {
-                found = true;
-                break;
-            }
-
-            if (closed.find(cur.second) != closed.end())
-                continue;
-            closed.insert(cur.second);
-
-            auto dIt = dist.find(cur.second);
-            if (dIt == dist.end())
-                continue;
-
-            if (++visited > 40000)
-                break;
-
-            auto lIt = sLinks.find(cur.second);
-            if (lIt == sLinks.end())
-                continue;
-
-            float g = dIt->second;
-
-            for (ATNodeLink const& l : lIt->second)
-            {
-                if (banned.find(EdgeId(cur.second, l.to)) != banned.end())
-                    continue;
-
-                float cost = l.baseCost;
-                if (l.type != 1)
-                {
-                    if (!ATConf.useSpecialLinks)
-                        continue;
-
-                    // Flug ohne bekannte Flugpunkte kommt gar nicht erst in Frage.
-                    if (l.type == 4 && taxiUsable && !taxiUsable(cur.second, l.to))
-                        continue;
-
-                    // Sonderverbindungen kosten extra, damit sie nur benutzt
-                    // werden, wenn sie wirklich viel Strecke sparen.
-                    cost += ATConf.specialLinkCost;
-                }
-
-                float nd = g + cost;
-                auto old = dist.find(l.to);
-                if (old == dist.end() || nd < old->second)
-                {
-                    dist[l.to] = nd;
-                    prev[l.to] = cur.second;
-                    prevType[l.to] = l.type;
-                    pq.push(QE(nd, l.to));
-                }
-            }
-        }
-
-        if (!found)
-        {
-            note = "kein Weg im Knotengraphen";
-            return false;
-        }
-
-        uint32 at = endNode;
-        while (true)
-        {
-            chain.push_back(at);
-            if (at == startNode)
-                break;
-
-            auto p = prev.find(at);
-            if (p == prev.end())
-            {
-                note = "Rueckverfolgung unterbrochen";
-                return false;
-            }
-            at = p->second;
-
-            if (chain.size() > 400)
-            {
-                note = "Route unplausibel lang";
-                return false;
-            }
-        }
-        std::reverse(chain.begin(), chain.end());
-        return true;
-    }
-}
+// Die Suche selbst steht als reine Funktion in AutoTravel_Util.cpp
+// (AT::ShortestChain) und ist dort als eigenes Programm getestet. Hier kommen nur
+// die Regeln dazu, die den Spieler und den Core brauchen: welche Karten durchquert
+// werden duerfen, ob ein Flug oder Portal fuer diesen Charakter in Frage kommt.
 
 // ---------------------------------------------------------------------------
 // Route aus dem Knotengraphen
@@ -465,28 +340,63 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
     uint32 flightsPlanned = 0;
     uint32 flightsRejected = 0;
 
-    // Flugverbindungen, deren Enden dieser Charakter nicht kennt, scheiden schon in
-    // der Suche aus. Frueher wurde nur die erste unbrauchbare Verbindung je Suche
-    // gesperrt und nach fuenf Suchen aufgegeben: bei wenigen bekannten Flugpunkten
-    // (Messung am mitgelieferten Graphen: oft 15 bis 60 Sperren noetig) scheiterte
-    // die Planung, vor allem ueber eine Kartengrenze, wo es keinen Ausweichweg gibt.
-    auto taxiUsable = [&](uint32 from, uint32 to) -> bool
+    // --- Regeln fuer die Suche ---------------------------------------------
+    //
+    // * Durchquert werden duerfen nur Ostkontinente, Kalimdor und die Tiefenbahn;
+    //   Outland, Nordend und Instanzen nur, wenn Start oder Ziel dort liegen (siehe
+    //   AT::TRANSIT_MAPS). Ohne das fuehrte Brachland -> Sturmwind ueber den Zeppelin
+    //   nach Nordend und ein Schiff zurueck: billig im Graphen, unbrauchbar im Spiel.
+    // * Flugverbindungen, deren Enden dieser Charakter nicht kennt, scheiden schon in
+    //   der Suche aus. Frueher wurde nur die erste unbrauchbare Verbindung je Suche
+    //   gesperrt und nach fuenf Suchen aufgegeben: bei wenigen bekannten Flugpunkten
+    //   (am mitgelieferten Graphen oft 15 bis 60 Sperren noetig) scheiterte die
+    //   Planung, vor allem ueber eine Kartengrenze, wo es keinen Ausweichweg gibt.
+    // * Zeppeline fahren nur die Horde, Schiffe nur die Allianz mit (AT::TransportFaction).
+    // * Ein Portal zaehlt nur, wenn sein Areatrigger in dieser Datenbank ein
+    //   Teleportziel hat. Der Graph stammt aus mod-playerbots; ein Trigger, den der
+    //   Server nicht kennt, liesse den Charakter vor einem toten Portal warten.
+    AT::ChainRules rules;
+    rules.specialLinkCost = ATConf.specialLinkCost;
+    rules.useSpecialLinks = ATConf.useSpecialLinks;
+    for (uint32 m : AT::TRANSIT_MAPS)
+        rules.allowedMaps.insert(m);
+    rules.allowedMaps.insert(startMap);
+    rules.allowedMaps.insert(destMap);
+    rules.allowedMaps.insert(player->GetMapId());
+
+    rules.linkUsable = [&](uint32 from, ATNodeLink const& l) -> bool
     {
-        auto a = sNodes.find(from);
-        auto b = sNodes.find(to);
-        if (a == sNodes.end() || b == sNodes.end())
-            return false;
-        return TaxiHopPlausible(player,
-                                a->second.mapId, a->second.x, a->second.y,
-                                b->second.mapId, b->second.x, b->second.y);
+        if (l.type == 4)
+        {
+            auto a = sNodes.find(from);
+            auto b = sNodes.find(l.to);
+            if (a == sNodes.end() || b == sNodes.end())
+                return false;
+            return TaxiHopPlausible(player,
+                                    a->second.mapId, a->second.x, a->second.y,
+                                    b->second.mapId, b->second.x, b->second.y);
+        }
+        if (l.type == 2 && l.object)
+            return sObjectMgr->GetAreaTriggerTeleport(l.object) != nullptr;
+        if (l.type == 3 && l.object)
+        {
+            // Zeppeline der Horde, Schiffe der Allianz: nur fuer die eigene Fraktion
+            uint8 const f = AT::TransportFaction(l.object);
+            if (f == 1 && player->GetTeamId() != TEAM_ALLIANCE)
+                return false;
+            if (f == 2 && player->GetTeamId() != TEAM_HORDE)
+                return false;
+        }
+        return true;
     };
 
     // Was die Vorpruefung nicht erkennt (Geld, keine Flugkette zwischen den
     // bekannten Punkten), faellt erst bei der Umwandlung auf. Alle solchen
-    // Verbindungen einer Kette werden zusammen gesperrt.
-    for (uint8 attempt = 0; attempt < 8; ++attempt)
+    // Verbindungen einer Kette werden zusammen gesperrt; die Suche selbst ist billig.
+    for (uint8 attempt = 0; attempt < 24; ++attempt)
     {
-        if (!SearchChain(startNode, endNode, banned, taxiUsable, chain, prevType, note))
+        if (!AT::ShortestChain(sNodes, sLinks, startNode, endNode, banned, rules,
+                               chain, prevType, note))
             return false;
 
         // --- Umweg am Routenanfang abschneiden -----------------------------
@@ -535,6 +445,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
 
         bool retry = false;
         std::vector<uint64> banEdges;
+        uint64 moneyLeft = player->GetMoney();     // Fluege der Kette zusammen, nicht einzeln
 
         for (size_t i = 0; i < chain.size(); ++i)
         {
@@ -575,13 +486,17 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
                     float landX = 0.0f, landY = 0.0f, landZ = 0.0f;
                     uint32 boardMap = 0, landMap = 0;
 
+                    // ResolveTaxiHop prueft das Geld nur fuer diesen einen Flug; hier
+                    // zaehlen alle Fluege der Kette zusammen.
                     if (ResolveTaxiHop(player,
                                        n.mapId, n.x, n.y,
                                        nn.mapId, nn.x, nn.y,
                                        fromNode, toNode, cost,
                                        boardMap, boardX, boardY, boardZ,
-                                       landMap, landX, landY, landZ))
+                                       landMap, landX, landY, landZ)
+                        && uint64(cost) <= moneyLeft)
                     {
+                        moneyLeft -= cost;
                         leg.taxiFrom = fromNode;
                         leg.taxiTo   = toNode;
                         leg.taxiCost = cost;
@@ -601,7 +516,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
                         // Diese Verbindung kann der Charakter nicht nehmen. Weiter
                         // pruefen: so werden alle schlechten Fluege der Kette auf
                         // einmal gesperrt.
-                        banEdges.push_back(EdgeId(chain[i], chain[i + 1]));
+                        banEdges.push_back(AT::EdgeId(chain[i], chain[i + 1]));
                         retry = true;
                         ++flightsRejected;
                     }

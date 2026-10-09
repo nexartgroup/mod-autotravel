@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <queue>
 #include <string>
 
 // ---------------------------------------------------------------------------
@@ -248,5 +249,175 @@ namespace AT
 
         path.swap(out);
         return true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kuerzester Weg im Knotengraphen
+// ---------------------------------------------------------------------------
+//
+// Dijkstra, kein A*: die Luftlinie als Schaetzung ist nicht zulaessig, weil
+// Flug-, Schiffs- und Portalkanten im Graphen nur wenige Punkte kosten, egal wie
+// weit sie tragen -- A* mit geschlossener Menge lieferte damit oft Ketten, die
+// teurer waren als das Optimum. Der Graph hat rund 3,8 Tsd. Knoten und 15 Tsd.
+// Kanten; die vollstaendige Suche ist billig.
+
+bool AT::ShortestChain(std::unordered_map<uint32, ATNode> const& nodes,
+                       std::unordered_map<uint32, std::vector<ATNodeLink>> const& links,
+                       uint32 startNode, uint32 endNode,
+                       std::unordered_set<uint64> const& banned,
+                       ChainRules const& rules,
+                       std::vector<uint32>& chain,
+                       std::unordered_map<uint32, uint8>& prevType,
+                       std::string& note)
+{
+    chain.clear();
+    prevType.clear();
+
+    if (nodes.find(startNode) == nodes.end() || nodes.find(endNode) == nodes.end())
+    {
+        note = "Start- oder Zielknoten fehlt";
+        return false;
+    }
+
+    std::unordered_map<uint32, float> dist;
+    std::unordered_set<uint32> closed;
+    std::unordered_map<uint32, uint32> prev;
+
+    typedef std::pair<float, uint32> QE;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+
+    dist[startNode] = 0.0f;
+    pq.push(QE(0.0f, startNode));
+
+    uint32 visited = 0;
+    bool found = false;
+
+    while (!pq.empty())
+    {
+        QE cur = pq.top();
+        pq.pop();
+
+        if (cur.second == endNode)
+        {
+            found = true;
+            break;
+        }
+
+        if (closed.find(cur.second) != closed.end())
+            continue;
+        closed.insert(cur.second);
+
+        auto dIt = dist.find(cur.second);
+        if (dIt == dist.end())
+            continue;
+
+        if (++visited > rules.maxVisited)
+            break;
+
+        auto lIt = links.find(cur.second);
+        if (lIt == links.end())
+            continue;
+
+        float const g = dIt->second;
+
+        for (ATNodeLink const& l : lIt->second)
+        {
+            if (l.type < 1 || l.type > 4)
+                continue;                    // unbekannter Typ: nicht benutzbar
+
+            if (banned.find(EdgeId(cur.second, l.to)) != banned.end())
+                continue;
+
+            auto toIt = nodes.find(l.to);
+            if (toIt == nodes.end())
+                continue;
+
+            if (!rules.allowedMaps.empty()
+                && rules.allowedMaps.find(toIt->second.mapId) == rules.allowedMaps.end())
+                continue;
+
+            float cost = l.baseCost;
+            if (l.type != 1)
+            {
+                if (!rules.useSpecialLinks)
+                    continue;
+                if (rules.linkUsable && !rules.linkUsable(cur.second, l))
+                    continue;
+
+                // Sonderverbindungen kosten extra, damit sie nur benutzt werden,
+                // wenn sie wirklich viel Strecke sparen.
+                cost += rules.specialLinkCost;
+            }
+
+            float const nd = g + cost;
+            auto old = dist.find(l.to);
+            if (old == dist.end() || nd < old->second)
+            {
+                dist[l.to] = nd;
+                prev[l.to] = cur.second;
+                prevType[l.to] = l.type;
+                pq.push(QE(nd, l.to));
+            }
+        }
+    }
+
+    if (!found)
+    {
+        note = "kein Weg im Knotengraphen";
+        return false;
+    }
+
+    uint32 at = endNode;
+    while (true)
+    {
+        chain.push_back(at);
+        if (at == startNode)
+            break;
+
+        auto p = prev.find(at);
+        if (p == prev.end())
+        {
+            note = "Rueckverfolgung unterbrochen";
+            chain.clear();
+            return false;
+        }
+        at = p->second;
+
+        if (chain.size() > 400)
+        {
+            note = "Route unplausibel lang";
+            chain.clear();
+            return false;
+        }
+    }
+    std::reverse(chain.begin(), chain.end());
+    return true;
+}
+
+uint8 AT::TransportFaction(uint32 entry)
+{
+    switch (entry)
+    {
+        // Horde: Zeppeline
+        case 164871:    // Zeppelin (The Thundercaller): Orgrimmar - Grom'gol
+        case 175080:    // Zeppelin (The Iron Eagle): Orgrimmar - Unterstadt
+        case 176495:    // Zeppelin (The Purple Princess): Unterstadt - Grom'gol
+        case 181689:    // Zeppelin, Horde (Cloudkisser): Unterstadt - Vengeance Landing
+        case 186238:    // Zeppelin, Horde (The Mighty Wind): Orgrimmar - Warsong Hold
+            return 2;
+
+        // Allianz: Schiffe
+        case 176231:    // Ship (The Lady Mehley)
+        case 176244:    // Ship, Night Elf (Moonspray)
+        case 176310:    // Ship (The Bravery)
+        case 177233:    // Ship, Night Elf (Feathermoon Ferry)
+        case 181646:    // Ship, Night Elf (Elune's Blessing)
+        case 181688:    // Ship, Icebreaker (Northspear): Menethil - Valgarde
+        case 190536:    // Ship, Icebreaker (Stormwind's Pride): Sturmwind - Valiance Keep
+            return 1;
+
+        default:
+            return 0;   // u. a. 20808 (The Maiden's Fancy), die Schildkroeten
     }
 }

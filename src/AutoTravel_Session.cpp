@@ -739,9 +739,21 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
     if (!lastLeg && s.legIdx < s.route.size() && s.route[s.legIdx].kind == AT_LEG_TAXI)
         radius = std::min(radius, ATConf.taxiBoardDistance);
 
+    // Anleger, Portal und Handstrecken: mod-playerbots nimmt bis 20 yd Abstand zum
+    // Knoten als angekommen (Schiffsknoten sind die angedockte Position des Schiffs,
+    // nicht ein begehbarer Punkt), also ist 15 yd zu knapp.
+    if (!lastLeg && s.legIdx < s.route.size()
+        && (s.route[s.legIdx].kind == AT_LEG_TRANSPORT || s.route[s.legIdx].kind == AT_LEG_PORTAL
+            || s.route[s.legIdx].kind == AT_LEG_MANUAL))
+        radius = std::max(radius, 25.0f);
+
     float dist = player->GetExactDist2d(s.destX, s.destY);
 
-    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_TAXI)
+    // In den Wartezustaenden gilt die Ankunft schon: sonst liefe der Block unten bei
+    // jedem Takt erneut (Chatmeldung fuenfmal pro Sekunde, und der Zaehler fuer das
+    // Aufgeben wuerde ewig zurueckgesetzt), solange der Charakter am Anleger steht.
+    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_TAXI
+        && s.state != AT_WAIT_TRANSPORT && s.state != AT_WAIT_MANUAL)
     {
         ATLeg const& cur = s.route[s.legIdx];
 
@@ -853,11 +865,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             // Fortsetzen, sobald der Charakter in der Naehe des naechsten
             // Punktes auftaucht. Das deckt Portale, Schiffe und Zeppeline mit
             // ab, auch wenn sie keinen Kartenwechsel ausloesen.
+            //
+            // Der Charakter muss dafuer den Anleger verlassen haben: liegen die beiden
+            // Enden eines Portals oder Aufzugs nah beieinander (unter 100 yd), waere
+            // sonst schon das Warten am Anleger "die Verbindung genutzt".
             if (s.legIdx + 1 < s.route.size())
             {
                 ATLeg const& nxt = s.route[s.legIdx + 1];
                 if (nxt.resolved && nxt.mapId == player->GetMapId()
-                    && player->GetExactDist2d(nxt.wx, nxt.wy) < 100.0f)
+                    && player->GetExactDist2d(nxt.wx, nxt.wy) < 100.0f
+                    && player->GetExactDist2d(s.destX, s.destY) > ATConf.legDistance)
                 {
                     Msg(player, "Verbindung genutzt - die Reise wird fortgesetzt.");
                     if (!AdvanceLeg(player, s))
@@ -872,6 +889,21 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
             if (s.waitTimer > ATConf.transportWaitMs)
             {
+                // Geht es auf derselben Karte weiter, laeuft die Reise ohne die
+                // Verbindung weiter. Liegt der naechste Punkt auf einer anderen Karte,
+                // gibt es ohne sie keinen Weg: dann ehrlich beenden, statt Etappen zu
+                // ueberspringen und mit "Karte gewechselt" zu enden.
+                bool const sameMapNext = (s.legIdx + 1 < s.route.size())
+                    && (s.route[s.legIdx + 1].mapId == AT_NO_MAP
+                        || s.route[s.legIdx + 1].mapId == player->GetMapId());
+
+                if (!sameMapNext)
+                {
+                    Finish(player, s, "Die Verbindung kam nicht zustande - Reise beendet. Nimm sie "
+                                      "von Hand und starte die Reise danach neu.", false);
+                    return;
+                }
+
                 Msg(player, "Die Verbindung kam nicht zustande - der Weg wird ohne sie gesucht.");
                 if (!AdvanceLeg(player, s))
                 {

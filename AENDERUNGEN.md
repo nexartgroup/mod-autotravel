@@ -1,3 +1,71 @@
+# Version 4.0.5 -- Reise ueber Kartengrenzen, zweite Durchsicht
+
+Anlass: ein Spielerbericht (Brachland -> Hafen von Sturmwind) mit der Meldung "zu viele
+nicht nutzbare Verbindungen im Knotengraphen" -- das war das Fuenf-Sperren-Limit aus
+4.0.3. Eine zweite unabhaengige Durchsicht hat danach gezeigt, dass 4.0.4 den Fehler
+zwar behebt, die Reise aber auf einer unbrauchbaren Strecke plante.
+
+## Was die Durchsicht fand und was jetzt anders ist
+
+* **Umweg ueber Nordend.** Ohne Flugpunkte war die billigste Kette Brachland ->
+  Zeppelin der Horde nach Nordend -> Schiff der Allianz zurueck nach Sturmwind: im
+  Graphen billig (Sonderverbindungen kosten nur 400 Punkte), in der Praxis ein Marsch
+  durch Feindesland, fuer keine Fraktion machbar. Jetzt duerfen Ketten nur durch
+  Oestliche Koenigreiche, Kalimdor und die Tiefenbahn (Karte 369) fuehren; Outland,
+  Nordend und Instanzen sind nur erlaubt, wenn Start oder Ziel dort liegen
+  (`AT::TRANSIT_MAPS`). Das gilt auch fuer Instanzportale (Dire Maul als Abkuerzung).
+* **Fraktion der Transporte.** Zeppeline gelten als Horde, Schiffe (ausser The Maiden's
+  Fancy, Ratchet - Booty Bay) als Allianz (`AT::TransportFaction`, Tabelle nach den
+  Namen in `gameobject_template`). Nicht erfasst sind Portale und Fusswege durch
+  fremdes Gebiet.
+* **Tote Portale.** Die Spalte `object` der Verbindungstabelle wird gelesen (fehlt sie,
+  bleibt alles wie bisher). Ein Portal zaehlt nur, wenn sein Areatrigger in
+  `areatrigger_teleport` steht -- im mitgelieferten Datenstand fehlen zum Beispiel
+  1103 und 1104 ("Booty Bay portal"). Unbekannte Verbindungstypen (nicht 1-4) werden
+  nicht benutzt.
+* **Geld fuer die ganze Kette.** `ResolveTaxiHop` pruefte den Preis nur je Flug; zwei
+  Fluege zu je 3 Gold bei 4 Gold im Beutel kamen durch und scheiterten im Flug.
+  Jetzt zaehlt die Summe. Die Zahl der Suchen mit Sperren steigt von 8 auf 24.
+* **Wartezustand am Anleger.** `WAIT_TRANSPORT` und `WAIT_MANUAL` betraten den
+  Ankunftsblock bei jedem Takt neu: dieselbe Chatzeile fuenfmal pro Sekunde, und der
+  Zaehler fuers Aufgeben wurde dauernd zurueckgesetzt. Jetzt zaehlt die Ankunft nur
+  einmal. "Verbindung genutzt" gilt erst, wenn der Charakter den Anleger verlassen hat.
+  Nach Ablauf der Wartezeit endet die Reise mit einem klaren Text, wenn es ohne die
+  Verbindung nicht weitergeht (bisher ueberging sie Etappen und endete mit "Karte
+  gewechselt").
+* **Ankunftsradius** an Anlegern, Portalen und Handstrecken 25 statt 15 yd
+  (mod-playerbots nimmt bis 20 yd an; Schiffsknoten sind die angedockte Position).
+* **Statuszeile** (Entfernung, Fortschritt) auch dann ohne Unsinn, wenn eine Route
+  zwischen zwei Punkten derselben Karte ueber eine andere fuehrt (Tiefenbahn).
+* **Suche als reine Funktion** (`AT::ShortestChain` in `AutoTravel_Util.cpp`) mit
+  eigenen Unit-Tests (`tools/tests`): Knoten-ID 0, Kartenfilter, Sperren, Pruefung je
+  Sonderverbindung, Fraktion, unbekannte Typen, Obergrenzen. Bisher war die Suche an die
+  geladenen Tabellen gebunden und ungetestet.
+* Der Handschlag meldet die volle Fassung (`4.0.5`) statt `4.0`. Das Addon zeigt sie nur
+  an ("Server 4.0.5 ..." nach dem Anmelden), damit sich ein Fehlerbericht einer Fassung
+  zuordnen laesst; ueber die Vertraeglichkeit entscheidet weiter allein die Protokollnummer.
+
+## Was nicht geaendert wurde
+
+* Fusswege durch feindliche Hauptstaedte, Portale der anderen Fraktion und der
+  Schwierigkeitsgrad eines Gebiets (Stufe) fliessen nicht in die Suche ein.
+* Dem Graphen fehlen Flugknoten fuer Orgrimmar, Durotar und Darnassus (nur die
+  Planung auf derselben Karte kennt diese Flugpunkte).
+* Ob ein Anleger nach dem Navmesh im Ankunftsradius erreichbar ist, laesst sich ohne
+  Spiel nicht pruefen.
+
+## Was getestet wurde
+
+Uebersetzt gegen die Header von AzerothCore `master`; `tools/check.sh` laeuft mit 169
+Pruefungen, 0 Fehler (neu: die Kettensuche). Die Strecken Brachland -> Hafen Sturmwind,
+Ratchet -> Sturmwind, Sturmwind -> Orgrimmar, Menethil -> Auberdine und Orgrimmar ->
+Unterstadt wurden ausserdem gegen die Knotendaten von mod-playerbots nachgerechnet.
+**Nicht getestet** ist die Reise selbst: weder im Spiel noch auf einem laufenden Server;
+Wartezustaende, Ankunftsradius und das Verhalten an echten Anlegern bleiben dem Spiel
+vorbehalten.
+
+---
+
 # Version 4.0.4 -- Knotensuche nach der Durchsicht
 
 Eine unabhaengige Durchsicht der Knotensuche (auch fuer Kontinentwechsel) hat vier
