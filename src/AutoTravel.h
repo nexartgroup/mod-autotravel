@@ -125,6 +125,10 @@ enum ATLegKind : uint8
 // Koordinaten von Sturmwind, die dort irgendwo im Sueden liegen.
 constexpr uint32 AT_NO_MAP = 0xFFFFFFFFu;
 
+// "Kein Knoten". Ebenfalls NICHT 0: mod-playerbots nummeriert seine Reiseknoten ab 0,
+// und der Knoten 0 ist der Startpunkt der Menschen in Nordhain (Karte 0).
+constexpr uint32 AT_NO_NODE = 0xFFFFFFFFu;
+
 struct ATLeg
 {
     // Quelle A: Kartenkoordinaten vom Addon
@@ -365,7 +369,7 @@ struct ATSession
     // Aktive Etappe
     std::vector<ATLeg> route;
     size_t  legIdx = 0;
-    uint32  mapId  = 0;                 // Karte, auf der die Etappe laeuft
+    uint32  mapId  = AT_NO_MAP;         // Karte, auf der die Etappe laeuft (Start/SetLegTarget setzen sie)
     float   destX = 0.0f, destY = 0.0f, destZ = 0.0f;
 
     // Aktuelles Teilstueck
@@ -540,6 +544,13 @@ public:
     // vorhanden, Preis unter der Grenze, Geld reicht. Liefert dazu die
     // Positionen der beiden Flugmeister, damit die Etappe genau dort landet --
     // der Core laesst den Abflug nur aus naechster Naehe zu.
+    // Die billige Vorpruefung davon: liegen an beiden Enden bekannte Flugpunkte?
+    // Damit schliesst die Knotensuche unbrauchbare Fluege gleich aus, statt sie
+    // erst nach dem Fund zu sperren.
+    bool TaxiHopPlausible(Player* player,
+                          uint32 mapA, float ax, float ay,
+                          uint32 mapB, float bx, float by) const;
+
     bool ResolveTaxiHop(Player* player,
                         uint32 mapA, float ax, float ay,
                         uint32 mapB, float bx, float by,

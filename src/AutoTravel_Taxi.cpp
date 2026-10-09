@@ -243,6 +243,12 @@ namespace
         return chain.size() >= 2;
     }
 
+    // Wie weit ein Flugmeister vom gefragten Ort entfernt sein darf, damit es
+    // noch dieselbe Verbindung ist. Die Knoten des Playerbot-Graphen liegen
+    // direkt beim Flugmeister ("Dun Morogh flightMaster"), also reicht ein
+    // enges Fenster.
+    constexpr float TAXI_MATCH_RANGE = 80.0f;
+
     // Naechster bekannter, benutzbarer Flugpunkt zu einer Stelle.
     uint32 NearestKnownNode(Player* player, uint32 mapId, float x, float y,
                             float maxDist, float* outDist)
@@ -318,6 +324,20 @@ void AutoTravelMgr::TaxiStats(Player* player, uint32& total, uint32& known,
 // Zusaetzlich muss der gefundene Flugmeister nah genug am gefragten Ort liegen
 // -- sonst beschreibt die Verbindung einen ganz anderen Flug.
 
+bool AutoTravelMgr::TaxiHopPlausible(Player* player,
+                                     uint32 mapA, float ax, float ay,
+                                     uint32 mapB, float bx, float by) const
+{
+    if (!ATConf.useTaxi || !player)
+        return false;
+
+    uint32 a = NearestKnownNode(player, mapA, ax, ay, TAXI_MATCH_RANGE, nullptr);
+    if (!a)
+        return false;
+    uint32 b = NearestKnownNode(player, mapB, bx, by, TAXI_MATCH_RANGE, nullptr);
+    return b && a != b;
+}
+
 bool AutoTravelMgr::ResolveTaxiHop(Player* player,
                                    uint32 mapA, float ax, float ay,
                                    uint32 mapB, float bx, float by,
@@ -332,18 +352,12 @@ bool AutoTravelMgr::ResolveTaxiHop(Player* player,
     if (!ATConf.useTaxi || !player)
         return false;
 
-    // Wie weit ein Flugmeister vom gefragten Ort entfernt sein darf, damit es
-    // noch dieselbe Verbindung ist. Die Knoten des Playerbot-Graphen liegen
-    // direkt beim Flugmeister ("Dun Morogh flightMaster"), also reicht ein
-    // enges Fenster.
-    constexpr float MATCH_RANGE = 80.0f;
-
     float dA = 0.0f, dB = 0.0f;
-    uint32 a = NearestKnownNode(player, mapA, ax, ay, MATCH_RANGE, &dA);
+    uint32 a = NearestKnownNode(player, mapA, ax, ay, TAXI_MATCH_RANGE, &dA);
     if (!a)
         return false;
 
-    uint32 b = NearestKnownNode(player, mapB, bx, by, MATCH_RANGE, &dB);
+    uint32 b = NearestKnownNode(player, mapB, bx, by, TAXI_MATCH_RANGE, &dB);
     if (!b || a == b)
         return false;
 

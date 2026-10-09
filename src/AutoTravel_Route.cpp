@@ -754,8 +754,15 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 
     // Bei einem Kartenwechsel gibt es keine vergleichbare Luftlinie; der
     // Fortschritt kommt dann aus der Etappenzahl (RemainingForStatus).
-    if (s.startDistance <= 0.0f && (s.finalMapId == AT_NO_MAP || s.finalMapId == s.startMapId))
-        s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
+    if (s.startDistance <= 0.0f)
+    {
+        if (s.finalMapId == s.startMapId)
+            s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
+        else if (s.finalMapId == AT_NO_MAP && s.mapId == s.startMapId)
+            // Endpunkt einer Carbonite-Route nicht aufloesbar: der Fortschritt
+            // bezieht sich dann auf die erste Etappe (und nicht auf den Weltursprung).
+            s.startDistance = player->GetExactDist2d(s.destX, s.destY);
+    }
 
     Msg(player, "Reise gestartet: " + s.destName);
     PushStatus(player, s);

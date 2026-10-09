@@ -1,3 +1,44 @@
+# Version 4.0.4 -- Knotensuche nach der Durchsicht
+
+Eine unabhaengige Durchsicht der Knotensuche (auch fuer Kontinentwechsel) hat vier
+Schwaechen gefunden. Alle vier sind behoben; belegt sind sie durch Nachrechnen der
+Algorithmen gegen die mitgelieferten Knotendaten von mod-playerbots, nicht durch
+Spielen.
+
+## Aenderungen
+
+* **Flugverbindungen werden in der Suche ausgeschlossen.** Bisher sperrte
+  `BuildNodeRoute` nur die erste unbrauchbare Flugverbindung je Suche und gab nach
+  fuenf Suchen auf. Weil Fluege im Graphen fast nichts kosten, brauchte ein
+  Charakter mit wenigen bekannten Flugpunkten oft 15 bis 60 Sperren (nachgerechnet
+  fuer Ratschet -> Sturmwind, Auberdine -> Sturmwind u. a.); ueber eine
+  Kartengrenze, wo es keinen Ausweichweg gibt, endete das mit "findet keine
+  Verbindung". Jetzt prueft die Suche jede Flugkante vorher billig
+  (`TaxiHopPlausible`: liegen an beiden Enden bekannte Flugpunkte?). Was erst die
+  volle Pruefung findet (Geld, keine Flugkette), wird mit allen Fluegen der Kette
+  auf einmal gesperrt; die Grenze liegt bei acht Suchen.
+* **Dijkstra statt A\*.** Die Luftlinie als Schaetzung ist nicht zulaessig, weil
+  Flug-, Schiffs- und Portalkanten im Graphen nur wenige Punkte kosten, egal wie
+  weit sie tragen. Nachgerechnet lieferte A* bei gut der Haelfte der Zufallspaare
+  eine teurere Kette als das Optimum. Der Graph hat rund 3,8 Tsd. Knoten; die
+  vollstaendige Suche ist billig.
+* **Knoten-ID 0 ist ein echter Knoten** (Startpunkt der Menschen in Nordhain, Karte
+  0). `NearestNode` meldete "kein Knoten" mit 0; wer dort stand, bekam keine
+  Knotenroute. Neue Konstante `AT_NO_NODE` (0xFFFFFFFF).
+* **Fortschritt bei nicht aufloesbarem Endpunkt:** `startDistance` wurde zum
+  Weltursprung gemessen, wenn der letzte Carbonite-Punkt nicht aufloesbar war. Jetzt
+  zaehlt dann die erste Etappe.
+* `ATSession::mapId` beginnt mit `AT_NO_MAP` statt 0.
+
+## Was getestet wurde
+
+Uebersetzt gegen die Header von AzerothCore `master`; die 109 Pruefungen aus
+`tools/tests` laufen. Die Suche selbst haengt an den geladenen Knotentabellen und
+ist **nicht** als Unit-Test abgedeckt, und sie ist weder im Spiel noch gegen einen
+laufenden Server ausprobiert.
+
+---
+
 # Version 4.0.3 -- Karte 0 galt als "keine Karte"
 
 Gemeldet: Ziel Hafen von Sturmwind, Charakter bei Ratschet (Kalimdor). Die Reise

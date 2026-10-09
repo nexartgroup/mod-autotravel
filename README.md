@@ -341,7 +341,7 @@ verhindern den Start aber nicht.
 | `AutoTravel_Move.cpp` | Spline, Kontrolle, Reittier, Luftroute |
 | `AutoTravel_Route.cpp` | WorldMapArea.dbc, Etappen, Start/Stop, Diagnose |
 | `AutoTravel_Session.cpp` | Takt, Zustandsmaschine, Uebergabe |
-| `AutoTravel_Nodes.cpp` | Reiseknoten von mod-playerbots, A* |
+| `AutoTravel_Nodes.cpp` | Reiseknoten von mod-playerbots, kuerzester Weg (Dijkstra) |
 | `AutoTravel_Taxi.cpp` | Flugpunkte, Dijkstra, Abflug |
 | `AutoTravel_SC.cpp` | Befehle und Anbindung an den Core |
 | `tools/check.sh` | Pruefung gegen die Header von AzerothCore, Unit-Tests, Konfigurationsabgleich |
