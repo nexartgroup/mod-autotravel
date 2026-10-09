@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -236,9 +237,11 @@ void AutoTravelMgr::LoadTravelNodes()
 
 namespace
 {
+    // Liefert AT_NO_NODE, wenn kein Knoten im Umkreis liegt. (Die Knoten-ID 0 ist
+    // ein echter Knoten -- siehe AT_NO_NODE.)
     uint32 NearestNode(uint32 mapId, float x, float y, float radius, float* outDist)
     {
-        uint32 best = 0;
+        uint32 best = AT_NO_NODE;
         float bestDist = radius;
 
         for (auto const& kv : sNodes)
@@ -254,30 +257,26 @@ namespace
         }
 
         if (outDist)
-            *outDist = best ? bestDist : -1.0f;
+            *outDist = (best != AT_NO_NODE) ? bestDist : -1.0f;
         return best;
     }
 }
 
 // ---------------------------------------------------------------------------
-// A* mit gesperrten Kanten
+// Kuerzester Weg mit gesperrten Kanten
 // ---------------------------------------------------------------------------
 //
-// Dijkstra breitet sich gleichmaessig in alle Richtungen aus und besucht dabei
-// Zehntausende Knoten. A* mit Luftlinien-Schaetzung laeuft auf das Ziel zu.
+// Dijkstra. Frueher stand hier A* mit der Luftlinie als Schaetzung, und die ist
+// KEINE zulaessige Schaetzung: Flug-, Schiffs- und Portalkanten kosten im Graphen
+// nur wenige Punkte, egal wie weit sie tragen, die Luftlinie ueberschaetzt dann
+// um Tausende Yards. A* mit geschlossener Menge lieferte dadurch oft Ketten, die
+// teurer waren als das Optimum (Messung am mitgelieferten Graphen: bei gut der
+// Haelfte der Zufallspaare). Der Graph hat rund 3,8 Tsd. Knoten und 15 Tsd.
+// Kanten -- Dijkstra ueber alles ist billig und braucht keine Schaetzung.
 //
-// Die Schaetzung ist zulaessig (unterschaetzt nie), weil die Kantenkosten aus
-// Weglaengen stammen und ein Weg nie kuerzer als die Luftlinie ist. Bei Knoten
-// auf ANDEREN Karten ist eine Luftlinie bedeutungslos -- dort ist die
-// Schaetzung 0 und A* verhaelt sich wie Dijkstra.
-//
-// Wichtig: die Warteschlange enthaelt f = g + h, verglichen werden muss aber
-// gegen g. Ohne diese Trennung waehlt A* falsche Wege.
-//
-// Neu ist die Sperrliste. Der Graph kennt Flugverbindungen, die ein konkreter
-// Charakter gar nicht benutzen kann, weil ihm der Flugpunkt fehlt. Solche
-// Kanten fallen erst auf, wenn die Route steht -- dann werden sie gesperrt und
-// die Suche laeuft noch einmal.
+// Kanten, die der Charakter nicht benutzen kann, schliesst `edgeUsable` aus:
+//   * gesperrte Kanten (`banned`) -- erst nach dem Fund erkannte Fehlschlaege,
+//   * Flugverbindungen ohne bekannte Flugpunkte (`taxiUsable`), gleich bei der Suche.
 
 namespace
 {
@@ -288,6 +287,7 @@ namespace
 
     bool SearchChain(uint32 startNode, uint32 endNode,
                      std::unordered_set<uint64> const& banned,
+                     std::function<bool(uint32 from, uint32 to)> const& taxiUsable,
                      std::vector<uint32>& chain,
                      std::unordered_map<uint32, uint8>& prevType,
                      std::string& note)
@@ -302,26 +302,14 @@ namespace
         typedef std::pair<float, uint32> QE;
         std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
 
-        auto goalIt = sNodes.find(endNode);
-        if (goalIt == sNodes.end())
+        if (sNodes.find(endNode) == sNodes.end())
         {
             note = "Zielknoten fehlt";
             return false;
         }
-        ATNode const& goalNode = goalIt->second;
-
-        auto heuristic = [&](uint32 n) -> float
-        {
-            auto it = sNodes.find(n);
-            if (it == sNodes.end())
-                return 0.0f;
-            if (it->second.mapId != goalNode.mapId)
-                return 0.0f;
-            return AT::Dist2D(it->second.x, it->second.y, goalNode.x, goalNode.y);
-        };
 
         dist[startNode] = 0.0f;
-        pq.push(QE(heuristic(startNode), startNode));
+        pq.push(QE(0.0f, startNode));
 
         uint32 visited = 0;
         bool found = false;
@@ -365,6 +353,10 @@ namespace
                     if (!ATConf.useSpecialLinks)
                         continue;
 
+                    // Flug ohne bekannte Flugpunkte kommt gar nicht erst in Frage.
+                    if (l.type == 4 && taxiUsable && !taxiUsable(cur.second, l.to))
+                        continue;
+
                     // Sonderverbindungen kosten extra, damit sie nur benutzt
                     // werden, wenn sie wirklich viel Strecke sparen.
                     cost += ATConf.specialLinkCost;
@@ -377,7 +369,7 @@ namespace
                     dist[l.to] = nd;
                     prev[l.to] = cur.second;
                     prevType[l.to] = l.type;
-                    pq.push(QE(nd + heuristic(l.to), l.to));
+                    pq.push(QE(nd, l.to));
                 }
             }
         }
@@ -440,7 +432,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
                                    ATConf.nodeSearchRadius, &dStart);
     uint32 endNode = NearestNode(destMap, dx, dy, ATConf.nodeSearchRadius, &dEnd);
 
-    if (!startNode || !endNode)
+    if (startNode == AT_NO_NODE || endNode == AT_NO_NODE)
     {
         note = "kein Knoten in Reichweite";
         return false;
@@ -473,9 +465,28 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
     uint32 flightsPlanned = 0;
     uint32 flightsRejected = 0;
 
-    for (uint8 attempt = 0; attempt < 5; ++attempt)
+    // Flugverbindungen, deren Enden dieser Charakter nicht kennt, scheiden schon in
+    // der Suche aus. Frueher wurde nur die erste unbrauchbare Verbindung je Suche
+    // gesperrt und nach fuenf Suchen aufgegeben: bei wenigen bekannten Flugpunkten
+    // (Messung am mitgelieferten Graphen: oft 15 bis 60 Sperren noetig) scheiterte
+    // die Planung, vor allem ueber eine Kartengrenze, wo es keinen Ausweichweg gibt.
+    auto taxiUsable = [&](uint32 from, uint32 to) -> bool
     {
-        if (!SearchChain(startNode, endNode, banned, chain, prevType, note))
+        auto a = sNodes.find(from);
+        auto b = sNodes.find(to);
+        if (a == sNodes.end() || b == sNodes.end())
+            return false;
+        return TaxiHopPlausible(player,
+                                a->second.mapId, a->second.x, a->second.y,
+                                b->second.mapId, b->second.x, b->second.y);
+    };
+
+    // Was die Vorpruefung nicht erkennt (Geld, keine Flugkette zwischen den
+    // bekannten Punkten), faellt erst bei der Umwandlung auf. Alle solchen
+    // Verbindungen einer Kette werden zusammen gesperrt.
+    for (uint8 attempt = 0; attempt < 8; ++attempt)
+    {
+        if (!SearchChain(startNode, endNode, banned, taxiUsable, chain, prevType, note))
             return false;
 
         // --- Umweg am Routenanfang abschneiden -----------------------------
@@ -523,7 +534,7 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
         flightsPlanned = 0;
 
         bool retry = false;
-        uint64 banEdge = 0;
+        std::vector<uint64> banEdges;
 
         for (size_t i = 0; i < chain.size(); ++i)
         {
@@ -587,11 +598,12 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
                     }
                     else
                     {
-                        // Diese Verbindung kann der Charakter nicht nehmen.
-                        banEdge = EdgeId(chain[i], chain[i + 1]);
+                        // Diese Verbindung kann der Charakter nicht nehmen. Weiter
+                        // pruefen: so werden alle schlechten Fluege der Kette auf
+                        // einmal gesperrt.
+                        banEdges.push_back(EdgeId(chain[i], chain[i + 1]));
                         retry = true;
                         ++flightsRejected;
-                        break;
                     }
                 }
             }
@@ -618,7 +630,8 @@ bool AutoTravelMgr::BuildNodeRoute(Player* player, uint32 destMap,
             return true;
         }
 
-        banned.insert(banEdge);
+        for (uint64 e : banEdges)
+            banned.insert(e);
     }
 
     note = "zu viele nicht nutzbare Verbindungen im Knotengraphen";
@@ -646,7 +659,7 @@ void AutoTravelMgr::NodeInfo(Player* player)
     float d = 0.0f;
     uint32 n = NearestNode(player->GetMapId(), player->GetPositionX(), player->GetPositionY(),
                            ATConf.nodeSearchRadius, &d);
-    if (!n)
+    if (n == AT_NO_NODE)
     {
         std::snprintf(b, sizeof(b), "Kein Knoten innerhalb von %.0f yd.", ATConf.nodeSearchRadius);
         Msg(player, b);
