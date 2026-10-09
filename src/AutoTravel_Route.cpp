@@ -1089,8 +1089,12 @@ void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
     dist = 0.0f;
     progress = 0;
 
-    bool const crossMap = s.finalMapId != AT_NO_MAP && s.startMapId != AT_NO_MAP
-                          && s.finalMapId != s.startMapId;
+    // Auch eine Route zwischen zwei Punkten derselben Karte kann ueber eine andere
+    // fuehren (Tiefenbahn): solange der Spieler nicht auf der Zielkarte steht, sind
+    // die Koordinaten des Ziels fuer ihn bedeutungslos.
+    bool const crossMap = s.finalMapId != AT_NO_MAP
+                          && ((s.startMapId != AT_NO_MAP && s.finalMapId != s.startMapId)
+                              || s.finalMapId != player->GetMapId());
 
     if (!crossMap)
     {

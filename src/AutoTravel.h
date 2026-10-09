@@ -31,6 +31,7 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,9 +54,9 @@ class Map;
 // das melden, statt Nachrichten falsch zu lesen.
 
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
-// Nur zur Anzeige ("Server 4.0.4" im Addon, damit sich ein Fehlerbericht einer Fassung
+// Nur zur Anzeige ("Server 4.0.5" im Addon, damit sich ein Fehlerbericht einer Fassung
 // zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
-constexpr char const* AT_MODULE_VERSION = "4.0.4";
+constexpr char const* AT_MODULE_VERSION = "4.0.5";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
@@ -182,6 +183,11 @@ struct ATNodeLink
     // SpecialLinkCost und UseSpecialLinks ohne erneutes Laden aus der
     // Datenbank aendern lassen.
     float  baseCost = 1.0f;
+
+    // Spalte "object" der Tabelle: bei Typ 2 (Portal) die ID des Areatriggers, bei
+    // Typ 3 (Schiff, Zeppelin) der Eintrag des Transports. 0 = unbekannt oder die
+    // Spalte fehlt.
+    uint32 object = 0;
 };
 
 char const* ATLinkTypeName(uint8 t);
@@ -752,6 +758,65 @@ namespace AT
     // Rueckgabe: true, wenn etwas geteilt wurde. 'from' bleibt gueltig.
     bool SplitLongSegments(Movement::PointsArray& path, size_t from,
                            G3D::Vector3 const& origin, float maxLen);
+
+    // --- Kuerzester Weg im Knotengraphen -------------------------------------
+    //
+    // Reine Funktion ohne Zugriff auf Core, Datenbank oder Spieler (Daten und
+    // Regeln kommen als Parameter), damit sie sich als eigenes Programm testen laesst.
+
+    inline uint64 EdgeId(uint32 a, uint32 b)
+    {
+        return (uint64(a) << 32) | uint64(b);
+    }
+
+    // Karten, durch die eine Route nur hindurchfuehren darf, weil sie wirklich
+    // Wege dazwischen sind: Oestliche Koenigreiche, Kalimdor und die Tiefenbahn
+    // (Karte 369, verbindet Sturmwind und Eisenschmiede). Alle anderen -- Outland,
+    // Nordend, jede Instanz, jedes Schlachtfeld -- nur, wenn Start oder Ziel dort
+    // liegen. Sonst plant die Suche etwa Kalimdor -> Sturmwind ueber den Zeppelin
+    // nach Nordend und das Schiff zurueck: auf dem Papier billig, in der Praxis ein
+    // Marsch durch fremdes Gebiet (und ein Zeppelin der einen, ein Schiff der
+    // anderen Fraktion).
+    constexpr uint32 TRANSIT_MAPS[] = { 0, 1, 369 };
+
+    // Zu welcher Fraktion gehoert ein Transport (Eintrag aus der Spalte "object" bei
+    // Typ-3-Verbindungen)? 0 = beide oder unbekannt, 1 = Allianz, 2 = Horde.
+    //
+    // Der Graph aus mod-playerbots kennt keine Fraktionen; ohne diese Tabelle plant
+    // die Suche einen Allianzcharakter auf einen Zeppelin der Horde. Die Einordnung
+    // folgt den Namen der Transporte in gameobject_template: alle Zeppeline sind
+    // Horde, alle Schiffe ausser "The Maiden's Fancy" (Ratchet - Booty Bay, fuer
+    // beide) sind Allianz. Was nicht in der Tabelle steht, gilt als neutral.
+    // Nicht eingeordnet sind Portale (Typ 2) und Fusswege durch fremdes Gebiet.
+    uint8 TransportFaction(uint32 entry);
+
+    struct ChainRules
+    {
+        float specialLinkCost = 400.0f;      // Aufschlag je Sonderverbindung (Typ 2-4)
+        bool  useSpecialLinks = true;        // false: nur zu Fuss
+
+        // Karten, die die Kette betreten darf; leer = alle.
+        std::unordered_set<uint32> allowedMaps;
+
+        // Zusaetzliche Pruefung je Sonderverbindung (Flug: Flugpunkte bekannt?
+        // Portal: Areatrigger vorhanden?). Leer = alle erlaubt.
+        std::function<bool(uint32 from, ATNodeLink const& link)> linkUsable;
+
+        uint32 maxVisited = 40000;
+    };
+
+    // Dijkstra von startNode nach endNode. Kanten in 'banned' (EdgeId) und
+    // Verbindungen mit unbekanntem Typ (nicht 1-4) bleiben aussen vor. Bei Erfolg
+    // steht die Kette einschliesslich Start und Ziel in 'chain' und der Typ der
+    // Kante, ueber die jeder Knoten erreicht wurde, in 'prevType'.
+    bool ShortestChain(std::unordered_map<uint32, ATNode> const& nodes,
+                       std::unordered_map<uint32, std::vector<ATNodeLink>> const& links,
+                       uint32 startNode, uint32 endNode,
+                       std::unordered_set<uint64> const& banned,
+                       ChainRules const& rules,
+                       std::vector<uint32>& chain,
+                       std::unordered_map<uint32, uint8>& prevType,
+                       std::string& note);
 }
 
 #endif // MOD_AUTOTRAVEL_H
