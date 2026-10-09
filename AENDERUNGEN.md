@@ -770,22 +770,29 @@ Ausgeschaltet wird am Ende nur, was AutoTravel selbst eingeschaltet hat
 
 ### Botpad laeuft daneben
 
-Drei Beruehrungspunkte, alle in `AT_Compat.lua` behandelt, ohne eine Zeile in
-Botpad zu aendern:
+Berichtigung: Eine fruehere Fassung dieses Abschnitts beschrieb eine Datei
+`AT_Compat.lua`, die AutoTravel einen `Botpad.Print`-Umschlag setzen lasse. Die
+Datei gibt es nicht; AutoTravel enthaelt keine Zeile, die Botpad kennt. Die
+Abstimmung liegt in Botpad (ab 1.2), das AutoTravel beim Anmelden erkennt
+(`IsAddOnLoaded("AutoTravel")`):
 
-* **Doppelte Meldungen.** Botpad hoert ebenfalls auf `CHAT_MSG_SYSTEM` und gibt
-  `[AT]M`-Zeilen selbst aus. Ein Chatfilter hilft dagegen nicht --
-  `ChatFrame_AddMessageEventFilter` greift in den Anzeigeweg ein, nicht in
-  fremde Ereignisbehandlungen. Deshalb wird `Botpad.Print` umschlossen. Die
-  Huelle laesst alles durch und unterdrueckt genau eine Sache: einen Text, den
-  AutoTravel im selben Moment schon ausgegeben hat.
-* **Wer richtet den Bot ein.** Die Regel oben gilt unabhaengig von Botpad: wer
-  den Selbstmodus einschaltet, behaelt seine Einstellungen. `B.KnownState()`
-  liest zusaetzlich `Botpad.Bot.running`, wenn AutoTravel selbst noch nichts
-  gesehen hat. Wer ausschliesslich mit Botpad arbeiten will, nimmt den Haken
-  bei "Playerbot mitsteuern" heraus.
-* **Chatfilter.** Beide verbergen ihre eigenen Botbefehle. Die Filterkette ruft
-  beide auf und es genuegt, wenn einer true liefert -- hier war nichts zu tun.
+* **Doppelte Meldungen.** Mit AutoTravel gibt Botpad die `[AT]M`-Zeilen nicht aus
+  und filtert keine `[AT]`-Zeilen. Beides uebernimmt AutoTravel (Einstellung
+  "Protokollzeilen im Chat zeigen"). Die eigenen Botbefehle verbirgt Botpad weiter;
+  die Filterkette ruft beide Filter auf und es genuegt, wenn einer true liefert.
+* **Wer richtet den Bot ein.** Botpad setzt dann keine Strategien (`nc`, `co`,
+  `ll`) und setzt sie beim Ausschalten nicht zurueck; Moduswahl und
+  "Strategien beim Ausschalten zuruecksetzen" sind auf der Botpad-Seite
+  gesperrt. Das Umschalten des Selbstmodus und der Teleport bleiben bei Botpad.
+  Botpad erkennt AutoTravel nur am Geladensein, nicht an dessen Einstellung: mit
+  `BotControl = 0` setzt auch Botpad keine Strategien. Wer ausschliesslich mit
+  Botpad arbeiten will, schaltet AutoTravel am Client ab.
+* Die Warnungen "Modul abgeschaltet" und "Selbstmodus verweigert" gibt Botpad nur
+  aus, wenn es selbst gefragt beziehungsweise umgeschaltet hat.
+
+Getestet ist das gegen Attrappen der WoW-Schnittstelle (Botpad:
+`tests/run.lua`, einschliesslich eines Durchlaufs mit dem echten AutoTravel-Addon
+aus `mod-autotravel_clientaddon`), nicht im Spiel.
 
 ---
 
