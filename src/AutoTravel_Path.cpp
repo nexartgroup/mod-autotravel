@@ -609,25 +609,60 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     // auf dem Gelaende liegen. Fuer jede Moeglichkeit wird ein Kandidat
     // erzeugt; welcher davon begehbar ist, entscheidet der PathGenerator.
     float zc[10];
+    float xc[10];
+    float yc[10];
     uint8 zn = 0;
 
-    auto addZ = [&](float z)
+    // Ein Kandidat ist ein Punkt (x, y, z). Die Hoehensuche kennt nur eine Stelle und
+    // viele Hoehen; die Etagen eines Ankers haben dagegen jede ihre eigene Position.
+    auto addTarget = [&](float tx, float ty, float tz)
     {
-        if (z <= INVALID_HEIGHT || zn >= 10)
+        if (tz <= INVALID_HEIGHT || zn >= 10)
             return;
         for (uint8 i = 0; i < zn; ++i)
-            if (std::fabs(zc[i] - z) < 1.5f)
+            if (std::fabs(zc[i] - tz) < 1.5f
+                && std::fabs(xc[i] - tx) < 1.0f && std::fabs(yc[i] - ty) < 1.0f)
                 return;
-        zc[zn++] = z;
+        xc[zn] = tx;
+        yc[zn] = ty;
+        zc[zn] = tz;
+        ++zn;
+    };
+    auto addZ = [&](float z) { addTarget(s.destX, s.destY, z); };
+
+    // Die Hoehensuche rechnet von der Position des SPIELERS aus. Wo mehrere Flaechen
+    // uebereinanderliegen, ist das genau die falsche Bezugsgroesse: das Gelaende ueber
+    // der Exodar ist immer unter den Kandidaten, und weil es ein ganz normaler Weg ist
+    // (nur der aus der Stadt hinaus), gewinnt es gegen jeden Teilweg zum eigentlichen
+    // Ziel.
+    auto buildLegacyPool = [&]()
+    {
+        zn = 0;
+        addZ(s.destZ);
+        addZ(BestGroundZ(player, s.destX, s.destY));
+        addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
+        addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f,   true, 400.0f));
+        addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f,  true, 400.0f));
+        addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f, true, 400.0f));
+        addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f, true, 400.0f));
     };
 
-    addZ(s.destZ);
-    addZ(BestGroundZ(player, s.destX, s.destY));
-    addZ(map->GetHeight(phase, s.destX, s.destY, MAX_HEIGHT));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 5.0f,   true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 40.0f,  true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 120.0f, true, 400.0f));
-    addZ(map->GetHeight(phase, s.destX, s.destY, pz + 300.0f, true, 400.0f));
+    // Ein verankertes Ziel (NPC, Objekt, Questziel) kennt seine Etage: nur sie, und
+    // hoechstens die gleichwertigen anderen Etagen unter denselben Belegen, kommen in
+    // Frage. Das Gelaende darueber ist keine Alternative, sondern ein anderes Ziel.
+    auto buildAnchorPool = [&]()
+    {
+        zn = 0;
+        addZ(s.anchor.z);
+        for (uint32 i = 0; i < s.anchor.altCount && i < 2; ++i)
+        {
+            // Ohne uebernommene x/y (Questziel ohne Dienst) bleibt der Kartenpunkt.
+            if (s.anchor.snappedXY)
+                addTarget(s.anchor.altX[i], s.anchor.altY[i], s.anchor.altZ[i]);
+            else
+                addZ(s.anchor.altZ[i]);
+        }
+    };
 
     // --- Alle direkten Kandidaten bewerten ---------------------------------
     //
@@ -636,52 +671,102 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     // durchprobiert werden.
     ATPathResult best;
     best.score = 1.0e30f;
+    float bestDestX = s.destX;
+    float bestDestY = s.destY;
     float bestDestZ = s.destZ;
 
-    for (uint8 pass = 0; pass < 2; ++pass)
+    auto evaluateDirect = [&]()
     {
-        bool straight = (pass == 1);
-
-        for (uint8 i = 0; i < zn; ++i)
+        for (uint8 pass = 0; pass < 2; ++pass)
         {
-            ATPathResult cand;
-            if (!TryPathBetween(player,
-                                player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
-                                s.destX, s.destY, zc[i], straight, cand))
-                continue;
+            bool straight = (pass == 1);
 
-            cand.score = ATConf.naturalPathing
-                ? ScoreNaturalPath(player, cand.points, cand.incomplete)
-                : PathDistance(cand.points);
-
-            if (!straight)
-                cand.score -= 0.01f;
-
-            if (cand.score < best.score)
+            for (uint8 i = 0; i < zn; ++i)
             {
-                best = cand;
-                bestDestZ = zc[i];
-            }
+                ATPathResult cand;
+                if (!TryPathBetween(player,
+                                    player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
+                                    xc[i], yc[i], zc[i], straight, cand))
+                    continue;
 
-            if (DebugEnabled(s))
-            {
-                char b[256];
-                std::snprintf(b, sizeof(b),
-                              "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s Punkte=%u",
-                              straight ? "Eckpunkte" : "Geglaettet", zc[i],
-                              PathDistance(cand.points), cand.score,
-                              cand.incomplete ? "TEILWEG" : "vollstaendig",
-                              uint32(cand.points.size()));
-                Dbg(player, s, b);
+                cand.score = ATConf.naturalPathing
+                    ? ScoreNaturalPath(player, cand.points, cand.incomplete)
+                    : PathDistance(cand.points);
+
+                if (!straight)
+                    cand.score -= 0.01f;
+
+                if (cand.score < best.score)
+                {
+                    best = cand;
+                    bestDestX = xc[i];
+                    bestDestY = yc[i];
+                    bestDestZ = zc[i];
+                }
+
+                if (DebugEnabled(s))
+                {
+                    char b[256];
+                    std::snprintf(b, sizeof(b),
+                                  "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s Punkte=%u",
+                                  straight ? "Eckpunkte" : "Geglaettet", zc[i],
+                                  PathDistance(cand.points), cand.score,
+                                  cand.incomplete ? "TEILWEG" : "vollstaendig",
+                                  uint32(cand.points.size()));
+                    Dbg(player, s, b);
+                }
             }
         }
+    };
+
+    bool anchored = s.anchor.found;
+    if (anchored)
+    {
+        buildAnchorPool();
+        if (DebugEnabled(s))
+        {
+            char b[192];
+            std::snprintf(b, sizeof(b), "Zielanker aktiv: %u Etage(n) statt der Hoehensuche (Z=%.2f%s).",
+                          uint32(zn), s.anchor.z, s.anchor.covered ? ", verdeckt" : "");
+            Dbg(player, s, b);
+        }
+    }
+    else
+        buildLegacyPool();
+
+    evaluateDirect();
+
+    if (anchored && !best.valid)
+    {
+        // Liegt das Ziel unter dem Gelaende, ist die Oberflaeche darueber kein Ersatz.
+        if (s.anchor.covered)
+            Dbg(player, s, "Zielanker ohne Weg; das Gelaende darueber ist kein Ersatz (Ziel verdeckt).");
+        else
+        {
+            Dbg(player, s, "Zielanker ohne Weg - Rueckfall auf die Hoehensuche.");
+            buildLegacyPool();
+            evaluateDirect();
+            anchored = false;
+        }
+    }
+
+    // Die Etappe endet auf der Etage, die den Weg geliefert hat; Contour-Suche und
+    // Ankunft beziehen sich darauf.
+    if (anchored && best.valid)
+    {
+        s.destX = bestDestX;
+        s.destY = bestDestY;
+        s.destZ = bestDestZ;
     }
 
     // --- Contour-Suche -----------------------------------------------------
     //
     // Nur wenn der beste bisherige Weg tatsaechlich wie ein Berganstieg
     // aussieht. Andernfalls waeren das acht zusaetzliche Pfadsuchen ohne Grund.
-    if (ATConf.contourProbing && best.valid && HasMountainClimb(best.points))
+    // Bei einem verdeckten Ziel (Stadt unter dem Gelaende) sind Rampen und Treppen keine
+    // Berge, und die Seitenpunkte wuerden nach der Hoehe des Spielers gesucht.
+    if (ATConf.contourProbing && best.valid && !(anchored && s.anchor.covered)
+        && HasMountainClimb(best.points))
     {
         Dbg(player, s, "Berganstieg erkannt - Contour-Suche wird gestartet.");
 
@@ -718,6 +803,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 
     if (best.valid)
     {
+        s.destX = bestDestX;
+        s.destY = bestDestY;
         s.destZ = bestDestZ;
         s.lastPathType = best.type;
         s.path = best.points;
@@ -750,7 +837,10 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
             float ang = float(a) * (2.0f * AT_PI / 8.0f);
             float x = s.destX + std::cos(ang) * RINGS[r];
             float y = s.destY + std::sin(ang) * RINGS[r];
-            float z = BestGroundZ(player, x, y);
+            // Ein verankertes Ziel sucht die Ersatzstelle auf SEINER Etage, nicht auf der
+            // des Spielers.
+            float z = s.anchor.found ? BestGroundZNear(player, x, y, s.destZ)
+                                     : BestGroundZ(player, x, y);
 
             if (z <= INVALID_HEIGHT)
                 continue;
@@ -790,6 +880,13 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                   "Kein Pfad. %u Zielhoehen und 24 Nachbarpunkte geprueft. Ziel %.1f / %.1f / %.1f",
                   zn, s.destX, s.destY, s.destZ);
     Dbg(player, s, buf);
+
+    if (s.anchor.found && s.anchor.covered && !s.anchorWarned)
+    {
+        s.anchorWarned = true;
+        Msg(player, "Das Ziel (" + s.destName + ") liegt unter dem Gelaende, und von hier fuehrt kein "
+                    "Weg zu seiner Etage. AutoTravel laeuft nicht zur Oberflaeche darueber.");
+    }
 
     return false;
 }

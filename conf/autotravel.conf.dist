@@ -333,6 +333,50 @@ AutoTravel.MaxStepDown = 6
 AutoTravel.GroundPlanes = 4
 
 #--------------------------------------------------------------------------
+#   Zielanker: NPCs, Objekte und Questziele
+#--------------------------------------------------------------------------
+
+#    Ziel an den Spawn eines NPCs, Objekts oder Questziels heften (richtige Etage)
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: anchor
+AutoTravel.UseTargetAnchor = 1
+
+#    hoechste Abweichung zu einem NPC mit Dienst oder nutzbaren Objekt (yd)
+#    erlaubt: 0 bis 60
+#    Laufzeitschluessel: anchorradius
+AutoTravel.AnchorRadius = 12
+
+#    hoechste Abweichung, wenn der Name dem Ziel des Addons entspricht (yd)
+#    erlaubt: 0 bis 80
+#    Laufzeitschluessel: anchorname
+AutoTravel.AnchorNameRadius = 25
+
+#    hoechste Abweichung zu einem Ziel oder einer Abgabe deiner Quests (yd)
+#    erlaubt: 0 bis 100
+#    Laufzeitschluessel: anchorquest
+AutoTravel.AnchorQuestRadius = 40
+
+#    bei NPCs auch X/Y auf die Spawnposition setzen
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: anchorsnap
+AutoTravel.AnchorSnapXY = 1
+
+#    auch Briefkaesten, Ambosse, Schmieden, Gildentresore als Anker
+#    0 = aus, 1 = an
+#    Laufzeitschluessel: anchorobjects
+AutoTravel.AnchorObjects = 1
+
+#    Hoehenabstand, ab dem zwei Spawns zwei Etagen sind (yd)
+#    erlaubt: 1 bis 30
+#    Laufzeitschluessel: anchorfloor
+AutoTravel.AnchorFloorTolerance = 6
+
+#    Hoehenabstand, ab dem ein verankertes Ziel nicht als erreicht gilt (yd)
+#    erlaubt: 2 bis 100
+#    Laufzeitschluessel: anchorz
+AutoTravel.AnchorArrivalZ = 10
+
+#--------------------------------------------------------------------------
 #   Reiseknoten aus mod-playerbots
 #--------------------------------------------------------------------------
 

@@ -421,3 +421,223 @@ uint8 AT::TransportFaction(uint32 entry)
             return 0;   // u. a. 20808 (The Maiden's Fancy), die Schildkroeten
     }
 }
+
+// ---------------------------------------------------------------------------
+// Zielanker: Namensabgleich und Auswahl
+// ---------------------------------------------------------------------------
+//
+// Das Label, das das Addon mitschickt, ist Carbonites Text: englisch, auch wenn der
+// Client deutsch ist ("High Chief Stillpine" statt "Oberhaeuptling der
+// Tannenruhfeste"). Die Datenbank fuehrt die englischen Namen in creature_template.name,
+// deshalb vergleicht der Kern gegen diese und nicht gegen die Namen, die der
+// Spieler im Spiel sieht.
+
+namespace
+{
+    // Kleinbuchstaben, Zeichen ausser Buchstaben/Ziffern/Apostroph werden zu EINEM
+    // Leerzeichen. Bytes ab 0x80 (UTF-8) gelten als Buchstaben: ein Umlaut trennt kein Wort.
+    std::string NormalizeWords(std::string const& in)
+    {
+        std::string out;
+        out.reserve(in.size());
+        bool pendingSpace = false;
+        for (unsigned char c : in)
+        {
+            bool word = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'' || c >= 0x80;
+            if (c >= 'A' && c <= 'Z')
+            {
+                c = static_cast<unsigned char>(c - 'A' + 'a');
+                word = true;
+            }
+            if (word)
+            {
+                if (pendingSpace && !out.empty())
+                    out.push_back(' ');
+                pendingSpace = false;
+                out.push_back(static_cast<char>(c));
+            }
+            else
+                pendingSpace = true;
+        }
+        return out;
+    }
+
+    // Steht 'needle' als ganze Wortfolge in 'hay'? Beide sind normalisiert.
+    bool ContainsWords(std::string const& hay, std::string const& needle)
+    {
+        if (needle.empty() || needle.size() > hay.size())
+            return false;
+        size_t pos = 0;
+        while ((pos = hay.find(needle, pos)) != std::string::npos)
+        {
+            bool const startOk = (pos == 0) || hay[pos - 1] == ' ';
+            size_t const end = pos + needle.size();
+            bool const endOk = (end == hay.size()) || hay[end] == ' ';
+            if (startOk && endOk)
+                return true;
+            ++pos;
+        }
+        return false;
+    }
+}
+
+bool AT::LabelMatchesName(std::string const& label, std::string const& name)
+{
+    std::string const l = NormalizeWords(label);
+    std::string const n = NormalizeWords(name);
+
+    // Der NAME muss im Label stehen (ganze Woerter, mindestens vier Zeichen). Die
+    // Gegenrichtung -- das Label steht in einem laengeren Namen -- gilt bewusst nicht:
+    // traegt ein Wegpunkt nur den Namen der Zone ("Sturmwind"), waeren sonst alle
+    // "Sturmwind-Wachen" in der Naehe Treffer.
+    return n.size() >= 4 && ContainsWords(l, n);
+}
+
+bool AT::PickAnchor(std::vector<AnchorCand> const& cands, float tx, float ty,
+                    AnchorRules const& rules, AnchorPick& out)
+{
+    out = AnchorPick();
+
+    if (!std::isfinite(tx) || !std::isfinite(ty))
+        return false;
+
+    struct Scored
+    {
+        size_t idx;
+        float  dist;
+        float  score;
+        int    key;        // Wertung auf drei Stellen gerundet: Grundlage der Reihenfolge
+        int    bits;       // Zahl der Merkmale (mehr Belege gewinnen bei Gleichstand)
+    };
+
+    auto const popcount = [](uint32 v)
+    {
+        int n = 0;
+        for (; v; v >>= 1)
+            n += int(v & 1u);
+        return n;
+    };
+
+    std::vector<Scored> ok;
+    ok.reserve(cands.size());
+
+    for (size_t i = 0; i < cands.size(); ++i)
+    {
+        AnchorCand const& c = cands[i];
+
+        // Ohne eines dieser Merkmale ist es kein Anker: ein Reh auf dem Gelaende
+        // ueber der Exodar steht 1,5 yd neben einem Lehrer 150 yd darunter.
+        if (!(c.flags & (ANCHOR_INTERACTIVE | ANCHOR_NAME | ANCHOR_QUEST)))
+            continue;
+        if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))
+            continue;
+
+        float tol = 0.0f;
+        if (c.flags & ANCHOR_INTERACTIVE) tol = std::max(tol, rules.radiusInteractive);
+        if (c.flags & ANCHOR_NAME)        tol = std::max(tol, rules.radiusName);
+        if (c.flags & ANCHOR_QUEST)       tol = std::max(tol, rules.radiusQuest);
+        if (tol <= 0.0f)
+            continue;
+
+        float const d = Dist2D(c.x, c.y, tx, ty);
+        if (d > tol)
+            continue;                  // zu weit weg: anderes Phasing, verschobener Spawn ...
+
+        // Abstand im Verhaeltnis zur Toleranz. Der Name ist der staerkste Beleg
+        // (das Ziel HEISST so): ein Klick, der 1,4 yd neben dem gemeinten Bankier und
+        // 0,3 yd neben der Haendlerin darueber liegt, gehoert dem Bankier. Die Quest ist
+        // ein mittlerer Beleg; wer herumlaeuft, ist unsicherer.
+        float sc = d / tol;
+        if (c.flags & ANCHOR_NAME)  sc *= 0.25f;
+        if (c.flags & ANCHOR_QUEST) sc *= 0.6f;
+        if (c.flags & ANCHOR_MOVER) sc *= 1.5f;
+
+        Scored s;
+        s.idx = i;
+        s.dist = d;
+        s.score = sc;
+        s.key = int(sc * 1000.0f + 0.5f);
+        s.bits = popcount(c.flags & (ANCHOR_INTERACTIVE | ANCHOR_NAME | ANCHOR_QUEST));
+        ok.push_back(s);
+    }
+
+    if (ok.empty())
+        return false;
+
+    std::sort(ok.begin(), ok.end(), [&](Scored const& a, Scored const& b)
+    {
+        if (a.key != b.key)
+            return a.key < b.key;
+        if (a.bits != b.bits)
+            return a.bits > b.bits;
+        bool const ao = (cands[a.idx].flags & ANCHOR_OBJECT) != 0;
+        bool const bo = (cands[b.idx].flags & ANCHOR_OBJECT) != 0;
+        if (ao != bo)
+            return !ao;                // Kreatur vor Objekt
+        if (cands[a.idx].spawnId != cands[b.idx].spawnId)
+            return cands[a.idx].spawnId < cands[b.idx].spawnId;
+        return a.idx < b.idx;
+    });
+
+    // Etagen: wer innerhalb der Toleranz zur Hoehe der besten Wertung einer Etage
+    // liegt, gehoert zu ihr.
+    float const tolZ = std::max(0.5f, rules.floorTolerance);
+    std::vector<float> floorZ;
+    std::vector<size_t> floorBest;          // Index in 'ok'
+    for (size_t k = 0; k < ok.size(); ++k)
+    {
+        float const z = cands[ok[k].idx].z;
+        bool placed = false;
+        for (float fz : floorZ)
+        {
+            if (std::fabs(z - fz) <= tolZ)
+            {
+                placed = true;
+                break;
+            }
+        }
+        if (!placed)
+        {
+            floorZ.push_back(z);
+            floorBest.push_back(k);
+        }
+    }
+
+    Scored const& best = ok[0];
+    out.found = true;
+    out.index = best.idx;
+    out.dist2D = best.dist;
+    out.score = best.score;
+    out.floors = uint32(floorZ.size());
+
+    // Gleichwertige Etagen: nur solche, deren bester Kandidat dieselben Belege hat
+    // (Name/Quest) wie die Wahl. Wer das Label trifft, ersetzt keine Etage durch eine,
+    // die nur "irgendein NPC in der Naehe" ist.
+    uint32 const evidence = cands[best.idx].flags & (ANCHOR_NAME | ANCHOR_QUEST);
+    for (size_t f = 1; f < floorBest.size() && out.altCount < 2; ++f)
+    {
+        size_t const idx = ok[floorBest[f]].idx;
+        if ((cands[idx].flags & (ANCHOR_NAME | ANCHOR_QUEST)) != evidence)
+            continue;
+        out.alt[out.altCount++] = idx;
+    }
+    return true;
+}
+
+std::string AT::AnchorFlagsText(uint32 flags)
+{
+    std::string out;
+    auto add = [&](char const* t)
+    {
+        if (!out.empty())
+            out += ", ";
+        out += t;
+    };
+    if (flags & ANCHOR_INTERACTIVE) add((flags & ANCHOR_OBJECT) ? "Objekt" : "Dienst");
+    if (flags & ANCHOR_NAME)        add("Name");
+    if (flags & ANCHOR_QUEST)       add("Quest");
+    if (flags & ANCHOR_MOVER)       add("laeuft umher");
+    if (out.empty())
+        out = "-";
+    return out;
+}

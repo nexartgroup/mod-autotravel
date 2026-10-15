@@ -39,6 +39,7 @@ GROUP_TITLES = [
     "Transporte: Zeppelin, Schiff, Tiefenbahn",
     "Schwimmen",
     "Bodenkontakt und Etagen",
+    "Zielanker: NPCs, Objekte und Questziele",
     "Reiseknoten aus mod-playerbots",
     "Teleport",
     "Bewertung natuerlicher Wege",

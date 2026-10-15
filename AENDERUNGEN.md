@@ -1,3 +1,79 @@
+# Version 4.0.6 -- Zielanker: NPCs, Objekte und Questziele legen die Etage fest
+
+Anlass: ein Spielerbericht -- "die Z-Koordinaten sind immer noch hin und wieder ein Problem,
+zum Beispiel in der Exodar beim NPC Ganaar: AutoTravel will immer aus der Exodar hinauslaufen,
+obwohl Ganaar in der Exodar steht."
+
+## Ursache
+
+Das Addon schickt nur Kartenkoordinaten; Carbonite kennt keine Hoehe. Der Server leitete die
+Zielhoehe bisher aus Hoehenabfragen ab, die von der Position des **Spielers** ausgehen
+(`BestGroundZ`, `CalculatePath`). Die Exodar liegt rund 130 yd unter dem Gelaende darueber
+(Ganaar: Z -125,9; das Gelaende ueber ihm: +13): in den Spawndaten der Datenbank liegen
+im selben x/y-Fenster etwa 270 Kreaturen auf Z -140 bis -90 und etwa 150 auf Z 0 bis 20.
+Das Gelaende war in der Kandidatenliste von `CalculatePath` immer vertreten; weil sein Weg
+ein ganz normaler ist (nur der aus der Stadt hinaus) und ein Teilweg zur Innenetage mit
+10000 Strafpunkten belegt wird, gewann es. Nach jedem Teilstueck begann die Suche neu, vom
+Standort aus: sobald der Charakter auf der Rampe oder draussen war, fiel die Innenetage ganz
+aus der Liste. Die Ankunft pruefte nur die 2D-Entfernung -- wer ueber dem NPC stand, war "da".
+(Diese Herleitung stammt aus dem Quelltext und einem Modell der Hoehenabfragen; die
+vmaps/mmaps der Exodar standen nicht zur Verfuegung. `.at debug` zeigt im Spiel, welche
+Kandidaten welchen Weg lieferten.)
+
+## Was jetzt anders ist
+
+* **Zielanker** (`AutoTravel_Anchor.cpp`, Auswahl rein in `AT::PickAnchor`): zum Kartenpunkt
+  wird ein NPC, ein Objekt oder ein Questziel gesucht, dessen Spawn dort liegt; seine Position
+  legt die Etage fest (und bei NPCs auch x/y). Belege: ein NPC mit Dienst-Flag oder nutzbares
+  Objekt; der englische Name in der Datenbank entspricht dem Label, das das Addon aus Carbonite
+  mitschickt (Carbonite zeigt Namen englisch, auch bei deutschem Client); Ziel einer offenen
+  Quest des Spielers oder Abgabe-NPC einer fertigen -- das ist, worauf Carbonites Autotracking
+  zeigt. Liegt nichts innerhalb seiner Toleranz am Kartenpunkt (12 / 25 / 40 yd), gilt das alte
+  Verfahren; Phasen werden beachtet. Details: README, "Zielanker".
+* **Quelle sind die Spawn-Mengen des Cores** (`ObjectMgr::GetGridObjectGuids`), nicht ein
+  eigener Index: sie kennen Spielereignisse (31 % der Dienst-NPCs gibt es nur waehrend eines
+  Ereignisses) und veralten nicht.
+* **`CalculatePath`** rechnet bei einem Anker nur mit dessen Etage (und gleichwertigen weiteren
+  Etagen mit denselben Belegen); das Gelaende darueber ist kein Kandidat. Ein verdecktes Ziel
+  (Gelaende mehr als 15 yd darueber) faellt nicht auf die Oberflaeche zurueck, fliegt nicht und
+  bekommt keine Contour-Suche; fuehrt kein Weg hin, sagt das Modul es. Der Ersatzring um ein
+  nicht begehbares Ziel sucht die Etage des Ankers (`BestGroundZNear`), nicht die des Spielers.
+* **Ankunft mit Etage.** Ein verankertes Ziel gilt erst als erreicht, wenn auch Z stimmt
+  (`AnchorArrivalZ`, 10 yd); nach zwei Teilstuecken, die am Ziel auf der falschen Etage enden,
+  gilt es als erreicht.
+* **Auch auf anderen Karten** hat ein Ziel jetzt seine Hoehe schon bei der Planung (bisher 0, bis der
+  Charakter dort war).
+* **`.at diag`** zeigt die Ankersuche (geprueft, verworfen, Kandidaten, Wahl) und die alte Hoehensuche.
+* **Acht neue Optionen** (`AutoTravel.UseTargetAnchor`, `AnchorRadius`, `AnchorNameRadius`,
+  `AnchorQuestRadius`, `AnchorSnapXY`, `AnchorObjects`, `AnchorFloorTolerance`, `AnchorArrivalZ`;
+  101 Werte), eine dreizehnte Plausibilitaetspruefung.
+* **Addon 11.3**: das Label geht sauber hinaus (Farbcodes, Links, Texturen entfernt, kein halbes
+  UTF-8-Zeichen), und der **letzte Punkt einer Route geht nicht mehr verloren**, wenn er auf dem
+  vorigen liegt (er wurde still auf den Zwischenpunkt davor verschoben, bis zu 7 yd auf einer
+  Stadtkarte, 24 yd auf einer Zonenkarte).
+* Das Protokoll aendert sich nicht (Nummer 4); Modul 4.0.6 und Addon 11.3 arbeiten auch mit den
+  Vorgaengern zusammen -- ohne neues Addon fehlt nur das saubere Label.
+
+## Was nicht geaendert wurde
+
+* Ziele ohne Spawn (ein Punkt mitten auf einer Etage ohne NPC in der Naehe, Gegenstandsziele,
+  Gebietsziele) behalten die Hoehensuche nach der Position des Spielers.
+* Aufzuege, Tueren und Teleporter innerhalb einer Stadt kennt das Modul nicht.
+* In dicht gestapelten Staedten (Dalaran, Darnassus, Eisenschmiede, Unterstadt) bleibt eine
+  kleine Restwahrscheinlichkeit fuer die falsche Etage, wenn weder Name noch Quest den NPC
+  bestimmen; die Etagenpruefung bei der Ankunft faengt das ab.
+
+## Was getestet wurde
+
+`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; Unit-Tests der reinen
+Auswahl mit den echten Spawndaten aus der Basis-Datenbank (Ganaar und seine Nachbarn,
+Yil/Gotaan, Dalaran, "High Chief Stillpine" mit englischem Label, das Reh 1,5 yd neben einem
+Lehrer 150 yd darunter, Gleichstand, NaN). Addon: 475 Pruefungen. **Nicht getestet** ist die
+Reise selbst -- weder im Spiel noch auf einem laufenden Server; ob die Wege in der Exodar so
+verlaufen, wie hier hergeleitet, zeigt erst `.at diag` im Spiel.
+
+---
+
 # Version 4.0.5 -- Reise ueber Kartengrenzen, zweite Durchsicht
 
 Anlass: ein Spielerbericht (Brachland -> Hafen von Sturmwind) mit der Meldung "zu viele

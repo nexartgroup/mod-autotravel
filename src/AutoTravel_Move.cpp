@@ -514,6 +514,11 @@ bool AutoTravelMgr::ShouldFly(Player* player, ATSession& s) const
     if (player->GetExactDist2d(s.destX, s.destY) < ATConf.flyMinDistance)
         return false;
 
+    // Ein Ziel unter dem Gelaende (Stadt in der Erde, Gebaeude): aus der Luft laesst sich
+    // dort nicht landen -- der Sinkflug endete auf dem Gelaende darueber.
+    if (s.anchor.found && s.anchor.covered)
+        return false;
+
     return true;
 }
 
@@ -640,7 +645,9 @@ bool AutoTravelMgr::BuildAirPath(Player* player, ATSession& s)
 
     if (reachesTarget)
     {
-        float landZ = BestGroundZ(player, s.destX, s.destY);
+        // Bei einem verankerten Ziel steht die Landehoehe fest; sonst sucht die
+        // Hoehensuche sie nach der Position des Spielers.
+        float landZ = s.anchor.found ? s.destZ : BestGroundZ(player, s.destX, s.destY);
         if (landZ <= INVALID_HEIGHT)
             landZ = s.destZ;
 

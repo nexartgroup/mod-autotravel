@@ -192,7 +192,7 @@ public:
             else if (cmd == "tp")
                 sAutoTravel->Teleport(player, uiMapId, nx, ny, hasCalib, pnx, pny, name);
             else if (cmd == "diag")
-                sAutoTravel->Diagnose(player, uiMapId, nx, ny, hasCalib, pnx, pny);
+                sAutoTravel->Diagnose(player, uiMapId, nx, ny, hasCalib, pnx, pny, name);
             else
                 sAutoTravel->Resolve(player, uiMapId, nx, ny, hasCalib, pnx, pny);
 
