@@ -629,6 +629,264 @@ static void TestShortestChain()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Zielanker
+// ---------------------------------------------------------------------------
+//
+// Die Spawndaten stammen aus der Basis-Datenbank von AzerothCore (creature.sql); der
+// Fall "Ganaar" ist der gemeldete: die Exodar liegt rund 130 yd unter dem Gelaende
+// darueber, und die Hoehensuche nach der Spielerposition fuehrte aus der Stadt hinaus.
+
+static AT::AnchorCand Cand(uint64 guid, uint32 entry, uint32 flags, float x, float y, float z)
+{
+    AT::AnchorCand c;
+    c.spawnId = guid;
+    c.entry = entry;
+    c.flags = flags;
+    c.x = x;
+    c.y = y;
+    c.z = z;
+    return c;
+}
+
+static void TestLabelMatchesName()
+{
+    // Das Label ist Carbonites englischer Text; verglichen wird gegen den englischen
+    // Namen der Datenbank, nicht gegen den, den ein deutscher Client anzeigt.
+    CHECK(AT::LabelMatchesName("High Chief Stillpine", "High Chief Stillpine"));
+    CHECK(AT::LabelMatchesName("high chief stillpine", "High Chief Stillpine"));
+    CHECK(AT::LabelMatchesName("HIGH CHIEF STILLPINE", "High Chief Stillpine"));
+    CHECK(AT::LabelMatchesName("Ganaar", "Ganaar"));
+    CHECK(AT::LabelMatchesName("Kill High Chief Stillpine", "High Chief Stillpine"));    // Name im Label
+    CHECK(AT::LabelMatchesName("Speak with High Chief Stillpine (1/1)", "High Chief Stillpine"));
+    // Nur der Name im Label zaehlt, nicht ein Label im laengeren Namen: ein Wegpunkt, der
+    // nur "Stormwind City" heisst, trifft nicht jede "Stormwind City Guard".
+    CHECK(!AT::LabelMatchesName("Stillpine", "High Chief Stillpine"));
+    CHECK(!AT::LabelMatchesName("Stormwind City", "Stormwind City Guard"));
+    CHECK(AT::LabelMatchesName("Stormwind City Guard", "Stormwind City Guard"));
+    CHECK(AT::LabelMatchesName("  Ganaar  ", "Ganaar"));                                // Leerraum
+
+    // Die deutsche Fassung ist NICHT der Name in der Datenbank.
+    CHECK(!AT::LabelMatchesName("Oberhaeuptling der Tannenruhfeste", "High Chief Stillpine"));
+    CHECK(!AT::LabelMatchesName("Tierausbilder", "Ganaar"));
+
+    // Wortgrenzen: kein Teilwort.
+    CHECK(!AT::LabelMatchesName("Boars", "Boar"));
+    CHECK(!AT::LabelMatchesName("Banker", "Bank"));
+    CHECK(!AT::LabelMatchesName("Grommash", "Grom"));
+    CHECK(!AT::LabelMatchesName("Quest Ganaarx", "Ganaar"));
+
+    // Zu kurz: stimmt mit zu vielem ueberein.
+    CHECK(!AT::LabelMatchesName("Bob", "Bob"));
+    CHECK(!AT::LabelMatchesName("Wache", "Die Wache"));
+    CHECK(!AT::LabelMatchesName("Chief", "High Chief Stillpine"));
+    CHECK(!AT::LabelMatchesName("Chief Stillpine", "High Chief Stillpine"));
+    CHECK(!AT::LabelMatchesName("", "Ganaar"));
+    CHECK(!AT::LabelMatchesName("Ganaar", ""));
+    CHECK(!AT::LabelMatchesName("", ""));
+
+    // Satzzeichen trennen Woerter, der Apostroph gehoert zum Wort; Umlaute sind Buchstaben.
+    CHECK(AT::LabelMatchesName("Ar'kelos", "Ar'kelos"));
+    CHECK(AT::LabelMatchesName("Quest: Ar'kelos, the Bold", "Ar'kelos"));
+    CHECK(!AT::LabelMatchesName("Arkelos", "Ar'kelos"));
+    CHECK(AT::LabelMatchesName("Stallmeister M\xC3\xBCller-L\xC3\xB6wenzahn", "M\xC3\xBCller-L\xC3\xB6wenzahn"));
+    CHECK(!AT::LabelMatchesName("M\xC3\xBCller", "Mueller"));
+}
+
+static void TestAnchorFlagsText()
+{
+    CHECK(AT::AnchorFlagsText(0) == "-");
+    CHECK(AT::AnchorFlagsText(AT::ANCHOR_INTERACTIVE) == "Dienst");
+    CHECK(AT::AnchorFlagsText(AT::ANCHOR_INTERACTIVE | AT::ANCHOR_OBJECT) == "Objekt");
+    CHECK(AT::AnchorFlagsText(AT::ANCHOR_INTERACTIVE | AT::ANCHOR_NAME | AT::ANCHOR_QUEST) == "Dienst, Name, Quest");
+    CHECK(AT::AnchorFlagsText(AT::ANCHOR_QUEST | AT::ANCHOR_MOVER) == "Quest, laeuft umher");
+}
+
+static void TestPickAnchorGanaar()
+{
+    using namespace AT;
+    AnchorRules rules;            // 12 / 25 / 40 yd, Etage 6 yd
+
+    // Die Hunter-Terrasse der Exodar (Karte 530), echte Spawns. Das Reh auf dem Gelaende
+    // darueber (z +13,6, 20 yd entfernt) hat kein NPC-Flag und kommt gar nicht erst vor.
+    std::vector<AnchorCand> c;
+    c.push_back(Cand(31750, 16712, ANCHOR_INTERACTIVE, -4229.28f, -11549.6f, -125.946f));   // Ganaar
+    c.push_back(Cand(85592, 16735, ANCHOR_INTERACTIVE, -4230.67f, -11549.6f, -125.979f));   // Muhaa
+    c.push_back(Cand(63006, 17505, ANCHOR_INTERACTIVE, -4233.06f, -11556.1f, -126.032f));   // Killac
+    c.push_back(Cand(57737, 16738, ANCHOR_INTERACTIVE, -4222.30f, -11563.9f, -125.935f));   // Deremiis, 15,9 yd
+
+    AnchorPick p;
+    CHECK(PickAnchor(c, -4229.28f, -11549.6f, rules, p));
+    CHECK(p.found && c[p.index].entry == 16712);
+    CHECK(p.dist2D < 0.01f);
+    CHECK(p.floors == 1 && p.altCount == 0);
+    CHECK(std::fabs(c[p.index].z - (-125.946f)) < 0.001f);
+
+    // Klick 2,5 yd daneben: weiter Ganaar.
+    CHECK(PickAnchor(c, -4226.78f, -11549.6f, rules, p) && c[p.index].entry == 16712);
+    CHECK(p.floors == 1);
+
+    // Deremiis (15,9 yd) liegt ausserhalb der 12 yd; ein Klick direkt bei ihm trifft ihn trotzdem.
+    CHECK(PickAnchor(c, -4222.30f, -11563.9f, rules, p) && c[p.index].entry == 16738);
+    // ... aber ein Klick 15 yd von allen entfernt trifft keinen: altes Verfahren.
+    CHECK(!PickAnchor(c, -4229.28f, -11530.0f, rules, p));
+
+    // Klick neben Muhaa: ohne Label gewinnt die Naehe (dieselbe Etage), mit dem Namen
+    // "Ganaar" gewinnt er.
+    CHECK(PickAnchor(c, -4231.5f, -11549.6f, rules, p) && c[p.index].entry == 16735);
+    c[0].flags |= ANCHOR_NAME;
+    CHECK(PickAnchor(c, -4231.5f, -11549.6f, rules, p) && c[p.index].entry == 16712);
+    CHECK(p.floors == 1);
+}
+
+static void TestPickAnchorFloors()
+{
+    using namespace AT;
+    AnchorRules rules;
+
+    // Exodar, Ruestungsanbau: Yil (z -94,0) und Gotaan (z -132,1), 9 yd auseinander.
+    std::vector<AnchorCand> ex;
+    ex.push_back(Cand(57743, 16750, ANCHOR_INTERACTIVE, -4280.97f, -11778.2f, -93.953f));   // Yil
+    ex.push_back(Cand(57745, 16753, ANCHOR_INTERACTIVE, -4286.98f, -11771.5f, -132.132f));  // Gotaan
+    AnchorPick p;
+    CHECK(PickAnchor(ex, -4280.97f, -11778.2f, rules, p) && ex[p.index].entry == 16750);
+    CHECK(p.floors == 2 && p.altCount == 1 && ex[p.alt[0]].entry == 16753);
+
+    // Mit 8 yd Radius gehoert Gotaan nicht mehr dazu.
+    AnchorRules narrow = rules;
+    narrow.radiusInteractive = 8.0f;
+    CHECK(PickAnchor(ex, -4280.97f, -11778.2f, narrow, p) && p.floors == 1 && p.altCount == 0);
+
+    // Dalaran: der Bankier (z 620) steht 1,2 yd neben einer Haendlerin auf z 653,7.
+    std::vector<AnchorCand> dal;
+    dal.push_back(Cand(104104, 29530, ANCHOR_INTERACTIVE, 5766.59f, 734.04f, 620.134f));    // Binzik Goldbook
+    dal.push_back(Cand(4761, 37942, ANCHOR_INTERACTIVE, 5765.45f, 734.38f, 653.748f));      // Arcanist Uovril
+    dal.push_back(Cand(85238, 35790, ANCHOR_INTERACTIVE, 5770.65f, 734.66f, 618.66f));      // Usuri Brightcoin
+    dal.push_back(Cand(100025, 28715, ANCHOR_INTERACTIVE, 5759.27f, 732.16f, 641.777f));    // Endora Moorehead
+    dal.push_back(Cand(60320, 194147, ANCHOR_INTERACTIVE | ANCHOR_OBJECT, 5763.82f, 726.93f, 618.59f)); // Briefkasten
+    dal.push_back(Cand(104206, 31579, ANCHOR_INTERACTIVE, 5764.79f, 744.0f, 653.748f));     // Arcanist Adurin
+    CHECK(PickAnchor(dal, 5766.59f, 734.04f, rules, p) && dal[p.index].entry == 29530);
+    CHECK(p.floors == 3 && p.altCount == 2);
+    CHECK(dal[p.alt[0]].z > 600.0f && dal[p.alt[1]].z > 600.0f);
+    CHECK(std::fabs(dal[p.alt[0]].z - dal[p.index].z) > 6.0f && std::fabs(dal[p.alt[1]].z - dal[p.index].z) > 6.0f);
+    CHECK(std::fabs(dal[p.alt[0]].z - dal[p.alt[1]].z) > 6.0f);
+
+    // Das Label "Binzik Goldbook" trifft den Bankier: dann gibt es keine Ersatzetagen,
+    // denn der Name ist ein staerkerer Beleg als "irgendein NPC in der Naehe".
+    dal[0].flags |= ANCHOR_NAME;
+    CHECK(PickAnchor(dal, 5766.59f, 734.04f, rules, p) && dal[p.index].entry == 29530);
+    CHECK(p.floors == 3 && p.altCount == 0);
+
+    // Klickt der Spieler eher bei der Haendlerin (0,3 yd) und nennt den Bankier: Name gewinnt.
+    CHECK(PickAnchor(dal, 5765.2f, 734.3f, rules, p) && dal[p.index].entry == 29530);
+
+    // Die Etagentoleranz: 5 yd Unterschied sind eine Etage, 7 yd zwei.
+    std::vector<AnchorCand> t;
+    t.push_back(Cand(1, 1, ANCHOR_INTERACTIVE, 0, 0, 0.0f));
+    t.push_back(Cand(2, 2, ANCHOR_INTERACTIVE, 1, 0, 5.0f));
+    CHECK(PickAnchor(t, 0, 0, rules, p) && p.floors == 1);
+    t[1].z = 7.0f;
+    CHECK(PickAnchor(t, 0, 0, rules, p) && p.floors == 2 && p.altCount == 1);
+}
+
+static void TestPickAnchorQuest()
+{
+    using namespace AT;
+    AnchorRules rules;
+    AnchorPick p;
+
+    // "High Chief Stillpine" (Eintrag 17440) auf Azuremyst: Questgeber, Abgabe und Ziel mehrerer Quests.
+    // Carbonite zeigt ihn mit seinem englischen Namen; der Kartenpunkt liegt nicht auf dem Spawn.
+    std::vector<AnchorCand> c;
+    c.push_back(Cand(62915, 17440, ANCHOR_INTERACTIVE | ANCHOR_NAME | ANCHOR_QUEST, -3353.36f, -12400.5f, 26.0876f));
+    CHECK(PickAnchor(c, -3383.36f, -12400.5f, rules, p) && c[p.index].entry == 17440);   // 30 yd daneben
+    CHECK(p.dist2D > 29.9f && p.dist2D < 30.1f);
+    CHECK(!PickAnchor(c, -3400.0f, -12400.5f, rules, p));                                 // 46,6 yd: zu weit, altes Verfahren
+
+    // Ohne Name und Quest reicht derselbe Abstand nicht (12 yd).
+    c[0].flags = ANCHOR_INTERACTIVE;
+    CHECK(!PickAnchor(c, -3383.36f, -12400.5f, rules, p));
+    CHECK(PickAnchor(c, -3355.36f, -12400.5f, rules, p));
+
+    // Ein Questziel, das kein NPC mit Dienst ist (ein Tier, das getoetet werden soll),
+    // taugt als Anker fuer die Etage, wenn der Kartenpunkt in der Naehe liegt.
+    std::vector<AnchorCand> k;
+    k.push_back(Cand(500, 17000, ANCHOR_QUEST, 100.0f, 100.0f, 42.0f));
+    CHECK(PickAnchor(k, 130.0f, 100.0f, rules, p) && k[p.index].entry == 17000);
+    CHECK(!PickAnchor(k, 145.0f, 100.0f, rules, p));
+
+    // Steht ein NPC mit Dienst direkt am Kartenpunkt, schlaegt er ein 35 yd entferntes Questziel.
+    k.push_back(Cand(501, 17001, ANCHOR_INTERACTIVE, 133.0f, 100.0f, 50.0f));
+    CHECK(PickAnchor(k, 135.0f, 100.0f, rules, p) && k[p.index].entry == 17001);   // 2 yd gegen 35 yd
+    // Liegt der Klick dagegen beim Questziel, gewinnt das.
+    CHECK(PickAnchor(k, 101.0f, 100.0f, rules, p) && k[p.index].entry == 17000);
+}
+
+static void TestPickAnchorRules()
+{
+    using namespace AT;
+    AnchorRules rules;
+    AnchorPick p;
+
+    // Kandidaten ohne Merkmal sind keine Anker (das Reh 1,5 yd neben dem Lehrer).
+    std::vector<AnchorCand> c;
+    c.push_back(Cand(61441, 17201, 0, -4227.92f, -11698.6f, 6.61f));                           // Moongraze Buck
+    c.push_back(Cand(57744, 16752, ANCHOR_INTERACTIVE, -4228.17f, -11697.1f, -143.47f));       // Muaat
+    c.push_back(Cand(85599, 16751, ANCHOR_INTERACTIVE, -4234.13f, -11699.4f, -143.54f));       // Merran
+    CHECK(PickAnchor(c, -4227.92f, -11698.6f, rules, p) && c[p.index].entry == 16752);
+    CHECK(p.floors == 1);
+    c.erase(c.begin() + 1, c.end());
+    CHECK(!PickAnchor(c, -4227.92f, -11698.6f, rules, p));                                      // nur das Reh: kein Anker
+
+    // Leere Liste, NaN und Unendlich.
+    std::vector<AnchorCand> none;
+    CHECK(!PickAnchor(none, 0, 0, rules, p) && !p.found);
+    std::vector<AnchorCand> one;
+    one.push_back(Cand(1, 1, ANCHOR_INTERACTIVE, 0, 0, 0));
+    float const nan = std::numeric_limits<float>::quiet_NaN();
+    float const inf = std::numeric_limits<float>::infinity();
+    CHECK(!PickAnchor(one, nan, 0, rules, p));
+    CHECK(!PickAnchor(one, 0, inf, rules, p));
+    one[0].x = nan;
+    CHECK(!PickAnchor(one, 0, 0, rules, p));
+    one[0].x = 0;
+    one[0].z = inf;
+    CHECK(!PickAnchor(one, 0, 0, rules, p));
+    one[0].z = 0;
+    CHECK(PickAnchor(one, 0, 0, rules, p));
+
+    // Radius 0 schaltet die jeweilige Klasse aus.
+    AnchorRules off;
+    off.radiusInteractive = 0.0f;
+    CHECK(!PickAnchor(one, 0, 0, off, p));
+
+    // Wer herumlaeuft, verliert gegen einen Stehenden gleicher Entfernung.
+    std::vector<AnchorCand> m;
+    m.push_back(Cand(10, 1, ANCHOR_INTERACTIVE | ANCHOR_MOVER, 5.0f, 0.0f, 0.0f));
+    m.push_back(Cand(11, 2, ANCHOR_INTERACTIVE, 0.0f, 5.0f, 0.0f));
+    CHECK(PickAnchor(m, 0, 0, rules, p) && m[p.index].entry == 2);
+
+    // Gleichstand: mehr Belege, dann Kreatur vor Objekt, dann kleinere Spawn-ID.
+    std::vector<AnchorCand> g;
+    g.push_back(Cand(30, 3, ANCHOR_INTERACTIVE | ANCHOR_OBJECT, 3.0f, 0.0f, 0.0f));
+    g.push_back(Cand(20, 2, ANCHOR_INTERACTIVE, 0.0f, 3.0f, 0.0f));
+    CHECK(PickAnchor(g, 0, 0, rules, p) && g[p.index].entry == 2);                   // Kreatur vor Objekt
+    g.push_back(Cand(10, 1, ANCHOR_INTERACTIVE, -3.0f, 0.0f, 0.0f));
+    CHECK(PickAnchor(g, 0, 0, rules, p) && g[p.index].entry == 1);                   // kleinere Spawn-ID
+
+    // Stapel auf einem Punkt (Spawns an derselben Stelle): kein Absturz, eine Etage.
+    std::vector<AnchorCand> st;
+    for (uint64 i = 0; i < 6; ++i)
+        st.push_back(Cand(100 + i, uint32(i + 1), ANCHOR_INTERACTIVE, 1.0f, 1.0f, 10.0f));
+    CHECK(PickAnchor(st, 1.0f, 1.0f, rules, p) && p.floors == 1 && p.altCount == 0);
+
+    // Mehr als zwei Ersatzetagen werden auf zwei begrenzt, die Etagenzahl bleibt wahr.
+    std::vector<AnchorCand> many;
+    for (int i = 0; i < 5; ++i)
+        many.push_back(Cand(uint64(200 + i), uint32(i + 1), ANCHOR_INTERACTIVE, float(i) * 0.5f, 0.0f, float(i) * 20.0f));
+    CHECK(PickAnchor(many, 0, 0, rules, p) && p.floors == 5 && p.altCount == 2);
+}
+
 int main()
 {
     TestParseUInt();
@@ -641,6 +899,12 @@ int main()
     TestSplinePacket();
     TestSplitLongSegments();
     TestShortestChain();
+    TestLabelMatchesName();
+    TestAnchorFlagsText();
+    TestPickAnchorGanaar();
+    TestPickAnchorFloors();
+    TestPickAnchorQuest();
+    TestPickAnchorRules();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);
     return sFailures ? 1 : 0;

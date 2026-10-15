@@ -187,6 +187,15 @@ namespace
         { "stepdown",            "AutoTravel.MaxStepDown",             OPT_FLOAT, AT_OFF(maxStepDown),         1,       40,        6,       "groesster Absatz nach unten (yd)" },
         { "planes",              "AutoTravel.GroundPlanes",            OPT_UINT,  AT_OFF(groundPlanes),        1,       8,         4,       "wie viele Etagen je Punkt gesucht werden" },
 
+        { "anchor",              "AutoTravel.UseTargetAnchor",         OPT_BOOL,  AT_OFF(useTargetAnchor),     0,       1,         1,       "Ziel an den Spawn eines NPCs, Objekts oder Questziels heften (richtige Etage)" },
+        { "anchorradius",        "AutoTravel.AnchorRadius",            OPT_FLOAT, AT_OFF(anchorRadius),        0,       60,        12,      "hoechste Abweichung zu einem NPC mit Dienst oder nutzbaren Objekt (yd)" },
+        { "anchorname",          "AutoTravel.AnchorNameRadius",        OPT_FLOAT, AT_OFF(anchorNameRadius),    0,       80,        25,      "hoechste Abweichung, wenn der Name dem Ziel des Addons entspricht (yd)" },
+        { "anchorquest",         "AutoTravel.AnchorQuestRadius",       OPT_FLOAT, AT_OFF(anchorQuestRadius),   0,       100,       40,      "hoechste Abweichung zu einem Ziel oder einer Abgabe deiner Quests (yd)" },
+        { "anchorsnap",          "AutoTravel.AnchorSnapXY",            OPT_BOOL,  AT_OFF(anchorSnapXY),        0,       1,         1,       "bei NPCs auch X/Y auf die Spawnposition setzen" },
+        { "anchorobjects",       "AutoTravel.AnchorObjects",           OPT_BOOL,  AT_OFF(anchorObjects),       0,       1,         1,       "auch Briefkaesten, Ambosse, Schmieden, Gildentresore als Anker" },
+        { "anchorfloor",         "AutoTravel.AnchorFloorTolerance",    OPT_FLOAT, AT_OFF(anchorFloorTolerance),1,       30,        6,       "Hoehenabstand, ab dem zwei Spawns zwei Etagen sind (yd)" },
+        { "anchorz",             "AutoTravel.AnchorArrivalZ",          OPT_FLOAT, AT_OFF(anchorArrivalZ),      2,       100,       10,      "Hoehenabstand, ab dem ein verankertes Ziel nicht als erreicht gilt (yd)" },
+
         { "nodes",               "AutoTravel.UseTravelNodes",          OPT_BOOL,  AT_OFF(useTravelNodes),      0,       1,         1,       "Knotengraph von mod-playerbots benutzen" },
         { "noderadius",          "AutoTravel.NodeSearchRadius",        OPT_FLOAT, AT_OFF(nodeSearchRadius),    50,      10000,     800,     "Suchradius fuer den naechsten Knoten (yd)" },
         { "nodemin",             "AutoTravel.NodeMinDistance",         OPT_FLOAT, AT_OFF(nodeMinDistance),     0,       10000,     300,     "ab dieser Entfernung Knoten benutzen (yd)" },
@@ -355,7 +364,7 @@ void AutoTravelMgr::LoadConfig()
     }
 
     // --- Gegenpruefungen ---------------------------------------------------
-    // Zwoelf Plausibilitaetspruefungen der Schwellwerte gegeneinander. Sie
+    // Dreizehn Plausibilitaetspruefungen der Schwellwerte gegeneinander. Sie
     // fangen Einstellungen ab, die sich gegenseitig aufheben oder das Modul in
     // eine Endlosschleife treiben.
     struct Check { bool bad; char const* text; };
@@ -387,6 +396,8 @@ void AutoTravelMgr::LoadConfig()
           "TerrainStep groesser als LegDistance erzeugt Etappen ohne Zwischenpunkte." },
         { ATConf.flyClearance >= ATConf.flyMaxHeight,
           "FlyClearance muss kleiner als FlyMaxHeight sein, sonst ist keine Flughoehe gueltig." },
+        { ATConf.anchorArrivalZ <= ATConf.anchorFloorTolerance,
+          "AnchorArrivalZ muss groesser als AnchorFloorTolerance sein, sonst gilt ein NPC auf einer Treppe als auf einer anderen Etage." },
     };
 
     uint32 problems = 0;

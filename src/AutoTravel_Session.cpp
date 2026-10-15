@@ -749,10 +749,16 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
     float dist = player->GetExactDist2d(s.destX, s.destY);
 
+    // Ein verankertes Ziel (NPC, Objekt, Questziel) gilt erst als erreicht, wenn auch die
+    // Etage stimmt: wer ueber oder unter dem Ziel steht, ist 2D "da" und doch 130 yd
+    // entfernt (die Exodar liegt unter dem Gelaende). Stimmt sie nicht, laeuft das
+    // Teilstueck weiter und die naechste Berechnung sucht den Weg zur richtigen Etage.
+    bool const floorOk = !lastLeg || ArrivedVertically(player, s);
+
     // In den Wartezustaenden gilt die Ankunft schon: sonst liefe der Block unten bei
     // jedem Takt erneut (Chatmeldung fuenfmal pro Sekunde, und der Zaehler fuer das
     // Aufgeben wuerde ewig zurueckgesetzt), solange der Charakter am Anleger steht.
-    if (dist <= radius && s.state != AT_MOUNTING && s.state != AT_WAIT_TAXI
+    if (dist <= radius && floorOk && s.state != AT_MOUNTING && s.state != AT_WAIT_TAXI
         && s.state != AT_WAIT_TRANSPORT && s.state != AT_WAIT_MANUAL)
     {
         ATLeg const& cur = s.route[s.legIdx];
@@ -1114,7 +1120,21 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 return;
             }
 
-            // Teilstueck zu Ende gelaufen -> von hier aus neu rechnen
+            // Teilstueck zu Ende gelaufen. Steht der Charakter dabei 2D am verankerten Ziel,
+            // aber auf der falschen Etage, zaehlt das: nach zwei solchen Teilstuecken gilt das
+            // Ziel als erreicht (ein NPC auf einem Podest ohne Weg darf die Reise nicht
+            // endlos beschaeftigen).
+            if (s.anchor.found && s.legIdx + 1 >= s.route.size()
+                && player->GetExactDist2d(s.destX, s.destY) <= ArrivalDist(s)
+                && !ArrivedVertically(player, s))
+            {
+                ++s.anchorZRefusals;
+                Dbg(player, s, "Am Ziel, aber auf der falschen Etage (Z " +
+                               std::to_string(int(player->GetPositionZ())) + " statt " +
+                               std::to_string(int(s.destZ)) + ").");
+            }
+
+            // von hier aus neu rechnen
             s.path.clear();
             s.idx = 0;
             s.flying = false;

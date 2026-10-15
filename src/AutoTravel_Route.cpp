@@ -440,8 +440,12 @@ bool AutoTravelMgr::MapToWorld(Player* player, uint32 uiMapId, float nx, float n
 bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
                                  bool hasCalib, float pnx, float pny,
                                  float& x, float& y, float& z, uint32& mapId,
-                                 std::string& err, bool allowOtherMap) const
+                                 std::string& err, bool allowOtherMap,
+                                 ATAnchor* anchorOut, std::string const* label) const
 {
+    if (anchorOut)
+        *anchorOut = ATAnchor();
+
     if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f)
     {
         err = "Ungueltige Zielkoordinaten vom Addon erhalten.";
@@ -455,13 +459,46 @@ bool AutoTravelMgr::ResolveWorld(Player* player, uint32 uiMapId, float nx, float
 
     mapId = player->GetMapId();
 
+    // Zielanker: ist das Ziel ein NPC, ein Objekt oder ein Questziel, legt dessen Spawn die
+    // Etage fest -- nicht die Hoehensuche nach der Position des Spielers. Spawndaten gelten
+    // fuer jede Karte, auch fuer eine, auf der der Spieler nicht steht.
+    std::string const noLabel;
+    std::string const& hint = label ? *label : noLabel;
+
     // Ziel auf einer anderen Karte: x/y stehen fest, die Hoehe laesst sich dort
     // nicht abfragen (das Gelaende ist nur fuer die Karte des Spielers geladen).
     if (allowOtherMap && areaMap != AT_NO_MAP && areaMap != player->GetMapId())
     {
         mapId = areaMap;
         z = 0.0f;
+        ATAnchor a;
+        if (anchorOut && FindAnchor(player, mapId, x, y, hint, a))
+        {
+            if (a.info.snappedXY)
+            {
+                x = a.x;
+                y = a.y;
+            }
+            z = a.z;
+            *anchorOut = a;
+        }
         return true;
+    }
+
+    if (anchorOut)
+    {
+        ATAnchor a;
+        if (FindAnchor(player, mapId, x, y, hint, a))
+        {
+            if (a.info.snappedXY)
+            {
+                x = a.x;
+                y = a.y;
+            }
+            z = a.z;
+            *anchorOut = a;
+            return true;
+        }
     }
 
     z = BestGroundZ(player, x, y);
@@ -480,7 +517,8 @@ void AutoTravelMgr::Resolve(Player* player, uint32 uiMapId, float nx, float ny,
     uint32 mapId = 0;
     std::string err;
 
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    ATAnchor anchor;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err, false, &anchor))
     {
         Msg(player, err);
         return;
@@ -542,12 +580,19 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
     {
         ATLeg& leg = s.route[s.legIdx];
 
+        // Nur das Endziel wird verankert: ein Zwischenpunkt ist eine Wegmarke (ein Stadttor
+        // ueber der Exodar darf nicht an einen NPC in der Stadt darunter heften).
+        bool const finalLeg = (s.legIdx + 1 == s.route.size());
+        std::string const label = finalLeg ? (leg.name.empty() ? s.destName : leg.name) : std::string();
+
         if (!leg.resolved)
         {
             uint32 mapId = 0;
             std::string err;
+            ATAnchor anchor;
             if (!ResolveWorld(player, leg.uiMapId, leg.nx, leg.ny, false, 0.0f, 0.0f,
-                              leg.wx, leg.wy, leg.wz, mapId, err))
+                              leg.wx, leg.wy, leg.wz, mapId, err, false,
+                              finalLeg ? &anchor : nullptr, finalLeg ? &label : nullptr))
             {
                 char b[256];
                 std::snprintf(b, sizeof(b), "Stuetzpunkt %u uebersprungen: %s",
@@ -558,6 +603,7 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
             }
             leg.mapId = mapId;
             leg.resolved = true;
+            leg.anchor = anchor.info;
         }
 
         // Ziel auf einer anderen Karte: jetzt, auf der Zielkarte, laesst sich der
@@ -567,18 +613,25 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
             uint32 mapId = 0;
             std::string err;
             float x = leg.wx, y = leg.wy, z = 0.0f;
+            ATAnchor anchor;
             if (leg.uiMapId
                 && ResolveWorld(player, leg.uiMapId, leg.nx, leg.ny, false, 0.0f, 0.0f,
-                                x, y, z, mapId, err))
+                                x, y, z, mapId, err, false,
+                                finalLeg ? &anchor : nullptr, finalLeg ? &label : nullptr))
             {
                 leg.wx = x;
                 leg.wy = y;
                 leg.wz = z;
+                leg.anchor = anchor.info;
             }
             else
             {
-                float const gz = BestGroundZ(player, leg.wx, leg.wy);
-                leg.wz = (gz > INVALID_HEIGHT) ? gz : player->GetPositionZ();
+                // Ein Anker aus der Planung (Spawndaten der Zielkarte) behaelt seine Etage.
+                if (!leg.anchor.found)
+                {
+                    float const gz = BestGroundZ(player, leg.wx, leg.wy);
+                    leg.wz = (gz > INVALID_HEIGHT) ? gz : player->GetPositionZ();
+                }
                 Dbg(player, s, "Zielpunkt auf der neuen Karte nicht neu aufloesbar (" + err +
                                ") - bleibt bei den bisherigen Koordinaten.");
             }
@@ -598,6 +651,29 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.destX = leg.wx;
         s.destY = leg.wy;
         s.destZ = leg.wz;
+        s.anchor = finalLeg ? leg.anchor : ATAnchorInfo();
+        s.anchorZRefusals = 0;
+        s.anchorWarned = false;
+
+        if (s.anchor.found)
+        {
+            char b[256];
+            std::snprintf(b, sizeof(b), "Zielanker: %s (Eintrag %u), Belege: %s, %.1f yd vom Kartenpunkt, Z %.2f%s",
+                          s.anchor.name.c_str(), s.anchor.entry, AT::AnchorFlagsText(s.anchor.source).c_str(),
+                          s.anchor.dist2D, s.anchor.z, s.anchor.covered ? ", verdeckt" : "");
+            Dbg(player, s, b);
+
+            // Erkannt am Namen oder an einer Quest: dem Spieler sagen, WAS das Ziel ist. Wer
+            // nur auf eine Karte geklickt hat und zufaellig neben einem Haendler gelandet ist,
+            // braucht die Meldung nicht (".at debug" zeigt sie).
+            if (s.anchor.source & (AT::ANCHOR_NAME | AT::ANCHOR_QUEST))
+            {
+                char m[256];
+                std::snprintf(m, sizeof(m), "Ziel erkannt: %s (%s), Etage Z %.0f.",
+                              s.anchor.name.c_str(), AT::AnchorFlagsText(s.anchor.source).c_str(), s.anchor.z);
+                Msg(player, m);
+            }
+        }
         return true;
     }
     return false;
@@ -625,12 +701,15 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
     {
         uint32 m = 0;
         std::string resolveErr;
+        ATAnchor anchor;
+        std::string const label = last.name.empty() ? s.destName : last.name;
         if (!ResolveWorld(player, last.uiMapId, last.nx, last.ny, false, 0.0f, 0.0f,
-                          last.wx, last.wy, last.wz, m, resolveErr, true))
+                          last.wx, last.wy, last.wz, m, resolveErr, true, &anchor, &label))
             return true;                   // die Etappen laufen einzeln weiter
         last.mapId = m;
         last.resolved = true;
         last.groundPending = (m != player->GetMapId());
+        last.anchor = anchor.info;
     }
 
     // Liegt das Ziel auf einer anderen Karte, sind Koordinaten nicht vergleichbar:
@@ -844,9 +923,13 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     float wx = 0.0f, wy = 0.0f, wz = 0.0f;
     uint32 tmpMap = 0;
     std::string err;
+    // Das Label ist Carbonites Text (englisch); es hilft nur, den NPC zu finden.
+    std::string const label = AT::SanitizeText(name, 96);
+    ATAnchor anchor;
     // Das Ziel darf auf einer anderen Karte liegen (anderer Kontinent): ob und wie
     // man dorthin kommt, entscheidet die Routenplanung (Knotengraph).
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err, true))
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, wx, wy, wz, tmpMap, err, true,
+                      &anchor, &label))
     {
         Msg(player, err);
         SyncStatus(player);
@@ -881,6 +964,7 @@ bool AutoTravelMgr::Start(Player* player, uint32 uiMapId, float nx, float ny,
     leg.resolved = true;
     leg.groundPending = (tmpMap != player->GetMapId());
     leg.name = s.destName;
+    leg.anchor = anchor.info;
     s.route.push_back(leg);
     s.legIdx = 0;
 
@@ -936,6 +1020,11 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
     s.route = std::move(it->second);
     _pendingRoutes.erase(it);
     s.legIdx = 0;
+
+    // Das Label des Addons gehoert zur LETZTEN Etappe (Carbonites Ziel); die Zwischenpunkte
+    // tragen keines.
+    if (!s.route.empty())
+        s.route.back().name = s.destName;
 
     char buf[160];
     std::snprintf(buf, sizeof(buf), "Route mit %u Stuetzpunkten uebernommen.",
@@ -1233,7 +1322,10 @@ void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
     float x = 0.0f, y = 0.0f, z = 0.0f;
     uint32 mapId = 0;
     std::string err;
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    std::string const label = AT::SanitizeText(name, 96);
+    ATAnchor anchor;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err, false,
+                      &anchor, &label))
     {
         Msg(player, err);
         return;
@@ -1285,7 +1377,7 @@ void AutoTravelMgr::Teleport(Player* player, uint32 uiMapId, float nx, float ny,
 // ---------------------------------------------------------------------------
 
 void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
-                             bool hasCalib, float pnx, float pny)
+                             bool hasCalib, float pnx, float pny, std::string const& name)
 {
     char b[288];
 
@@ -1319,14 +1411,32 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     float x, y, z;
     uint32 mapId;
     std::string err;
-    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err))
+    std::string const label = AT::SanitizeText(name, 96);
+    ATAnchor anchor;
+    if (!ResolveWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, x, y, z, mapId, err, false, &anchor, &label))
     {
         Msg(player, "Zielaufloesung fehlgeschlagen: " + err);
         return;
     }
 
-    std::snprintf(b, sizeof(b), "Ziel: %.1f / %.1f / %.1f | Entfernung %.0f yd",
-                  x, y, z, player->GetExactDist2d(x, y));
+    // Zielanker: was der Server zu diesem Kartenpunkt weiss. Die Suche laeuft hier noch
+    // einmal am ungerundeten Kartenpunkt (ResolveWorld liefert bei einem Anker dessen
+    // Position), damit der Bericht zeigt, wie weit der Anker davon entfernt liegt.
+    {
+        float rx = x, ry = y;
+        std::string mapErr;
+        if (MapToWorld(player, uiMapId, nx, ny, hasCalib, pnx, pny, rx, ry, mapErr))
+        {
+            std::vector<std::string> lines;
+            ATAnchor probe;
+            FindAnchor(player, player->GetMapId(), rx, ry, label, probe, &lines);
+            for (std::string const& l : lines)
+                Msg(player, l);
+        }
+    }
+
+    std::snprintf(b, sizeof(b), "Ziel: %.1f / %.1f / %.1f | Entfernung %.0f yd%s",
+                  x, y, z, player->GetExactDist2d(x, y), anchor.info.found ? " | VERANKERT" : "");
     Msg(player, b);
 
     Map* map = player->GetMap();
@@ -1337,6 +1447,15 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     else
         std::snprintf(b, sizeof(b), "Rohgelaende dort: keine Angabe - an dieser Stelle ist kein Boden.");
     Msg(player, b);
+
+    if (anchor.info.found)
+    {
+        float const legacy = BestGroundZ(player, x, y);
+        std::snprintf(b, sizeof(b),
+                      "Ohne Anker waere die Zielhoehe Z %.2f (Hoehensuche nach DEINER Position, Z %.1f).",
+                      legacy, player->GetPositionZ());
+        Msg(player, b);
+    }
 
     std::vector<float> planes;
     FindGroundPlanes(player, x, y, z, planes);
@@ -1355,24 +1474,52 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     }
 
     float zc[6];
+    float xc[6];
+    float yc[6];
     uint8 zn = 0;
-    auto addZ = [&](float v)
+    auto addTarget = [&](float tx, float ty, float v)
     {
         if (v <= INVALID_HEIGHT || zn >= 6)
             return;
         for (uint8 i = 0; i < zn; ++i)
-            if (std::fabs(zc[i] - v) < 1.5f)
+            if (std::fabs(zc[i] - v) < 1.5f && std::fabs(xc[i] - tx) < 1.0f && std::fabs(yc[i] - ty) < 1.0f)
                 return;
-        zc[zn++] = v;
+        xc[zn] = tx;
+        yc[zn] = ty;
+        zc[zn] = v;
+        ++zn;
     };
+    auto addZ = [&](float v) { addTarget(x, y, v); };
 
     float pz = player->GetPositionZ();
-    addZ(z);
-    addZ(terrain);
-    addZ(map->GetHeight(phase, x, y, pz + 5.0f,   true, 400.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 40.0f,  true, 400.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 120.0f, true, 400.0f));
-    addZ(map->GetHeight(phase, x, y, pz + 300.0f, true, 400.0f));
+    auto buildLegacyPool = [&]()
+    {
+        zn = 0;
+        addZ(z);
+        addZ(terrain);
+        addZ(map->GetHeight(phase, x, y, pz + 5.0f,   true, 400.0f));
+        addZ(map->GetHeight(phase, x, y, pz + 40.0f,  true, 400.0f));
+        addZ(map->GetHeight(phase, x, y, pz + 120.0f, true, 400.0f));
+        addZ(map->GetHeight(phase, x, y, pz + 300.0f, true, 400.0f));
+    };
+
+    // Wie CalculatePath: ein Anker legt die Etage fest, die Hoehensuche kommt nur als
+    // Rueckfall, und bei einem verdeckten Ziel gar nicht.
+    bool anchored = anchor.info.found;
+    if (anchored)
+    {
+        zn = 0;
+        addZ(anchor.info.z);
+        for (uint32 i = 0; i < anchor.info.altCount && i < 2; ++i)
+        {
+            if (anchor.info.snappedXY)
+                addTarget(anchor.info.altX[i], anchor.info.altY[i], anchor.info.altZ[i]);
+            else
+                addZ(anchor.info.altZ[i]);
+        }
+    }
+    else
+        buildLegacyPool();
 
     if (zn == 0)
     {
@@ -1381,24 +1528,43 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     }
 
     bool done = false;
-    for (uint8 pass = 0; pass < 2 && !done; ++pass)
+    auto runCandidates = [&]()
     {
-        for (uint8 i = 0; i < zn; ++i)
+        for (uint8 pass = 0; pass < 2 && !done; ++pass)
         {
-            ATPathResult r;
-            bool ok = TryPathBetween(player,
-                                     player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
-                                     x, y, zc[i], pass == 1, r);
-            std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s",
-                          pass == 1 ? "Eckpunkte" : "geglaettet",
-                          zc[i], r.type, AT::PathTypeName(r.type).c_str(),
-                          uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen");
-            Msg(player, b);
-            if (ok)
+            for (uint8 i = 0; i < zn; ++i)
             {
-                done = true;
-                break;
+                ATPathResult r;
+                bool ok = TryPathBetween(player,
+                                         player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
+                                         xc[i], yc[i], zc[i], pass == 1, r);
+                std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s",
+                              pass == 1 ? "Eckpunkte" : "geglaettet",
+                              zc[i], r.type, AT::PathTypeName(r.type).c_str(),
+                              uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen");
+                Msg(player, b);
+                if (ok)
+                {
+                    done = true;
+                    break;
+                }
             }
+        }
+    };
+
+    runCandidates();
+
+    if (!done && anchored)
+    {
+        if (anchor.info.covered)
+        {
+            Msg(player, "Das Ziel ist verdeckt (Gelaende darueber): kein Rueckfall auf die Hoehensuche.");
+        }
+        else
+        {
+            Msg(player, "Zielanker ohne Weg - Rueckfall auf die Hoehensuche:");
+            buildLegacyPool();
+            runCandidates();
         }
     }
 

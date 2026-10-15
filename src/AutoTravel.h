@@ -56,7 +56,7 @@ class Map;
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
 // Nur zur Anzeige ("Server 4.0.5" im Addon, damit sich ein Fehlerbericht einer Fassung
 // zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
-constexpr char const* AT_MODULE_VERSION = "4.0.5";
+constexpr char const* AT_MODULE_VERSION = "4.0.6";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
@@ -132,6 +132,34 @@ constexpr uint32 AT_NO_MAP = 0xFFFFFFFFu;
 // und der Knoten 0 ist der Startpunkt der Menschen in Nordhain (Karte 0).
 constexpr uint32 AT_NO_NODE = 0xFFFFFFFFu;
 
+// ---------------------------------------------------------------------------
+// Zielanker
+// ---------------------------------------------------------------------------
+//
+// Das Addon liefert nur Kartenkoordinaten (x/y). Die Etage -- Z -- ist daraus
+// nicht abzulesen, und wo mehrere Flaechen uebereinanderliegen (die Exodar liegt
+// rund 130 yd UNTER dem Gelaende darueber), raet die Hoehensuche nach der
+// Spielerposition. Ist das Ziel ein NPC, ein Objekt oder ein Questziel, kennt der
+// Server seine genaue Position: das ist ein Anker. Er legt die Etage fest.
+//
+// ATAnchorInfo ist, was von einem Anker an der Etappe und der Sitzung bleibt.
+struct ATAnchorInfo
+{
+    bool   found = false;
+    bool   covered = false;     // das Gelaende liegt deutlich ueber dem Ziel (Gebaeude, Stadt unter der Erde)
+    bool   snappedXY = false;   // x/y wurden auf die Spawnposition gesetzt
+    uint32 source = 0;          // Bitmaske AT::ANCHOR_*: woran der Anker erkannt wurde
+    uint32 entry = 0;           // Eintrag des NPCs oder Objekts
+    std::string name;           // Name aus der Datenbank (englisch), nur zur Anzeige
+    float  z = 0.0f;            // Etage des Ankers (die der Sitzung zugewiesene Zielhoehe kann davon abweichen)
+    float  dist2D = 0.0f;       // Abstand des Kartenpunkts zur Spawnposition (yd)
+    uint32 floors = 0;          // Zahl der Etagen mit einem zulaessigen Kandidaten
+    uint32 altCount = 0;        // weitere, gleichwertige Etagen (Rueckfall)
+    float  altX[2] = { 0.0f, 0.0f };    // Spawnposition dieser Etagen (der Punkt liegt dort, nicht ueber dem Hauptanker)
+    float  altY[2] = { 0.0f, 0.0f };
+    float  altZ[2] = { 0.0f, 0.0f };
+};
+
 struct ATLeg
 {
     // Quelle A: Kartenkoordinaten vom Addon
@@ -147,6 +175,11 @@ struct ATLeg
     // die Hoehe nicht (das Gelaende dort ist fuer diesen Spieler nicht geladen).
     // Sie wird nachgetragen, sobald die Etappe an der Reihe ist.
     bool   groundPending = false;
+
+    // Nur die LETZTE Etappe wird verankert; Zwischenpunkte einer Route sind
+    // Wegmarken (ein Stadttor ueber der Exodar darf nicht an einen NPC darunter
+    // heften).
+    ATAnchorInfo anchor;
 
     ATLegKind kind = AT_LEG_WALK;
 
@@ -303,6 +336,16 @@ struct ATConfig
     // ueberschreiben.
     uint32 groundPlanes       = 4;       // wie viele Etagen gesucht werden
 
+    // --- Zielanker: NPCs, Objekte und Questziele ---------------------------
+    bool   useTargetAnchor    = true;
+    float  anchorRadius       = 12.0f;   // NPC mit Dienst / nutzbares Objekt
+    float  anchorNameRadius   = 25.0f;   // Name entspricht dem Ziel des Addons
+    float  anchorQuestRadius  = 40.0f;   // Ziel oder Abgabe einer Quest des Spielers
+    bool   anchorSnapXY       = true;    // x/y auf die Spawnposition setzen (NPCs)
+    bool   anchorObjects      = true;    // auch Objekte (Briefkasten, Amboss ...)
+    float  anchorFloorTolerance = 6.0f;  // Hoehenabstand, ab dem es zwei Etagen sind
+    float  anchorArrivalZ     = 10.0f;   // Hoehenabstand, ab dem das Ziel nicht erreicht ist
+
     // --- Knotengraph -------------------------------------------------------
     bool   useTravelNodes     = true;
     float  nodeSearchRadius   = 800.0f;
@@ -379,6 +422,9 @@ struct ATSession
     size_t  legIdx = 0;
     uint32  mapId  = AT_NO_MAP;         // Karte, auf der die Etappe laeuft (Start/SetLegTarget setzen sie)
     float   destX = 0.0f, destY = 0.0f, destZ = 0.0f;
+    ATAnchorInfo anchor;                // gilt fuer destX/destY/destZ (nur letzte Etappe)
+    uint32  anchorZRefusals = 0;        // Teilstuecke, die am Ziel auf der falschen Etage endeten
+    bool    anchorWarned = false;
 
     // Aktuelles Teilstueck
     Movement::PointsArray path;
@@ -465,6 +511,17 @@ struct ATPathResult
 };
 
 // ---------------------------------------------------------------------------
+// Ergebnis der Ankersuche (AutoTravel_Anchor.cpp)
+// ---------------------------------------------------------------------------
+
+struct ATAnchor
+{
+    ATAnchorInfo info;
+    float  x = 0.0f, y = 0.0f, z = 0.0f;   // Spawnposition, Z auf eine Lauffleche gelegt
+    bool   isObject = false;
+};
+
+// ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
 
@@ -499,7 +556,8 @@ public:
     void Resolve(Player* player, uint32 uiMapId, float nx, float ny,
                  bool hasCalib, float pnx, float pny);
     void Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
-                  bool hasCalib, float pnx, float pny);
+                  bool hasCalib, float pnx, float pny,
+                  std::string const& name = std::string());
 
     void LearnMapId(Player* player, uint32 clientMapId, float pnx, float pny);
 
@@ -592,8 +650,25 @@ private:
     bool ShouldFly(Player* player, ATSession& s) const;
     bool BuildAirPath(Player* player, ATSession& s);
 
+    // --- Zielanker (AutoTravel_Anchor.cpp) ---------------------------------
+    //
+    // Sucht zum Kartenpunkt (x, y) auf 'mapId' einen NPC, ein Objekt oder ein
+    // Questziel des Spielers, dessen Spawn dort liegt, und liefert dessen genaue
+    // Position. 'label' ist der Name, den das Addon aus Carbonite mitschickt
+    // (englisch, auch wenn der Client deutsch ist); er hilft nur bei der Auswahl.
+    // Mit 'report' werden die Kandidaten fuer ".at diag" beschrieben.
+    bool FindAnchor(Player* player, uint32 mapId, float x, float y,
+                    std::string const& label, ATAnchor& out,
+                    std::vector<std::string>* report = nullptr) const;
+
+    // Hat der Charakter die Etage des verankerten Ziels erreicht? Ohne Anker immer ja.
+    bool ArrivedVertically(Player* player, ATSession const& s) const;
+
     // --- Gelaende (AutoTravel_Terrain.cpp) ---------------------------------
     float BestGroundZ(Player* player, float x, float y) const;
+    // Wie BestGroundZ, aber die Etage wird um 'refZ' gesucht statt um die Hoehe des
+    // Spielers (verankerte Ziele: die Etage des NPCs, nicht die, auf der man steht).
+    float BestGroundZNear(Player* player, float x, float y, float refZ) const;
     void  FindGroundPlanes(Player* player, float x, float y, float probeZ,
                            std::vector<float>& out) const;
     float SelectGroundPlaneOnRoute(std::vector<float> const& planes,
@@ -629,11 +704,18 @@ private:
                     float& outX, float& outY, std::string& err,
                     uint32* targetMap = nullptr) const;
     // Mit allowOtherMap liefert eine Zielkarte != Karte des Spielers Erfolg mit
-    // z = 0: die Hoehe laesst sich nur auf der eigenen Karte abfragen.
+    // z = 0: die Hoehe laesst sich nur auf der eigenen Karte abfragen -- es sei
+    // denn, ein Anker liefert sie (Spawndaten gelten fuer jede Karte).
+    //
+    // 'anchorOut' schaltet die Verankerung ein: nur der Aufrufer, der das ENDZIEL
+    // aufloest, setzt ihn. Zwischenpunkte einer Route bleiben, wie sie waren.
+    // 'label' ist der Name des Ziels vom Addon (darf fehlen).
     bool ResolveWorld(Player* player, uint32 uiMapId, float nx, float ny,
                       bool hasCalib, float pnx, float pny,
                       float& x, float& y, float& z, uint32& mapId,
-                      std::string& err, bool allowOtherMap = false) const;
+                      std::string& err, bool allowOtherMap = false,
+                      ATAnchor* anchorOut = nullptr,
+                      std::string const* label = nullptr) const;
 
     // --- Meldungen (AutoTravel_Config.cpp) ---------------------------------
 public:
@@ -758,6 +840,65 @@ namespace AT
     // Rueckgabe: true, wenn etwas geteilt wurde. 'from' bleibt gueltig.
     bool SplitLongSegments(Movement::PointsArray& path, size_t from,
                            G3D::Vector3 const& origin, float maxLen);
+
+    // --- Zielanker: Auswahl (rein, ohne Core) --------------------------------
+    //
+    // Der Kern liest NPCs, Objekte und Questziele aus dem ObjectMgr (AutoTravel_Anchor.cpp)
+    // und beschreibt jeden Kandidaten mit diesen Merkmalen; PickAnchor waehlt daraus.
+    // Getrennt, damit sich die Auswahl als eigenes Programm testen laesst.
+    enum AnchorFlag : uint32
+    {
+        ANCHOR_INTERACTIVE = 0x01,   // NPC mit Dienst-Flag oder nutzbares Objekt
+        ANCHOR_NAME        = 0x02,   // der Name entspricht dem Ziel des Addons
+        ANCHOR_QUEST       = 0x04,   // Ziel oder Abgabe einer Quest des Spielers
+        ANCHOR_OBJECT      = 0x08,   // Spielobjekt statt Kreatur
+        ANCHOR_MOVER       = 0x10    // laeuft Wegpunkte ab: der Spawn ist nur ein Startpunkt
+    };
+
+    struct AnchorCand
+    {
+        uint64 spawnId = 0;
+        uint32 entry = 0;
+        uint32 flags = 0;            // AnchorFlag-Maske; ohne INTERACTIVE/NAME/QUEST kein Anker
+        float  x = 0.0f, y = 0.0f, z = 0.0f;
+    };
+
+    struct AnchorRules
+    {
+        float radiusInteractive = 12.0f;
+        float radiusName        = 25.0f;
+        float radiusQuest       = 40.0f;
+        float floorTolerance    = 6.0f;
+    };
+
+    struct AnchorPick
+    {
+        bool   found = false;
+        size_t index = 0;            // gewaehlter Kandidat (Index in die uebergebene Liste)
+        float  dist2D = 0.0f;
+        float  score = 0.0f;
+        uint32 floors = 0;           // Zahl der Etagen mit zulaessigen Kandidaten
+        uint32 altCount = 0;         // gleichwertige Kandidaten auf anderen Etagen (hoechstens 2)
+        size_t alt[2] = { 0, 0 };
+    };
+
+    // Waehlt den Anker zum Kartenpunkt (tx, ty). Jeder Kandidat hat einen Toleranzradius
+    // je nach Merkmal (grosszuegiger fuer Name und Quest als fuer reine Naehe); wer
+    // weiter weg liegt, scheidet aus -- dann gilt das alte Verfahren (Hoehensuche),
+    // etwa bei einem anderen Phasing oder einem verschobenen Spawn. Bewertet wird der
+    // Abstand im Verhaeltnis zur Toleranz; Name und Quest verbessern die Wertung.
+    bool PickAnchor(std::vector<AnchorCand> const& cands, float tx, float ty,
+                    AnchorRules const& rules, AnchorPick& out);
+
+    // "Dienst, Name, Quest": woran ein Anker erkannt wurde (fuer Meldungen und ".at diag").
+    std::string AnchorFlagsText(uint32 flags);
+
+    // Steht 'name' (englischer Name aus der Datenbank) im 'label' des Addons? Ohne
+    // Gross-/Kleinschreibung, als ganze Woerter, mindestens vier Zeichen: "High Chief
+    // Stillpine" und "Kill High Chief Stillpine" treffen den NPC, "Stillpine" allein
+    // nicht. Das Label ist Carbonites englischer Text, nicht der Name, den der Client
+    // anzeigt.
+    bool LabelMatchesName(std::string const& label, std::string const& name);
 
     // --- Kuerzester Weg im Knotengraphen -------------------------------------
     //

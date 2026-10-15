@@ -48,12 +48,23 @@ float AutoTravelMgr::BestGroundZ(Player* player, float x, float y) const
     if (!player)
         return INVALID_HEIGHT;
 
+    return BestGroundZNear(player, x, y, player->GetPositionZ());
+}
+
+// Die Etage wird um 'refZ' gesucht. BestGroundZ nimmt dafuer die Hoehe des Spielers;
+// ein verankertes Ziel (siehe AutoTravel_Anchor.cpp) die seines NPCs -- der Spieler
+// kann auf einer ganz anderen Etage stehen als das Ziel.
+float AutoTravelMgr::BestGroundZNear(Player* player, float x, float y, float refZ) const
+{
+    if (!player)
+        return INVALID_HEIGHT;
+
     Map* map = player->GetMap();
     if (!map)
         return INVALID_HEIGHT;
 
     uint32 phase = player->GetPhaseMask();
-    float pz = player->GetPositionZ();
+    float pz = refZ;
 
     float const starts[7] =
     {

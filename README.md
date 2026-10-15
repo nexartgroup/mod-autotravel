@@ -106,6 +106,67 @@ er in SQL eingesetzt wird.
   innerhalb eines engen Fensters um die Pfadhoehe. Liegt die naechste Flaeche
   eine Etage tiefer, geschieht ausdruecklich **nichts**.
 
+### Zielanker: NPCs, Objekte und Questziele
+
+Das Addon liefert nur Kartenkoordinaten, keine Hoehe. Wo Flaechen uebereinanderliegen,
+suchte die Hoehensuche die Etage bisher nach der Position des **Spielers** -- und die
+Exodar liegt rund 130 yd *unter* dem Gelaende darueber. Wer draussen stand (oder auf einer
+anderen Etage), bekam die Oberflaeche als Ziel; der Weg zu Ganaar fuehrte aus der Stadt
+hinaus, und die Reise endete 139 yd ueber ihm.
+
+Ist das Ziel ein NPC, ein Objekt oder ein Questziel, kennt der Server seine Position genau:
+sie steht in den Spawndaten. Das Modul sucht zum Kartenpunkt den passenden Spawn und nimmt
+dessen Etage (und bei NPCs auch x/y). Ein Spawn gilt als Anker, wenn er mindestens eines
+dieser Merkmale hat:
+
+| Merkmal | Bedeutung | Toleranz |
+|---|---|---|
+| Dienst | NPC mit Haendler-, Lehrer-, Questgeber-, Flug-, Gasthaus-, Bank-, Auktions-, Stall-, Kampfmeister-Flag oder ein nutzbares Objekt (Briefkasten, Amboss, Schmiede, Gildentresor, Besprechungsstein). Reines Gespraech zaehlt nicht: Wachen und Passanten sind keine Ziele | `AnchorRadius`, 12 yd |
+| Name | der **englische** Name in `creature_template.name` steht im Label, das das Addon aus Carbonite mitschickt | `AnchorNameRadius`, 25 yd |
+| Quest | Ziel einer offenen Quest des Spielers (Kill- und Interaktionsziele, auch ueber Kill-Credit-Eintraege) oder der Abgabe-NPC einer fertigen Quest | `AnchorQuestRadius`, 40 yd |
+
+* **Sprache.** Carbonite zeigt die Namen englisch, auch bei deutschem Client ("High Chief
+  Stillpine" statt "Oberhaeuptling der Tannenruhfeste"). Verglichen wird deshalb gegen die
+  Namen der Basistabelle, nicht gegen `creature_template_locale`. Der Name muss als ganze
+  Woerter im Label stehen (mindestens vier Zeichen); ein Label, das nur die Zone nennt,
+  trifft keinen NPC.
+* **Autotracking.** Carbonite schickt keine Quest-ID mit, und der Server braucht sie auch
+  nicht: er kennt das Questlog des Spielers und prueft die Spawns in der Naehe gegen dessen
+  offene Ziele und fertige Quests. Gegenstandsziele und Gebietsziele haben keinen eigenen
+  Spawn und fallen weg -- dort gilt das alte Verfahren.
+* **Auswahl.** Bewertet wird der Abstand im Verhaeltnis zur Toleranz; Name und Quest
+  verbessern die Wertung (der Name stark, die Quest weniger), wer Wegpunkte abgeht, verschlechtert
+  sie. Ein NPC direkt am Kartenpunkt schlaegt ein 35 yd entferntes Questziel. Liegt **kein**
+  Kandidat innerhalb seiner Toleranz -- anderes Phasing, ein verschobener Spawn, ein Punkt mitten
+  im Gelaende --, gilt das alte Verfahren, als gaebe es den Anker nicht.
+* **Etagen.** Spawns innerhalb von `AnchorFloorTolerance` (6 yd) in der Hoehe gehoeren zu einer
+  Etage. Gibt es mehrere gleich gut belegte Etagen (zwei Haendler ohne Namensbezug, 9 yd
+  auseinander, auf verschiedenen Stockwerken), werden bis zu zwei weitere als Rueckfall
+  mitgerechnet; der Weg entscheidet, welche gewinnt. Ein Anker mit Namens- oder Questbeleg
+  bekommt keine Ersatzetage.
+* **Nur das Endziel.** Zwischenpunkte einer Route bleiben Wegmarken: ein Stadttor ueber der Exodar
+  darf nicht an einen NPC in der Stadt darunter heften.
+* **Welche Spawns.** Die Quelle sind die Spawn-Mengen des Cores je Karte und Gitter
+  (`ObjectMgr::GetGridObjectGuids`): sie kennen Spielereignisse (31 % der Dienst-NPCs gibt es nur
+  waehrend eines Ereignisses), und das Modul pflegt keinen eigenen Index, der veralten koennte.
+  Auf der Karte des Spielers gelten ausserdem Phase, Spawngruppen und Pools; auf einer fremden
+  Karte lassen sich die beiden letzten nicht pruefen. Spawns ohne Datenbankeintrag (`.npc add`
+  ohne Speichern) zaehlen nicht.
+* **Verdeckte Ziele.** Liegt das Gelaende mehr als 15 yd ueber dem Anker (Stadt unter der Erde,
+  Gebaeude), gilt er als verdeckt. Die Reise laeuft dann nur zu seiner Etage; die Oberflaeche
+  darueber ist kein Ersatz, es gibt keinen Luftweg, keine Contour-Suche -- und fuehrt kein Weg hin,
+  sagt das Modul es, statt zur Oberflaeche zu laufen.
+* **Ankunft.** Ein verankertes Ziel gilt erst als erreicht, wenn auch die Etage stimmt
+  (`AnchorArrivalZ`, 10 yd). Endet ein Teilstueck am Ziel auf der falschen Etage, wird neu gerechnet; nach
+  zwei solchen Teilstuecken gilt das Ziel als erreicht (ein NPC auf einem Podest ohne Weg darf die Reise
+  nicht endlos beschaeftigen).
+* **Auch auf anderen Karten.** Die Spawndaten gelten fuer jede Karte: ein Ziel in Sturmwind bekommt
+  seine Hoehe schon bei der Planung, nicht erst nach der Ankunft.
+
+`.at diag` im Spiel zeigt die Suche: wie viele Spawns geprueft und warum welche verworfen wurden, den
+gewaehlten Anker mit Belegen, Abstand und Etage, die naechsten Kandidaten und was die alte Hoehensuche
+gewaehlt haette. `AutoTravel.UseTargetAnchor = 0` schaltet alles ab.
+
 ### Reisemittel
 
 * **Reittier**: das schnellste passende aus dem Zauberbuch, nur draussen, nicht
@@ -307,7 +368,7 @@ anstossen kann, ist begrenzt:
 
 ## Konfiguration
 
-`conf/autotravel.conf.dist` enthaelt **alle** 93 Werte mit Bereich,
+`conf/autotravel.conf.dist` enthaelt **alle** 101 Werte mit Bereich,
 Standardwert und einer Zeile Erklaerung. Jeder Wert ist zusaetzlich zur
 Laufzeit erreichbar:
 
@@ -322,7 +383,7 @@ Laufzeitaenderungen gelten bis zum Serverneustart.
 Die Datei ist **erzeugt** (`tools/gen_conf.py`) und kann deshalb nicht von der
 Optionsregistry abweichen.
 
-Beim Laden pruefen zwoelf Plausibilitaetstests die Schwellwerte gegeneinander
+Beim Laden pruefen dreizehn Plausibilitaetstests die Schwellwerte gegeneinander
 (Zielradius gegen Etappenradius, Fenster gegen Anstiegsschwelle, unvollstaendiger
 Pfad teurer als jeder Berg ...). Auffaelligkeiten stehen als Warnung im Log,
 verhindern den Start aber nicht.
@@ -337,6 +398,7 @@ verhindern den Start aber nicht.
 | `AutoTravel_Config.cpp` | Optionsregistry, Laden, Meldungen, Handschlag, Befehlsbremse |
 | `AutoTravel_Util.cpp` | reine Hilfsfunktionen (Zahlenparser, Textbereinigung); ohne Core testbar |
 | `AutoTravel_Terrain.cpp` | Bodenhoehen, Etagen, Wasser, Hoehenprofil |
+| `AutoTravel_Anchor.cpp` | Zielanker: Spawns, Questziele, Phase aus dem ObjectMgr |
 | `AutoTravel_Path.cpp` | PathGenerator, Bewertung, Contour-Suche |
 | `AutoTravel_Move.cpp` | Spline, Kontrolle, Reittier, Luftroute |
 | `AutoTravel_Route.cpp` | WorldMapArea.dbc, Etappen, Start/Stop, Diagnose |
@@ -359,6 +421,7 @@ einer dieser Stellen -- AzerothCore aendert sie gelegentlich:
 | `Movement::MoveSplineInit` mit `MovebyPath`, `SetWalk`, `SetVelocity`, `SetFly`, `SetFacing(float)`, `Launch` | AutoTravel_Move.cpp |
 | `PathGenerator::CalculatePath / GetPathType / GetPath / SetUseStraightPath` | AutoTravel_Path.cpp |
 | `Map::GetHeight`, `Map::GetWaterOrGroundLevel`, `Map::GetZoneId` | AutoTravel_Terrain.cpp |
+| `ObjectMgr::GetGridObjectGuids`, `GetCreatureData`, `GetGameObjectData`, `GetCreatureTemplate`, `GetGameObjectTemplate`, `GetQuestTemplate`, `GetCreatureQuestInvolvedRelationBounds`, `ChooseCreatureFlags`; `Map::IsSpawnGroupActive`, `Map::GetPoolData`; `Player::getQuestStatusMap` | AutoTravel_Anchor.cpp |
 | `Player::SetClientControl`, `StopMoving`, `NearTeleportTo`, `movespline` | AutoTravel_Move.cpp, _Session.cpp |
 | `Player::m_taxi.IsTaximaskNodeKnown`, `Player::ActivateTaxiPathTo` | AutoTravel_Taxi.cpp |
 | `sTaxiNodesStore`, `sTaxiPathSetBySource` aus `DBCStores.h` | AutoTravel_Taxi.cpp |
@@ -456,6 +519,7 @@ Eine neue Option eintragen:
 | Spieler bleibt nach `.at set enable 0` stehen | Ab 4.0 gibt das Abschalten die Steuerung zurueck. In aelteren Staenden: `.at stop` bzw. Neuanmeldung |
 | "Das Ziel liegt auf einer anderen Karte ..., und AutoTravel findet keine Verbindung dorthin" | Kontinentwechsel braucht den Knotengraphen: `.at nodes` pruefen, `AutoTravel.UseTravelNodes = 1`. Enthaelt der Graph keine Schiffs-/Zeppelinverbindung zwischen den Karten, kann das Modul keine erfinden |
 | `.at diag` meldet "Kein passender Kartenausschnitt" | Die Zonenzuordnung des Clients stimmt nicht; `/at karten` im Addon, sonst `/at karte <id>` |
+| Der Charakter laeuft aus einer Stadt, die ueber- oder untereinanderliegende Etagen hat (Exodar, Dalaran, Unterstadt), oder die Reise endet ueber dem NPC | `.at diag` (mit Ziel): die Zeile "Anker:" zeigt, ob ein Spawn erkannt wurde, und "Ohne Anker waere die Zielhoehe" die alte Wahl. Steht dort "keiner", fehlt ein NPC mit Dienst oder Namen im Radius (`AutoTravel.AnchorRadius` hochsetzen, oder das Label des Carbonite-Ziels pruefen). Mit `.at debug` zeigen die Zeilen "Direktkandidat" und "Zielanker aktiv", welche Etage den Weg geliefert hat |
 | Charakter gleitet schnell durch die Luft, schiesst am Ziel vorbei, "huepft", oder hat nach dem Wasser Minischritte | Bis 4.0 ein Abschnitt, der die Paketkodierung sprengte (siehe AENDERUNGEN.md, "4.0.1"). Ab 4.0.1 darf es ihn nicht mehr geben: mit Debug zeigen die Zeilen `Abschnitt gestartet` Laenge in yd (hoechstens etwa 440), Tempo, Wasser/Land und die Bewegungskennzeichen des Spielers. Tritt es trotzdem auf, diese Zeilen mitschicken |
 
 `AutoTravel.Debug = 1` (oder `.at debug` je Spieler) schaltet ausfuehrliche
@@ -485,6 +549,14 @@ Kategorie `module` auf Debug steht.
   ersten Stufe bleibt moeglich. Wer es ganz weg haben will, verkleinert
   `AutoTravel.TerrainStep` auf etwa 1.5 -- das kostet deutlich mehr
   Hoehenabfragen.
+* **Zielanker kennen nur Spawns.** Ein Ziel, das kein NPC, Objekt oder Questziel ist (ein Punkt
+  mitten auf einer Etage der Exodar), hat keinen Anker; dort entscheidet weiter die Hoehensuche
+  nach der Position des Spielers. Ein Spawn ist ausserdem ein Ausgangspunkt: NPCs, die Wegpunkte
+  ablaufen oder umherstreifen, stehen nicht immer dort (ihre Wertung ist schlechter), Aufzuege
+  und Tueren kennt das Modul nicht -- ein Anker hinter einer Tuer oder einem Lift kann ein
+  Teilweg bleiben. Dicht gestapelte Staedte (Dalaran, Darnassus, Eisenschmiede, Unterstadt) lassen
+  sich aus x/y allein nicht immer eindeutig aufloesen; der Name im Label und die Quest verbessern
+  das, und die Etagenpruefung bei der Ankunft faengt den Rest ab.
 * **Instanzen und Schlachtfelder** sind ausgenommen.
 * **Transport der Nachrichten**: Befehle und Antworten laufen als normale Chatzeilen.
   Neuere AzerothCore-Staende haben dafuer den `AddonChannelCommandHandler`
