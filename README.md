@@ -167,6 +167,65 @@ dieser Merkmale hat:
 gewaehlten Anker mit Belegen, Abstand und Etage, die naechsten Kandidaten und was die alte Hoehensuche
 gewaehlt haette. `AutoTravel.UseTargetAnchor = 0` schaltet alles ab.
 
+### Erweiterte Wegsuche: Sackgassen in Staedten mit mehreren Etagen
+
+Der Wegfinder des Cores (`PathGenerator`) sucht mit hoechstens **1024 Knoten** und liefert
+hoechstens 74 Polygone. Ist der Weg laenger oder verwinkelter, als der Pool hergibt -- eine Stadt wie
+die Exodar, deren Ausgang hunderte Yards entfernt liegt --, ist die Suche erschoepft, bevor sie das
+Ziel erreicht. Detour gibt dann nicht "keinen Weg" zurueck, sondern den Knoten mit der kleinsten
+**Luftlinie** zum Ziel. Liegt das Ziel eine Etage hoeher (der NPC an der Oberflaeche, der Spieler
+in der Stadt), ist das die Stelle im Innenraum direkt darunter: eine Wand.
+
+Dazu kommt eine Eigenheit von Detour: liegt x/y des Ziels im letzten Polygon dieses Teilwegs, setzt
+`findStraightPath` den **letzten Punkt auf die Zielposition selbst**, mit ihrer Hoehe (die Funktion
+`closestPointOnPolyBoundary` gibt die Position dann unveraendert zurueck). Der Teilweg endet scheinbar
+am NPC, 139 yd ueber dem Boden. Im geglaetteten Weg (dem ersten Kandidaten) laeuft der Weg in
+4-yd-Schritten am Boden bis unter das Ziel und haengt dann die Zielposition an: ein rein senkrechtes
+Stueck; im Eckpunkt-Weg, in einem grossen Polygon, ist es eine lange Schraege. Der Charakter lief dorthin, "kletterte" in kleinen Spruengen die Wand hinauf, und die
+Bodenrettung setzte ihn zurueck -- oder er wurde durch die Decke an die Oberflaeche versetzt.
+Spiegelbildlich trifft es ein Ziel im Innenraum, wenn der Spieler draussen steht.
+
+Mit einem Modell (`tools/tests/search_test.cpp`: Innenraum mit 2300 Polygonen, 280 yd lange Rampe,
+Ziel 140 yd hoeher senkrecht darueber) und der echten Ausgabe von Detour laesst sich das nachstellen: der
+1024-Knoten-Wegfinder endet unter dem Ziel, `PARTIAL | OUT_OF_NODES`, sein letzter Punkt ist meist die
+Zielposition in 140 yd Hoehe; mit grossem Pool findet dieselbe Suche den Weg ueber die Rampe -- in
+unter einer Millisekunde.
+
+* **Endstueck abschneiden.** Bei einem Teilweg wird das letzte Wegstueck entfernt, wenn man es nicht
+  ablaufen kann (`AT::TrimDeadTail`): es steigt oder faellt um mindestens 12 yd und geht dabei weniger als
+  ein Zweieinhalbtel davon zur Seite (Treppen und Rampen sind flacher), oder es endet genau auf der
+  Zielposition und ueberwindet dabei mindestens 20 yd. Erst danach wird beurteilt, wo der Teilweg endet.
+* **Ausloeser.** Fiel ein solches Stueck weg, oder sieht das Ende verdaechtig aus
+  (`AT::PartialLooksStuck`: es liegt fast senkrecht unter oder ueber dem Ziel, auf anderer Hoehe in der
+  Naehe, oder das Ziel ist in 3D kaum naeher als vom Start), laeuft eine **eigene Suche**
+  (`AutoTravel_Search.cpp`) mit `ExtendedSearchNodes` Knoten (65535, Detours Hoechstwert), einer
+  Zeitgrenze von `ExtendedSearchMs` (30 ms) und den Kosten des PathGenerators, **Steigung eingerechnet**:
+  sonst ersetzte sie seinen Weg durch einen steileren. Ein langer Weg ueber freies Gelaende, den der
+  PathGenerator nur wegen seiner Laengengrenze abschneidet, loest sie nicht aus.
+* **Ergebnis.** Die Suche liefert nur einen **durchgehenden** Weg, der das Zielpolygon erreicht; er
+  ersetzt den Teilweg. Ein erschoepfter Suchraum liefert keinen Weg (die Suche gibt den
+  "naechsten Knoten" nicht als Weg aus).
+* **Ziel weit neben dem NavMesh.** Liegen Start oder Ziel mehr als 7 yd neben dem NavMesh (ein NPC auf einem
+  Dach oder einer Plattform ohne NavMesh), setzt die Suche das Ziel wie der PathGenerator auf den naechsten Punkt des
+  Zielpolygons und markiert den Weg als unvollstaendig (`FARFROMPOLY`).
+* **Keine Verbindung.** Findet auch die erweiterte Suche keinen Weg, bleibt vom Teilweg der begehbare
+  Teil -- ohne das senkrechte oder festgenagelte Endstueck. Bleibt davon nichts uebrig, oder endet er
+  fast senkrecht unter oder ueber dem Ziel (Etagenunterschied ab 20 yd, in der Ebene hoechstens 30 yd,
+  bei weiten Wegen bis 60 yd), erfaehrt der Spieler es einmal je Etappe: "endet vermutlich in einer
+  Sackgasse ..." mit dem Grund -- *keine Verbindung im NavMesh* (der Suchraum ist erschoepft; ein
+  Datenproblem der mmaps, das das Modul nicht beheben kann), oder *Suchpool erschoepft / Zeitgrenze
+  erreicht / Weg zu lang* (Werte erhoehen: `.at set extms 100`). Bei einem blossen Verdacht
+  (kaum Fortschritt) bleibt es bei der Debug-Zeile. Fuehrt der Weg zu einem verankerten Ziel in eine Sackgasse, probiert
+  das Modul danach **nicht** die Hoehensuche: sie fuehrte auf den Boden unter dem Ziel und endete mit "Ziel
+  erreicht" auf der falschen Etage.
+* **Bremsen.** Je Kandidat laufen zwei Fassungen (glatt, Eckpunkte); die zweite nimmt das Ergebnis der
+  ersten (vier Zwischenspeicher). Nach einem Fehlschlag pausiert die Suche `ExtendedSearchRetryMs`
+  (15 s; nach Zeitgrenze oder Fehler 2 s) **fuer diesen Start und dieses Ziel**, und je Wegberechnung
+  laufen hoechstens drei Suchen -- der Ersatzring um ein unerreichbares Ziel probiert 24 Punkte.
+* **`.at diag`** zeigt je Kandidat, ob der Weg aus der erweiterten Suche stammt, wie viele Suchschritte
+  sie brauchte und -- bei einer Sackgasse -- warum sie keinen Ausweg fand.
+* `AutoTravel.ExtendedSearch = 0` schaltet sie ab.
+
 ### Reisemittel
 
 * **Reittier**: das schnellste passende aus dem Zauberbuch, nur draussen, nicht
@@ -368,7 +427,7 @@ anstossen kann, ist begrenzt:
 
 ## Konfiguration
 
-`conf/autotravel.conf.dist` enthaelt **alle** 101 Werte mit Bereich,
+`conf/autotravel.conf.dist` enthaelt **alle** 105 Werte mit Bereich,
 Standardwert und einer Zeile Erklaerung. Jeder Wert ist zusaetzlich zur
 Laufzeit erreichbar:
 
@@ -400,6 +459,7 @@ verhindern den Start aber nicht.
 | `AutoTravel_Terrain.cpp` | Bodenhoehen, Etagen, Wasser, Hoehenprofil |
 | `AutoTravel_Anchor.cpp` | Zielanker: Spawns, Questziele, Phase aus dem ObjectMgr |
 | `AutoTravel_Path.cpp` | PathGenerator, Bewertung, Contour-Suche |
+| `AutoTravel_Search.cpp` / `.h` | erweiterte Wegsuche auf dem NavMesh (reines Detour; mit eigenem NavMesh testbar) |
 | `AutoTravel_Move.cpp` | Spline, Kontrolle, Reittier, Luftroute |
 | `AutoTravel_Route.cpp` | WorldMapArea.dbc, Etappen, Start/Stop, Diagnose |
 | `AutoTravel_Session.cpp` | Takt, Zustandsmaschine, Uebergabe |
@@ -420,6 +480,7 @@ einer dieser Stellen -- AzerothCore aendert sie gelegentlich:
 |---|---|
 | `Movement::MoveSplineInit` mit `MovebyPath`, `SetWalk`, `SetVelocity`, `SetFly`, `SetFacing(float)`, `Launch` | AutoTravel_Move.cpp |
 | `PathGenerator::CalculatePath / GetPathType / GetPath / SetUseStraightPath` | AutoTravel_Path.cpp |
+| `Map::GetMapCollisionData().GetMMapData().GetNavMesh()`; Detour: `dtNavMeshQuery::init`, `findNearestPoly`, `initSlicedFindPath`, `updateSlicedFindPath`, `finalizeSlicedFindPath`, `findStraightPath`; `NAV_GROUND`, `NAV_WATER`, `NAV_MAGMA` aus `MapDefines.h` | AutoTravel_Search.cpp, _Path.cpp |
 | `Map::GetHeight`, `Map::GetWaterOrGroundLevel`, `Map::GetZoneId` | AutoTravel_Terrain.cpp |
 | `ObjectMgr::GetGridObjectGuids`, `GetCreatureData`, `GetGameObjectData`, `GetCreatureTemplate`, `GetGameObjectTemplate`, `GetQuestTemplate`, `GetCreatureQuestInvolvedRelationBounds`, `ChooseCreatureFlags`; `Map::IsSpawnGroupActive`, `Map::GetPoolData`; `Player::getQuestStatusMap` | AutoTravel_Anchor.cpp |
 | `Player::SetClientControl`, `StopMoving`, `NearTeleportTo`, `movespline` | AutoTravel_Move.cpp, _Session.cpp |
@@ -462,7 +523,7 @@ tools/check.sh <pfad-zu-azerothcore>
 
 Ein flacher Klon von `azerothcore-wotlk` genuegt (`git clone --depth 1`), dazu
 `g++` mit C++20 und die Entwicklungspakete, die AzerothCore selbst braucht
-(Boost, OpenSSL, MySQL-Client). Drei Schritte:
+(Boost, OpenSSL, MySQL-Client). Vier Schritte:
 
 1. **Konfigurationsdatei**: `conf/autotravel.conf.dist` stimmt mit der
    Optionsregistry ueberein (`tools/gen_conf.py --check`).
@@ -473,6 +534,13 @@ Ein flacher Klon von `azerothcore-wotlk` genuegt (`git clone --depth 1`), dazu
 3. **Unit-Tests** (`tools/tests/util_test.cpp`) fuer alles, was Eingaben des
    Clients verarbeitet: Zahlenparser, Textbereinigung, Namenspruefung. Sie laufen
    als eigenes Programm und brauchen nichts von AzerothCore ausser den Headern.
+4. **Wegsuche auf einem NavMesh** (`tools/tests/search_test.cpp`): ein selbstgebautes NavMesh
+   (Innenraum, Rampe, Oberflaeche) zeigt mit der echten Ausgabe von Detour, dass der Wegfinder mit
+   1024 Knoten in der Sackgasse endet, sein letzter Punkt auf die Zielposition festgenagelt ist,
+   das Abschneiden und die Erkennung greifen und die erweiterte Suche den Ausgang findet; dazu
+   die Steigungskosten (steiler Huegel gegen laengeren flachen Umweg) und die Grenzen der Suche (Pool,
+   Zeit, Weglaenge, kein Start- oder Zielpolygon, getrennte Insel). Detour wird aus
+   `deps/recastnavigation` des angegebenen Standes mitgebaut.
 
 Das ersetzt **keinen echten Bau und keinen Test im Spiel**. Es prueft Syntax und
 Typen gegen den Core, nicht das Linken, nicht das Verhalten auf einem Server.
@@ -520,6 +588,7 @@ Eine neue Option eintragen:
 | "Das Ziel liegt auf einer anderen Karte ..., und AutoTravel findet keine Verbindung dorthin" | Kontinentwechsel braucht den Knotengraphen: `.at nodes` pruefen, `AutoTravel.UseTravelNodes = 1`. Enthaelt der Graph keine Schiffs-/Zeppelinverbindung zwischen den Karten, kann das Modul keine erfinden |
 | `.at diag` meldet "Kein passender Kartenausschnitt" | Die Zonenzuordnung des Clients stimmt nicht; `/at karten` im Addon, sonst `/at karte <id>` |
 | Der Charakter laeuft aus einer Stadt, die ueber- oder untereinanderliegende Etagen hat (Exodar, Dalaran, Unterstadt), oder die Reise endet ueber dem NPC | `.at diag` (mit Ziel): die Zeile "Anker:" zeigt, ob ein Spawn erkannt wurde, und "Ohne Anker waere die Zielhoehe" die alte Wahl. Steht dort "keiner", fehlt ein NPC mit Dienst oder Namen im Radius (`AutoTravel.AnchorRadius` hochsetzen, oder das Label des Carbonite-Ziels pruefen). Mit `.at debug` zeigen die Zeilen "Direktkandidat" und "Zielanker aktiv", welche Etage den Weg geliefert hat |
+| Der Charakter laeuft in einer Stadt mit mehreren Etagen (Exodar) unten in Richtung des NPCs an der Oberflaeche, gegen eine Wand, statt die Treppe hinauf aus der Stadt zu laufen, oder umgekehrt | Das war der Teilweg in die Sackgasse (4.0.7, siehe "Erweiterte Wegsuche"). `.at diag` zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in einer Sackgasse)" und darunter die Zeile "Erweiterte Wegsuche: ...". Dort steht, ob es keine Verbindung im NavMesh gibt (ein Datenproblem der mmaps) oder die Zeitgrenze nicht reichte (`AutoTravel.ExtendedSearchMs` erhoehen) |
 | Charakter gleitet schnell durch die Luft, schiesst am Ziel vorbei, "huepft", oder hat nach dem Wasser Minischritte | Bis 4.0 ein Abschnitt, der die Paketkodierung sprengte (siehe AENDERUNGEN.md, "4.0.1"). Ab 4.0.1 darf es ihn nicht mehr geben: mit Debug zeigen die Zeilen `Abschnitt gestartet` Laenge in yd (hoechstens etwa 440), Tempo, Wasser/Land und die Bewegungskennzeichen des Spielers. Tritt es trotzdem auf, diese Zeilen mitschicken |
 
 `AutoTravel.Debug = 1` (oder `.at debug` je Spieler) schaltet ausfuehrliche
@@ -557,6 +626,14 @@ Kategorie `module` auf Debug steht.
   Teilweg bleiben. Dicht gestapelte Staedte (Dalaran, Darnassus, Eisenschmiede, Unterstadt) lassen
   sich aus x/y allein nicht immer eindeutig aufloesen; der Name im Label und die Quest verbessern
   das, und die Etagenpruefung bei der Ankunft faengt den Rest ab.
+* **Die Sackgasse wird erkannt, wenn der Teilweg in Reichweite des Ziels endet** (in der Ebene bis 100 yd). In einer
+  sehr grossen Halle, deren Teilweg weit vor dem Ziel abbricht, laeuft der Charakter ein Stueck in die falsche
+  Richtung, bis er nah genug ist; eine groessere Reichweite loeste die Suche bei jedem Teilweg ueber Hanggelaende aus
+  und umginge die Contour-Suche.
+* **Die erweiterte Wegsuche kann nur finden, was das NavMesh enthaelt.** Fehlt in den mmaps die
+  Verbindung zwischen zwei Etagen (eine Treppe, die der Generator nicht als begehbar erkannt hat) oder ist eine
+  Kachel nicht geladen, gibt es keinen durchgehenden Weg, und das Modul meldet die Sackgasse, statt
+  sie zu verschweigen. Aufzuege und Tueren gehoeren nicht zum NavMesh.
 * **Instanzen und Schlachtfelder** sind ausgenommen.
 * **Transport der Nachrichten**: Befehle und Antworten laufen als normale Chatzeilen.
   Neuere AzerothCore-Staende haben dafuer den `AddonChannelCommandHandler`

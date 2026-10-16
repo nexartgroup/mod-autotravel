@@ -29,6 +29,8 @@
 #include "ObjectGuid.h"
 #include "MoveSplineInitArgs.h"
 
+#include "AutoTravel_Geometry.h"
+
 #include <array>
 #include <cstddef>
 #include <functional>
@@ -56,7 +58,7 @@ class Map;
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
 // Nur zur Anzeige ("Server 4.0.5" im Addon, damit sich ein Fehlerbericht einer Fassung
 // zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
-constexpr char const* AT_MODULE_VERSION = "4.0.6";
+constexpr char const* AT_MODULE_VERSION = "4.0.7";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
@@ -397,6 +399,12 @@ struct ATConfig
     float  contourFirstProgress    = 0.35f;
     float  contourSecondProgress   = 0.65f;
     float  contourMaxDistanceFactor = 2.5f;
+
+    // --- Erweiterte Wegsuche (AutoTravel_Search.cpp) -----------------------
+    bool   extendedSearch     = true;
+    uint32 extendedNodes      = 65535;
+    uint32 extendedMs         = 30;
+    uint32 extendedRetryMs    = 15000;
 };
 
 extern ATConfig ATConf;
@@ -407,6 +415,35 @@ extern std::string ATNodeDb;
 // ---------------------------------------------------------------------------
 // Sitzung
 // ---------------------------------------------------------------------------
+
+// Ergebnisse der erweiterten Wegsuche, die die Sitzung sich merkt (AutoTravel_Path.cpp).
+//
+// Je Kandidat laufen zwei Fassungen (glatt und Eckpunkte) mit demselben Start und Ziel, und die
+// Kandidaten einer Wegberechnung kommen abwechselnd: die zweite Fassung nimmt das Ergebnis der
+// ersten. Dafuer reichen wenige Plaetze, in Umlauf belegt.
+constexpr size_t AT_EXT_SLOTS = 4;
+
+struct ATExtMemo
+{
+    bool   valid = false;
+    uint32 atMs = 0;
+    float  sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    float  dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    Movement::PointsArray points;
+    uint32 type = 0;
+    bool   incomplete = false;
+    int    nodes = 0;
+};
+
+// Eine erfolglose Suche. Wer von einer Stelle zu einem Ziel keinen Weg findet, findet ihn eine
+// Sekunde spaeter auch nicht -- es sei denn, die Suche scheiterte an der Zeit.
+struct ATExtFail
+{
+    uint32 atMs = 0;                    // 0 = Platz frei
+    uint32 retryMs = 0;
+    float  sx = 0.0f, sy = 0.0f, sz = 0.0f, dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    std::string reason;                 // kurzer Grund fuer Meldung und Diagnose
+};
 
 struct ATSession
 {
@@ -425,6 +462,15 @@ struct ATSession
     ATAnchorInfo anchor;                // gilt fuer destX/destY/destZ (nur letzte Etappe)
     uint32  anchorZRefusals = 0;        // Teilstuecke, die am Ziel auf der falschen Etage endeten
     bool    anchorWarned = false;
+
+    // Erweiterte Wegsuche. 'mutable': TryPathBetween ist const und erreicht die Sitzung nur
+    // ueber Find() const.
+    mutable ATExtMemo extMemo[AT_EXT_SLOTS];
+    mutable ATExtFail extFail[AT_EXT_SLOTS];
+    mutable uint8  extMemoNext = 0;     // naechster Platz (Umlauf)
+    mutable uint8  extFailNext = 0;
+    mutable uint32 extCalls = 0;        // Suchen seit Beginn der laufenden Wegberechnung (Obergrenze)
+    mutable bool   extWarned = false;   // der Spieler wurde schon auf die Sackgasse hingewiesen
 
     // Aktuelles Teilstueck
     Movement::PointsArray path;
@@ -508,6 +554,12 @@ struct ATPathResult
     bool   incomplete = false;
     float  score = 0.0f;
     bool   valid = false;
+
+    // Erweiterte Wegsuche (AutoTravel_Search.cpp)
+    bool   extended = false;            // der Weg stammt aus der erweiterten Suche (vollstaendig)
+    bool   stuckEnd = false;            // Teilweg endet in einer Sackgasse, die Suche fand keinen Ausweg
+    std::string note;                   // eine Zeile fuer Diagnose und Hinweis an den Spieler
+    std::string reason;                 // kurzer Grund, warum die erweiterte Suche keinen Weg lieferte
 };
 
 // ---------------------------------------------------------------------------
@@ -685,6 +737,10 @@ private:
                         float sx, float sy, float sz,
                         float dx, float dy, float dz,
                         bool straight, ATPathResult& out) const;
+    bool ExtendedPath(Player* player,
+                      float sx, float sy, float sz,
+                      float dx, float dy, float dz,
+                      ATPathResult& out) const;
     float PathDistance(Movement::PointsArray const& path) const;
     float ScoreNaturalPath(Player* player, Movement::PointsArray const& path,
                            bool incomplete) const;
@@ -745,6 +801,9 @@ private:
     std::unordered_set<ObjectGuid> _addonPlayers;
 
     std::unordered_map<ObjectGuid, ATSession> _sessions;
+    // Suchen der erweiterten Wegsuche ohne Sitzung (".at diag" eines Spielers, der nie gereist ist):
+    // die Obergrenze je Wegberechnung braucht auch dort einen Zaehler. Diagnose setzt ihn zurueck.
+    mutable uint32 _extCallsNoSession = 0;
     std::unordered_map<ObjectGuid, uint32> _tpCooldown;
     std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
     // Rate-Limit: je Spieler und Befehlsklasse der Zeitpunkt des letzten Befehls

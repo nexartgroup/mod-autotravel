@@ -654,6 +654,11 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.anchor = finalLeg ? leg.anchor : ATAnchorInfo();
         s.anchorZRefusals = 0;
         s.anchorWarned = false;
+        s.extWarned = false;
+        for (ATExtFail& f : s.extFail)
+            f.atMs = 0;
+        for (ATExtMemo& m : s.extMemo)
+            m.valid = false;
 
         if (s.anchor.found)
         {
@@ -1383,6 +1388,16 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
 
     Msg(player, "--- AutoTravel Diagnose ---");
 
+    // Eine Diagnose beginnt frisch: weder die Obergrenze der letzten Wegberechnung noch eine Pause nach einem
+    // frueheren Fehlschlag sollen die Suchen verdecken, die sie zeigen soll.
+    _extCallsNoSession = 0;
+    if (ATSession const* diagSession = Find(player))
+    {
+        diagSession->extCalls = 0;
+        for (ATExtFail& f : diagSession->extFail)
+            f.atMs = 0;
+    }
+
     std::snprintf(b, sizeof(b), "mmaps aktiv: %s | WorldMapArea geladen: %s | Reiseknoten: %u",
                   sWorld->getBoolConfig(CONFIG_ENABLE_MMAPS) ? "ja" : "NEIN",
                   sATMapAreasLoaded ? "ja" : "NEIN",
@@ -1528,6 +1543,7 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
     }
 
     bool done = false;
+    bool sawDeadEnd = false;            // ein Kandidat endete in einer Sackgasse
     auto runCandidates = [&]()
     {
         for (uint8 pass = 0; pass < 2 && !done; ++pass)
@@ -1538,11 +1554,17 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
                 bool ok = TryPathBetween(player,
                                          player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
                                          xc[i], yc[i], zc[i], pass == 1, r);
-                std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s",
+                std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s%s",
                               pass == 1 ? "Eckpunkte" : "geglaettet",
                               zc[i], r.type, AT::PathTypeName(r.type).c_str(),
-                              uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen");
+                              uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen",
+                              r.extended ? " (erweiterte Suche: durchgehender Weg)"
+                                         : (r.stuckEnd ? " (Teilweg endet in einer Sackgasse)" : ""));
                 Msg(player, b);
+                if (!r.note.empty())
+                    Msg(player, "    " + r.note);
+                if (r.stuckEnd)
+                    sawDeadEnd = true;
                 if (ok)
                 {
                     done = true;
@@ -1559,6 +1581,11 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
         if (anchor.info.covered)
         {
             Msg(player, "Das Ziel ist verdeckt (Gelaende darueber): kein Rueckfall auf die Hoehensuche.");
+        }
+        else if (sawDeadEnd)
+        {
+            Msg(player, "Der Weg zum Zielanker endet in einer Sackgasse: kein Rueckfall auf die Hoehensuche "
+                        "(sie fuehrte auf die falsche Etage).");
         }
         else
         {

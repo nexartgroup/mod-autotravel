@@ -44,6 +44,7 @@ GROUP_TITLES = [
     "Teleport",
     "Bewertung natuerlicher Wege",
     "Suche um Hindernisse herum",
+    "Erweiterte Wegsuche: Sackgassen in Staedten mit mehreren Etagen",
 ]
 
 HEADER = """\

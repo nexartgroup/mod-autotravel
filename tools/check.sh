@@ -4,11 +4,13 @@
 #
 #   tools/check.sh <pfad-zu-azerothcore>      (oder AC_DIR=... tools/check.sh)
 #
-# Drei Schritte:
+# Vier Schritte:
 #   1. conf/autotravel.conf.dist stimmt mit der Optionsregistry ueberein
 #   2. jede Quelldatei uebersetzt (nur Syntax und Typen, kein Linken) gegen die
 #      ECHTEN Header des angegebenen AzerothCore-Standes
 #   3. tools/tests/util_test.cpp laeuft als eigenes Programm
+#   4. tools/tests/search_test.cpp laeuft gegen ein selbstgebautes NavMesh; Detour
+#      wird dafuer aus deps/recastnavigation des angegebenen Standes mitgebaut
 #
 # Schritt 2 ist der eigentliche Wert: Aendert AzerothCore eine Schnittstelle, die
 # das Modul benutzt, faellt es hier auf -- nicht erst beim Bauen des Servers.
@@ -46,10 +48,10 @@ INC+=("-I$MODULE_DIR/src")
 # gnu++20, nicht c++20: die Fehlermakros des Cores brauchen ##__VA_ARGS__.
 CXXFLAGS=(-std=gnu++20 -Wall -Wextra -Wno-unused-parameter)
 
-echo "== 1/3 Konfigurationsdatei"
+echo "== 1/4 Konfigurationsdatei"
 python3 "$MODULE_DIR/tools/gen_conf.py" --check || FAILED=1
 
-echo "== 2/3 Uebersetzen gegen die Header von $AC_DIR"
+echo "== 2/4 Uebersetzen gegen die Header von $AC_DIR"
 for f in "$MODULE_DIR"/src/*.cpp; do
     out=$("$CXX" "${CXXFLAGS[@]}" -fsyntax-only "${INC[@]}" "$f" 2>&1)
     rc=$?
@@ -68,7 +70,7 @@ for f in "$MODULE_DIR"/src/*.cpp; do
     fi
 done
 
-echo "== 3/3 Unit-Tests"
+echo "== 3/4 Unit-Tests"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 if "$CXX" "${CXXFLAGS[@]}" "${INC[@]}" \
@@ -78,6 +80,20 @@ if "$CXX" "${CXXFLAGS[@]}" "${INC[@]}" \
 else
     echo "   Bauen des Tests fehlgeschlagen:"
     grep -E "error|undefined" "$BUILD_DIR/build.log" | head -20
+    FAILED=1
+fi
+
+echo "== 4/4 Wegsuche auf einem NavMesh"
+DETOUR_SRC="$AC_DIR/deps/recastnavigation/Detour/Source"
+if [ ! -d "$DETOUR_SRC" ]; then
+    echo "   uebersprungen (deps/recastnavigation fehlt in $AC_DIR)"
+elif "$CXX" -std=gnu++20 -O1 -w "-I$AC_DIR/deps/recastnavigation/Detour/Include" "-I$MODULE_DIR/src" \
+        "$MODULE_DIR/tools/tests/search_test.cpp" "$MODULE_DIR/src/AutoTravel_Search.cpp" \
+        "$DETOUR_SRC"/*.cpp -o "$BUILD_DIR/search_test" 2> "$BUILD_DIR/build_search.log"; then
+    "$BUILD_DIR/search_test" || FAILED=1
+else
+    echo "   Bauen des Tests fehlgeschlagen:"
+    grep -E "error|undefined" "$BUILD_DIR/build_search.log" | head -20
     FAILED=1
 fi
 

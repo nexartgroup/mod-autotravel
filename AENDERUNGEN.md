@@ -1,3 +1,142 @@
+# Version 4.0.7 -- Erweiterte Wegsuche: Sackgassen in Staedten mit mehreren Etagen
+
+Anlass: ein Spielerbericht -- "AutoTravel rennt gegen eine Wand in der Exodar und laeuft dann in
+kleinen Spruengen die Wand hoch, bis der Charakter ploetzlich durch den Boden an die Oberflaeche
+teleportiert wird." Das Ziel war Huntress Kella Nightbow an der Oberflaeche (Z 8,8), der Spieler stand in
+der Stadt (Z -130). `.at diag`: Anker richtig gefunden (Dienst, Name, Quest, 0,5 yd), Weg
+`INCOMPLETE`, 22 Punkte, akzeptiert. Erwartet war: erst die Treppe hinauf und aus der Stadt, dann zum
+NPC.
+
+## Ursache
+
+Der Zielanker (4.0.6) hatte hier recht -- die Etage stimmt, und die alte Hoehensuche haette dieselbe
+Hoehe geliefert. Das Problem ist der **Weg**, und zwar aus zwei Gruenden, die zusammen genau das
+beschriebene Bild ergeben:
+
+1. **Der Suchpool des Cores ist zu klein.** Der `PathGenerator` sucht mit einem Knotenpool von
+   **1024** (`MMapMgr.cpp`: `query->init(navMesh, 1024)`) und liefert hoechstens 74 Polygone. In einer
+   grossen Stadt ist der Pool im Innenraum verbraucht, bevor die Suche die Treppe und den Ausgang
+   erreicht. Detour gibt dann den Knoten mit der kleinsten **Luftlinie (3D)** zum Ziel zurueck
+   (`lastBestNode`, `DetourNavMeshQuery.cpp`): bei einem Ziel 139 yd hoeher die Stelle im Innenraum
+   direkt unter ihm, an der Wand. Das Modul nahm den Teilweg als gueltig (`INCOMPLETE` kostet nur 10000
+   Strafpunkte, und es gab keinen anderen Kandidaten). Spiegelbildlich trifft es ein Ziel im Innenraum,
+   wenn der Spieler draussen steht.
+2. **Der letzte Punkt des Teilwegs ist die Zielposition selbst.** Das fand erst die unabhaengige
+   Durchsicht an echter Detour-Ausgabe. `dtNavMeshQuery::findStraightPath` setzt das Ende mit
+   `closestPointOnPolyBoundary` auf das letzte Polygon, und diese Funktion gibt die Position
+   **unveraendert, auch mit ihrer Hoehe**, zurueck, wenn x/y des Ziels im Polygon liegen. Liegt unter dem NPC ein
+   Polygon des Innenraums, endet der Teilweg deshalb scheinbar *am NPC*: der letzte Punkt ist
+   (x, y, 8,8), das letzte Stueck steigt 139 yd -- im **geglaetteten Weg**, dem ersten Kandidaten,
+   rein senkrecht: `FindSmoothPath` laeuft in 4-yd-Schritten am Boden zur Stelle unter dem Ziel (hier
+   die 21 Bodenpunkte des 22-Punkte-Wegs aus dem Bericht) und haengt dann die Zielposition an; im
+   Eckpunkt-Weg als Schraege, in einem grossen Polygon als lange. Der Charakter lief hin, der Spline
+   folgte dem Stueck nach oben ("Spruenge die Wand hoch"),
+   `CheckGroundContact` meldete "in der Luft" ("-114,7 statt -129,6") und setzte ihn zurueck, bis er
+   durch die Decke an die Oberflaeche versetzt wurde. Die erste Fassung dieses Moduls pruefte nur,
+   ob das Ende nahe am Ziel liegt -- und sah den festgenagelten Punkt als "angekommen". Der Fall
+   hatte sich dem Teilweg-Erkennen deshalb entzogen.
+
+Nachgestellt in `tools/tests/search_test.cpp` mit einem NavMesh aus 2500 Polygonen (Innenraum, Rampe, Oberflaeche
+140 yd hoeher, Ziel senkrecht ueber dem Innenraum), mit der echten Ausgabe von Detour: der Wegfinder mit
+1024 Knoten endet mit `PARTIAL | OUT_OF_NODES` direkt unter dem Ziel, sein letzter Punkt ist in 6 von 11
+Faellen die Zielposition in 140 yd Hoehe; dieselbe Suche mit grossem Pool findet den Weg ueber die Rampe
+(251 Polygone, rund 950 yd, unter einer Millisekunde). Ob die Exodar-mmaps genau diese Groessenordnung
+haben, liess sich ohne die Dateien nicht pruefen; die Meldung des Moduls zeigt es im Spiel.
+
+## Was jetzt anders ist
+
+* **Das nicht begehbare Endstueck wird abgeschnitten** (`AT::TrimDeadTail`, `AutoTravel_Geometry.h`):
+  ein letztes Stueck eines Teilwegs, das mindestens 12 yd steigt oder faellt und dabei weniger als ein
+  Zweieinhalbtel davon zur Seite geht (`IsVerticalJump`; Treppen und Rampen sind weit flacher), oder das
+  auf der **Zielposition** endet und dabei mindestens 20 yd ueberwindet (`IsPinnedStep`; auch die
+  lange Schraege im grossen Polygon). Erst danach wird beurteilt, wo der Teilweg endet.
+* **Erweiterte Wegsuche** (`AutoTravel_Search.cpp`, reines Detour): fiel ein solches Stueck weg, oder sieht
+  das Ende nach Sackgasse aus (`AT::PartialLooksStuck`: Ende fast senkrecht unter oder ueber dem Ziel,
+  auf anderer Hoehe in der Naehe, oder in 3D kaum naeher als der Start), sucht das Modul selbst -- mit
+  65535 Knoten (Detours Hoechstwert), bis zu 4096 Polygonen, einer Zeitgrenze von 30 ms (scheibenweise,
+  `updateSlicedFindPath`) und dem Filter des PathGenerators **einschliesslich seiner Steigungskosten**
+  (`dtQueryFilterExt`: Strecke mal 1 + Grad / 100): sonst suchte sie kuerzere, aber steilere Wege als der
+  Core und ersetzte seinen Teilweg durch einen, den er nicht gewaehlt haette. Es nimmt **nur einen
+  durchgehenden Weg** (Ziel erreicht); ein erschoepfter Suchraum liefert keinen "naechsten Knoten". Der
+  Weg hat an jeder Polygonkante einen Punkt (`DT_STRAIGHTPATH_ALL_CROSSINGS`), damit Rampen und Treppen
+  ihr Hoehenprofil behalten. Liegt Start oder Ziel mehr als 7 yd neben dem NavMesh, ist der Weg wie beim
+  PathGenerator `INCOMPLETE | FARFROMPOLY`.
+* **Ehrliche Meldung statt Wandlaufen.** Findet auch die erweiterte Suche keinen Weg, bleibt vom Teilweg
+  der begehbare Teil (naechster erreichbarer Punkt). Bleibt davon nichts uebrig (der Spieler steht schon
+  an der Stelle), oder endet er fast senkrecht unter oder ueber dem Ziel (`AT::PartialEndsUnderTarget`),
+  bekommt der Spieler einmal je Etappe die Meldung "endet vermutlich in einer Sackgasse" mit dem Grund
+  (keine Verbindung im NavMesh / Suchpool erschoepft / Zeitgrenze erreicht / Weg zu lang). Bei einem
+  blossen Verdacht (kaum Fortschritt) gibt es keine Meldung, nur die Debug-Zeile.
+* **Das Ziel wird geklemmt, wenn es weit neben dem NavMesh liegt.** Wie der PathGenerator setzt die erweiterte
+  Suche das Ziel auf den naechsten Punkt des Zielpolygons, wenn Start oder Ziel mehr als 7 yd neben dem
+  NavMesh liegen (`AT::NAV_FAR_FROM_POLY`). Zuerst blieb ihr letzter Punkt die rohe Zielposition -- dasselbe
+  senkrechte Endstueck wie oben, bei einem NPC auf einem Dach oder einer Plattform ohne NavMesh. Die zweite
+  Durchsicht fand es.
+* **Kein Rueckfall auf die Hoehensuche nach einer Sackgasse.** Endet der Weg zum Zielanker in einer
+  Sackgasse und findet die Suche keinen Ausweg, probiert `CalculatePath` nicht mehr die Hoehensuche: sie lieferte
+  den Boden UNTER dem Ziel, einen vollstaendigen Weg dorthin, und die Reise endete mit "Ziel erreicht" auf der
+  falschen Etage -- gleich nach der Meldung, dass es dorthin keinen Weg gibt. (`.at diag` zeigt es ebenso.)
+* **Bremsen:** vier Zwischenspeicher (die zweite Fassung eines Kandidaten nimmt das Ergebnis der ersten),
+  eine Pause von 15 s nach einem Fehlschlag **je Start und Ziel** (nach Zeitgrenze oder Fehler 2 s), und
+  hoechstens drei Suchen je Wegberechnung -- der Ersatzring um ein unerreichbares Ziel probiert 24
+  Punkte; die Pause beachtet auch die Hoehe (zwei Etagen mit denselben x/y sperren einander nicht). Ein Weg aus
+  der erweiterten Suche braucht keine Contour-Umgehung und spart bis zu 24 weitere Wegberechnungen.
+  `.at diag` beginnt frisch (Obergrenze und Pause werden zurueckgesetzt) und hat die Obergrenze auch ohne Sitzung.
+* **`.at diag`** zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in
+  einer Sackgasse)" und die Zeile "Erweiterte Wegsuche: ..." mit Status, Suchschritten und Zeit; `.at debug`
+  ebenso im Lauf, dazu den letzten Punkt jedes PathGenerator-Wegs.
+* **Bodenrettung bezieht sich auf den naechsten Punkt in der Ebene**, unter gleich nahen der mit der
+  kleinsten Hoehenabweichung (`CheckGroundContact`). Eine Wendeltreppe oder Rampe liegt in X/Y
+  uebereinander; der Pfadpunkt der falschen Windung lieferte sonst die Bezugshoehe.
+* **Vier neue Optionen:** `AutoTravel.ExtendedSearch`, `ExtendedSearchNodes` (2048..65535, Standard
+  65535), `ExtendedSearchMs`, `ExtendedSearchRetryMs` (105 Werte).
+* Das Protokoll aendert sich nicht; das Addon bleibt bei seiner Version.
+
+## Was nicht geaendert wurde
+
+* Ein Teilweg, der wegen der Laengengrenze des PathGenerators abgeschnitten wird, ist normal und
+  bleibt es: die Suche laeuft nur, wenn das Ende nach Sackgasse aussieht.
+* Fehlt dem NavMesh die Verbindung zwischen den Etagen (nicht geladene Kachel, Treppe nicht als
+  begehbar erzeugt), kann das Modul sie nicht erfinden. Es sagt es jetzt.
+* Aufzuege und Tueren gehoeren nicht zum NavMesh.
+* **Die Sackgasse wird erkannt, wenn der Teilweg in Reichweite des Ziels endet** (in der Ebene bis 100 yd).
+  In einer sehr grossen Halle, deren Teilweg weit vor dem Ziel abbricht, laeuft der Charakter ein Stueck in
+  die falsche Richtung, bis er nah genug ist (ein Modell mit 600 yd Halle: drei Teilwege). Die Regel haette
+  weiter greifen koennen, aber dann loeste jeder Teilweg ueber Hanggelaende die Suche aus und umginge die
+  Contour-Suche; das ist hier nicht gewollt. Der Bericht (22 Punkte, festgenagelter Endpunkt) spricht dafuer, dass der
+  Teilweg die Sackgasse erreichte.
+* Ein Weg, der nur deshalb unvollstaendig ist, weil der Start weit neben dem NavMesh liegt
+  (`PATHFIND_FARFROMPOLY_START`), wird nicht als "festgenagelt" abgeschnitten: Start und Ziel koennen im selben
+  Polygon einer langen Rampe liegen.
+* Die Punkte der erweiterten Suche gehen nicht durch `UpdateAllowedPositionZ` wie die des Cores (bis zu
+  2048 Hoehenabfragen); `LaunchChunk` legt jeden Schritt ohnehin selbst auf die Flaeche.
+
+## Was getestet wurde
+
+Eine **zweite unabhaengige Durchsicht** uebersetzte den echten, unveraenderten `PathGenerator.cpp` mit
+Attrappen-Headern, liess ihn zusammen mit `TrimDeadTail`, `PartialLooksStuck` und `NavSearch` auf synthetischen
+Netzen laufen (800 zufaellige Start-Ziel-Paare je Fassung: das festgenagelte Ende wurde jedes Mal abgeschnitten
+und ein vollstaendiger Weg gefunden) und verglich die uebernommene `FindSmoothPath` mit dem Original (22 von 22
+gleich). Sie fand die Zielklemmung, den Rueckfall auf die Hoehensuche, die Obergrenze ohne Sitzung und die
+Rampe im selben Polygon; alles ist behoben, ihr Befund zur Reichweite steht oben unter "Was nicht geaendert wurde".
+
+`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; 321 Pruefungen der reinen
+Funktionen (neu: `PartialLooksStuck` und `PartialEndsUnderTarget` mit den Zahlen aus dem Bericht, dem
+Spiegelfall, einem langen Weg ueber freies Gelaende, einem Anstieg, NaN; `IsVerticalJump`,
+`IsPinnedStep`, `TrimDeadTail` mit Rampen, Treppen, der langen Schraege und den Grenzen); 400 Pruefungen
+der Suche auf einem selbstgebauten NavMesh (der Core-Pool endet unter dem Ziel; die echte Ausgabe von
+Detour fuer 11 Ziele und Spieler, in beiden Fassungen, die das Modul rechnet -- geglaettet mit
+`FindSmoothPath` wortgetreu aus dem Core, und Eckpunkte: der festgenagelte Endpunkt wird abgeschnitten, die
+Erkennung schlaegt an, die erweiterte Suche findet den Weg; ein grosses Polygon mit der langen Schraege; die erweiterte
+Suche findet den Ausgang, Laenge und Hoehenprofil; Pool-, Zeit-, Polygon- und Punktgrenze; kein Start-
+oder Zielpolygon; falscher Filter; Start gleich Ziel; getrennte Insel; Steigungskosten: ein steiler Huegel
+gegen einen laengeren flachen Umweg, wie ihn der Core waehlt). Die Tests wurden mit absichtlich
+eingebauten Fehlern gegengeprueft (ohne Steigungskosten, ohne Abschneiden, ohne die Regel fuer
+festgenagelte Stuecke): jeder Fehler faellt auf. **Nicht getestet** ist die Reise selbst -- weder im
+Spiel noch auf einem laufenden Server.
+
+---
+
 # Version 4.0.6 -- Zielanker: NPCs, Objekte und Questziele legen die Etage fest
 
 Anlass: ein Spielerbericht -- "die Z-Koordinaten sind immer noch hin und wieder ein Problem,
