@@ -138,6 +138,22 @@ namespace AT
         if (!PickPoly(*query, filter, end, endRef, res.endDist))
             return finish(NavSearchStatus::NoEndPoly);
 
+        // Wie PathGenerator::BuildPolyPath: liegt Start ODER Ziel weit neben dem NavMesh, wird das Ziel auf
+        // den naechsten Punkt des Zielpolygons gesetzt, bevor gesucht wird. Ohne das bliebe der letzte
+        // Punkt des Wegs die rohe Zielposition: findStraightPath uebernimmt eine Position samt Hoehe
+        // unveraendert, solange ihre x/y im letzten Polygon liegen, und das letzte Stueck stiege 20 oder
+        // 40 yd senkrecht ins Leere (siehe AutoTravel_Geometry.h).
+        float endPos[3] = { end[0], end[1], end[2] };
+        if (res.startDist > limits.farFromPoly || res.endDist > limits.farFromPoly)
+        {
+            float closest[3];
+            if (dtStatusSucceed(query->closestPointOnPoly(endRef, end, closest, nullptr)))
+            {
+                dtVcopy(endPos, closest);
+                res.endClamped = true;
+            }
+        }
+
         int const maxPolys = std::max(16, limits.maxPolys);
         std::vector<dtPolyRef> polys(size_t(maxPolys), 0);
         int polyCount = 0;
@@ -149,7 +165,7 @@ namespace AT
         }
         else
         {
-            if (dtStatusFailed(query->initSlicedFindPath(startRef, endRef, start, end, &filter, 0)))
+            if (dtStatusFailed(query->initSlicedFindPath(startRef, endRef, start, endPos, &filter, 0)))
                 return finish(NavSearchStatus::Failed);
 
             // Scheibenweise suchen: die Zeitgrenze wird nach jeder Scheibe geprueft.
@@ -200,7 +216,7 @@ namespace AT
         // ALL_CROSSINGS: ein Punkt an jeder Polygonkante. Auf Rampen und Treppen aus
         // vielen Polygonen bleibt so das Hoehenprofil erhalten; nur die Ecken wuerden
         // lange Hanglinien ohne Zwischenhoehe liefern.
-        dtStatus const ss = query->findStraightPath(start, end, polys.data(), polyCount,
+        dtStatus const ss = query->findStraightPath(start, endPos, polys.data(), polyCount,
                                                     corners.data(), nullptr, nullptr, &cornerCount, maxPoints,
                                                     DT_STRAIGHTPATH_ALL_CROSSINGS);
         if (dtStatusFailed(ss) || cornerCount < 2)

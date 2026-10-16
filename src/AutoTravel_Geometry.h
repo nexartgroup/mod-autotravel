@@ -104,14 +104,21 @@ namespace AT
     // (IsPinnedStep). Rueckgabe: Zahl der entfernten Punkte (0 oder 1). Bleibt nur ein Punkt
     // uebrig, gibt es nichts zu laufen. 'Points' ist ein Behaelter von Punkten mit x, y, z
     // (std::vector<G3D::Vector3>); (tx, ty, tz) ist das Ziel, das dem Core uebergeben wurde.
+    //
+    // allowPinned = false: nur das senkrechte Stueck. Gilt fuer einen Weg, der nur deshalb unvollstaendig
+    // ist, weil der START weit neben dem NavMesh liegt (PATHFIND_FARFROMPOLY_START): Start und Ziel
+    // koennen im selben Polygon liegen, einer langen Rampe, und dann ist [Start, Ziel] ein ehrlicher
+    // Weg, der zufaellig auf der Zielposition endet.
     template <class Points>
-    inline size_t TrimDeadTail(Points& pts, float tx, float ty, float tz)
+    inline size_t TrimDeadTail(Points& pts, float tx, float ty, float tz, bool allowPinned = true)
     {
         if (pts.size() < 2)
             return 0;
         auto const& a = pts[pts.size() - 2];
         auto const& b = pts[pts.size() - 1];
-        if (!IsVerticalJump(a.x, a.y, a.z, b.x, b.y, b.z) && !IsPinnedStep(a.x, a.y, a.z, b.x, b.y, b.z, tx, ty, tz))
+        bool const dead = IsVerticalJump(a.x, a.y, a.z, b.x, b.y, b.z)
+            || (allowPinned && IsPinnedStep(a.x, a.y, a.z, b.x, b.y, b.z, tx, ty, tz));
+        if (!dead)
             return 0;
         pts.pop_back();
         return 1;

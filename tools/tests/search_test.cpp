@@ -474,9 +474,34 @@ namespace
         bool partial = false;           // findPath: DT_PARTIAL_RESULT
         bool outOfNodes = false;        // findPath: DT_OUT_OF_NODES
         bool reachesTarget = false;     // das letzte Polygon ist das Zielpolygon
+        bool farStart = false;          // Start weiter als 7 yd neben dem NavMesh (PATHFIND_FARFROMPOLY_START)
+        bool farEnd = false;            // Ziel ebenso (PATHFIND_FARFROMPOLY_END)
         int polys = 0;
         std::vector<Pt> pts;            // Weltkoordinaten, wie der PathGenerator sie weitergibt
     };
+
+    // PathGenerator::GetPolyByLocation: erst eine flache, dann eine hohe Suchbox; 'dist' ist der Abstand
+    // des Punkts zum gefundenen Polygon.
+    dtPolyRef CorePickPoly(dtNavMeshQuery const& q, dtQueryFilter const& filter, float const* p, float& dist)
+    {
+        float extents[3] = { 3.0f, 5.0f, 3.0f };
+        float nearest[3] = { 0.0f, 0.0f, 0.0f };
+        dtPolyRef ref = 0;
+        if (dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref)
+        {
+            dist = dtVdist(p, nearest);
+            return ref;
+        }
+        extents[1] = 50.0f;
+        ref = 0;
+        if (dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref)
+        {
+            dist = dtVdist(p, nearest);
+            return ref;
+        }
+        dist = 1.0e30f;
+        return 0;
+    }
 
     // ---- PathGenerator::FixupCorridor / GetSteerTarget / FindSmoothPath (AzerothCore), ohne
     // ---- Steigungspruefung und Off-Mesh-Verbindungen. Wortgetreu uebernommen, damit der Test den
@@ -661,14 +686,23 @@ namespace
         filter.setExcludeFlags(0);
 
         float const s[3] = { S[1], S[2], S[0] };     // Detour: (y, z, x)
-        float const e[3] = { T[1], T[2], T[0] };
-        float const ext[3] = { 3.0f, 5.0f, 3.0f };
-        dtPolyRef sr = 0, er = 0;
-        float near[3];
-        q->findNearestPoly(s, ext, &filter, &sr, near);
-        q->findNearestPoly(e, ext, &filter, &er, near);
+        float e[3] = { T[1], T[2], T[0] };
+        float distStart = 0.0f, distEnd = 0.0f;
+        dtPolyRef const sr = CorePickPoly(*q, filter, s, distStart);
+        dtPolyRef const er = CorePickPoly(*q, filter, e, distEnd);
         if (!sr || !er)
             return out;
+
+        // BuildPolyPath: liegt Start oder Ziel mehr als 7 yd neben dem NavMesh, wird das Ziel auf den
+        // naechsten Punkt des Zielpolygons gesetzt (und der Weg gilt als unvollstaendig).
+        out.farStart = distStart > 7.0f;
+        out.farEnd = distEnd > 7.0f;
+        if (out.farStart || out.farEnd)
+        {
+            float closest[3];
+            if (dtStatusSucceed(q->closestPointOnPoly(er, e, closest, nullptr)))
+                dtVcopy(e, closest);
+        }
 
         dtPolyRef path[74];
         int n = 0;
@@ -838,6 +872,81 @@ namespace
         }
     }
 
+    // Ein Ziel, das weit ueber dem Boden liegt (ein NPC auf einem Dach oder einer Plattform ohne NavMesh).
+    // Der PathGenerator setzt es dann auf den naechsten Punkt des Zielpolygons; die erweiterte Suche tat
+    // das anfangs nicht: ihr letzter Punkt blieb die Zielposition, und das letzte Stueck stieg 20 oder 40 yd
+    // senkrecht ins Leere.
+    void TestFarTarget(Mesh const& m)
+    {
+        float const S[3] = { 60.0f, 120.0f, 0.0f };
+        struct Case { float height; bool far; };
+        Case const cases[] = { { 3.0f, false }, { 6.0f, false }, { 8.0f, true }, { 12.0f, true },
+                               { 20.0f, true }, { 40.0f, true } };
+
+        for (Case const& c : cases)
+        {
+            float const T[3] = { 101.3f, 99.1f, c.height };   // nicht auf einer Polygonecke
+
+            // Der Core, beide Fassungen
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                CorePath const core = CoreBuild(m, S, T, pass == 0);
+                CHECK(core.built);
+                if (!core.built)
+                    continue;
+                CHECK(core.farEnd == c.far);
+                Pt const last = core.pts.back();
+                if (c.far)
+                {
+                    CHECK(std::fabs(last.z) < 1.0f);            // auf dem Boden unter dem Ziel
+                    CHECK(Dist2D(last.x, last.y, T[0], T[1]) < 1.0f);
+                }
+                else
+                {
+                    CHECK(std::fabs(last.z - c.height) < 1.0f); // nah genug: die Zielposition
+                }
+            }
+
+            // Die erweiterte Suche tut dasselbe
+            AT::NavSearchResult const r = AT::NavSearch(m.nav, S[0], S[1], S[2], T[0], T[1], T[2], Limits());
+            CHECK(r.status == AT::NavSearchStatus::Complete);
+            if (r.status != AT::NavSearchStatus::Complete || r.points.size() < 6)
+                continue;
+            size_t const n = r.points.size();
+            CHECK(r.endClamped == c.far);
+            CHECK(std::fabs(r.endDist - c.height) < 0.5f);
+            if (c.far)
+            {
+                CHECK(std::fabs(r.points[n - 1]) < 1.0f);        // letzter Punkt auf dem Boden
+                CHECK(!AT::IsVerticalJump(r.points[n - 6], r.points[n - 5], r.points[n - 4],
+                                          r.points[n - 3], r.points[n - 2], r.points[n - 1]));
+            }
+            else
+            {
+                CHECK(std::fabs(r.points[n - 1] - c.height) < 1.0f);
+            }
+        }
+
+        // Ein weit entfernter START (der Spieler faellt, schwebt): auch dann gilt das Ziel als geklemmt,
+        // aendert sich aber nicht, wenn es schon auf dem Boden liegt.
+        float const S2[3] = { 60.0f, 120.0f, 12.0f };
+        float const T2[3] = { 101.3f, 99.1f, 0.0f };
+        AT::NavSearchResult const r = AT::NavSearch(m.nav, S2[0], S2[1], S2[2], T2[0], T2[1], T2[2], Limits());
+        CHECK(r.status == AT::NavSearchStatus::Complete);
+        CHECK(r.startDist > 7.0f);
+        CHECK(r.endClamped);
+        if (r.points.size() >= 6)
+            CHECK(std::fabs(r.points[r.points.size() - 1]) < 1.0f);
+        CorePath const core = CoreBuild(m, S2, T2, false);
+        CHECK(core.built && core.farStart && !core.farEnd);
+
+        // Die Schwelle laesst sich verstellen
+        AT::NavSearchLimits lim = Limits();
+        lim.farFromPoly = 50.0f;
+        AT::NavSearchResult const r2 = AT::NavSearch(m.nav, 60.0f, 120.0f, 0.0f, 101.3f, 99.1f, 20.0f, lim);
+        CHECK(r2.status == AT::NavSearchStatus::Complete && !r2.endClamped);
+    }
+
     // Hoechste Hoehe auf dem Weg, den ein PLAIN dtQueryFilter (nur Strecke) findet.
     float PlainMaxZ(Mesh const& m, float const* S, float const* T)
     {
@@ -926,6 +1035,7 @@ int main()
     TestEdgeCases(m);
     TestShortRouteSameFloor(m);
     TestPinnedVertex(m);
+    TestFarTarget(m);
     TestSlopeCost();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);

@@ -25,6 +25,11 @@ class dtNavMesh;
 
 namespace AT
 {
+    // Der PathGenerator wertet Start oder Ziel, das mehr als so weit (yd) neben dem NavMesh liegt, als
+    // "weit weg" (FARFROMPOLY): der Weg ist unvollstaendig, und das Ziel wird auf den naechsten Punkt
+    // des Zielpolygons gesetzt.
+    constexpr float NAV_FAR_FROM_POLY = 7.0f;
+
     struct NavSearchLimits
     {
         int            maxNodes  = 16384;   // Suchknoten (Detour: 64..65535); der Core nimmt 1024
@@ -33,6 +38,7 @@ namespace AT
         double         maxMs     = 30.0;    // Zeitgrenze in Millisekunden; <= 0: keine
         unsigned short includeFlags = 0;    // wie der Filter des PathGenerators
         unsigned short excludeFlags = 0;
+        float          farFromPoly = NAV_FAR_FROM_POLY;
     };
 
     enum class NavSearchStatus
@@ -59,6 +65,9 @@ namespace AT
         // Suche benutzt, kann das ebenso tun.
         float  startDist = 0.0f;
         float  endDist   = 0.0f;
+        // Start oder Ziel lag weiter als farFromPoly neben dem NavMesh: das Ziel des Wegs ist wie im
+        // PathGenerator der naechste Punkt des Zielpolygons, nicht die rohe Zielposition.
+        bool   endClamped = false;
     };
 
     // Start und Ziel in WELTKOORDINATEN (x, y, z); intern wird nach Detour (y, z, x) gedreht.

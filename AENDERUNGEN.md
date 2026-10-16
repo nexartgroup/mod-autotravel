@@ -67,10 +67,21 @@ haben, liess sich ohne die Dateien nicht pruefen; die Meldung des Moduls zeigt e
   bekommt der Spieler einmal je Etappe die Meldung "endet vermutlich in einer Sackgasse" mit dem Grund
   (keine Verbindung im NavMesh / Suchpool erschoepft / Zeitgrenze erreicht / Weg zu lang). Bei einem
   blossen Verdacht (kaum Fortschritt) gibt es keine Meldung, nur die Debug-Zeile.
+* **Das Ziel wird geklemmt, wenn es weit neben dem NavMesh liegt.** Wie der PathGenerator setzt die erweiterte
+  Suche das Ziel auf den naechsten Punkt des Zielpolygons, wenn Start oder Ziel mehr als 7 yd neben dem
+  NavMesh liegen (`AT::NAV_FAR_FROM_POLY`). Zuerst blieb ihr letzter Punkt die rohe Zielposition -- dasselbe
+  senkrechte Endstueck wie oben, bei einem NPC auf einem Dach oder einer Plattform ohne NavMesh. Die zweite
+  Durchsicht fand es.
+* **Kein Rueckfall auf die Hoehensuche nach einer Sackgasse.** Endet der Weg zum Zielanker in einer
+  Sackgasse und findet die Suche keinen Ausweg, probiert `CalculatePath` nicht mehr die Hoehensuche: sie lieferte
+  den Boden UNTER dem Ziel, einen vollstaendigen Weg dorthin, und die Reise endete mit "Ziel erreicht" auf der
+  falschen Etage -- gleich nach der Meldung, dass es dorthin keinen Weg gibt. (`.at diag` zeigt es ebenso.)
 * **Bremsen:** vier Zwischenspeicher (die zweite Fassung eines Kandidaten nimmt das Ergebnis der ersten),
   eine Pause von 15 s nach einem Fehlschlag **je Start und Ziel** (nach Zeitgrenze oder Fehler 2 s), und
   hoechstens drei Suchen je Wegberechnung -- der Ersatzring um ein unerreichbares Ziel probiert 24
-  Punkte. Ein Weg aus der erweiterten Suche braucht keine Contour-Umgehung und spart bis zu 24 weitere Wegberechnungen.
+  Punkte; die Pause beachtet auch die Hoehe (zwei Etagen mit denselben x/y sperren einander nicht). Ein Weg aus
+  der erweiterten Suche braucht keine Contour-Umgehung und spart bis zu 24 weitere Wegberechnungen.
+  `.at diag` beginnt frisch (Obergrenze und Pause werden zurueckgesetzt) und hat die Obergrenze auch ohne Sitzung.
 * **`.at diag`** zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in
   einer Sackgasse)" und die Zeile "Erweiterte Wegsuche: ..." mit Status, Suchschritten und Zeit; `.at debug`
   ebenso im Lauf, dazu den letzten Punkt jedes PathGenerator-Wegs.
@@ -88,15 +99,31 @@ haben, liess sich ohne die Dateien nicht pruefen; die Meldung des Moduls zeigt e
 * Fehlt dem NavMesh die Verbindung zwischen den Etagen (nicht geladene Kachel, Treppe nicht als
   begehbar erzeugt), kann das Modul sie nicht erfinden. Es sagt es jetzt.
 * Aufzuege und Tueren gehoeren nicht zum NavMesh.
+* **Die Sackgasse wird erkannt, wenn der Teilweg in Reichweite des Ziels endet** (in der Ebene bis 100 yd).
+  In einer sehr grossen Halle, deren Teilweg weit vor dem Ziel abbricht, laeuft der Charakter ein Stueck in
+  die falsche Richtung, bis er nah genug ist (ein Modell mit 600 yd Halle: drei Teilwege). Die Regel haette
+  weiter greifen koennen, aber dann loeste jeder Teilweg ueber Hanggelaende die Suche aus und umginge die
+  Contour-Suche; das ist hier nicht gewollt. Der Bericht (22 Punkte, festgenagelter Endpunkt) spricht dafuer, dass der
+  Teilweg die Sackgasse erreichte.
+* Ein Weg, der nur deshalb unvollstaendig ist, weil der Start weit neben dem NavMesh liegt
+  (`PATHFIND_FARFROMPOLY_START`), wird nicht als "festgenagelt" abgeschnitten: Start und Ziel koennen im selben
+  Polygon einer langen Rampe liegen.
 * Die Punkte der erweiterten Suche gehen nicht durch `UpdateAllowedPositionZ` wie die des Cores (bis zu
   2048 Hoehenabfragen); `LaunchChunk` legt jeden Schritt ohnehin selbst auf die Flaeche.
 
 ## Was getestet wurde
 
-`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; 317 Pruefungen der reinen
+Eine **zweite unabhaengige Durchsicht** uebersetzte den echten, unveraenderten `PathGenerator.cpp` mit
+Attrappen-Headern, liess ihn zusammen mit `TrimDeadTail`, `PartialLooksStuck` und `NavSearch` auf synthetischen
+Netzen laufen (800 zufaellige Start-Ziel-Paare je Fassung: das festgenagelte Ende wurde jedes Mal abgeschnitten
+und ein vollstaendiger Weg gefunden) und verglich die uebernommene `FindSmoothPath` mit dem Original (22 von 22
+gleich). Sie fand die Zielklemmung, den Rueckfall auf die Hoehensuche, die Obergrenze ohne Sitzung und die
+Rampe im selben Polygon; alles ist behoben, ihr Befund zur Reichweite steht oben unter "Was nicht geaendert wurde".
+
+`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; 321 Pruefungen der reinen
 Funktionen (neu: `PartialLooksStuck` und `PartialEndsUnderTarget` mit den Zahlen aus dem Bericht, dem
 Spiegelfall, einem langen Weg ueber freies Gelaende, einem Anstieg, NaN; `IsVerticalJump`,
-`IsPinnedStep`, `TrimDeadTail` mit Rampen, Treppen, der langen Schraege und den Grenzen); 322 Pruefungen
+`IsPinnedStep`, `TrimDeadTail` mit Rampen, Treppen, der langen Schraege und den Grenzen); 400 Pruefungen
 der Suche auf einem selbstgebauten NavMesh (der Core-Pool endet unter dem Ziel; die echte Ausgabe von
 Detour fuer 11 Ziele und Spieler, in beiden Fassungen, die das Modul rechnet -- geglaettet mit
 `FindSmoothPath` wortgetreu aus dem Core, und Eckpunkte: der festgenagelte Endpunkt wird abgeschnitten, die

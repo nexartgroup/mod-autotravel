@@ -205,6 +205,9 @@ unter einer Millisekunde.
 * **Ergebnis.** Die Suche liefert nur einen **durchgehenden** Weg, der das Zielpolygon erreicht; er
   ersetzt den Teilweg. Ein erschoepfter Suchraum liefert keinen Weg (die Suche gibt den
   "naechsten Knoten" nicht als Weg aus).
+* **Ziel weit neben dem NavMesh.** Liegen Start oder Ziel mehr als 7 yd neben dem NavMesh (ein NPC auf einem
+  Dach oder einer Plattform ohne NavMesh), setzt die Suche das Ziel wie der PathGenerator auf den naechsten Punkt des
+  Zielpolygons und markiert den Weg als unvollstaendig (`FARFROMPOLY`).
 * **Keine Verbindung.** Findet auch die erweiterte Suche keinen Weg, bleibt vom Teilweg der begehbare
   Teil -- ohne das senkrechte oder festgenagelte Endstueck. Bleibt davon nichts uebrig, oder endet er
   fast senkrecht unter oder ueber dem Ziel (Etagenunterschied ab 20 yd, in der Ebene hoechstens 30 yd,
@@ -212,7 +215,9 @@ unter einer Millisekunde.
   Sackgasse ..." mit dem Grund -- *keine Verbindung im NavMesh* (der Suchraum ist erschoepft; ein
   Datenproblem der mmaps, das das Modul nicht beheben kann), oder *Suchpool erschoepft / Zeitgrenze
   erreicht / Weg zu lang* (Werte erhoehen: `.at set extms 100`). Bei einem blossen Verdacht
-  (kaum Fortschritt) bleibt es bei der Debug-Zeile.
+  (kaum Fortschritt) bleibt es bei der Debug-Zeile. Fuehrt der Weg zu einem verankerten Ziel in eine Sackgasse, probiert
+  das Modul danach **nicht** die Hoehensuche: sie fuehrte auf den Boden unter dem Ziel und endete mit "Ziel
+  erreicht" auf der falschen Etage.
 * **Bremsen.** Je Kandidat laufen zwei Fassungen (glatt, Eckpunkte); die zweite nimmt das Ergebnis der
   ersten (vier Zwischenspeicher). Nach einem Fehlschlag pausiert die Suche `ExtendedSearchRetryMs`
   (15 s; nach Zeitgrenze oder Fehler 2 s) **fuer diesen Start und dieses Ziel**, und je Wegberechnung
@@ -621,6 +626,10 @@ Kategorie `module` auf Debug steht.
   Teilweg bleiben. Dicht gestapelte Staedte (Dalaran, Darnassus, Eisenschmiede, Unterstadt) lassen
   sich aus x/y allein nicht immer eindeutig aufloesen; der Name im Label und die Quest verbessern
   das, und die Etagenpruefung bei der Ankunft faengt den Rest ab.
+* **Die Sackgasse wird erkannt, wenn der Teilweg in Reichweite des Ziels endet** (in der Ebene bis 100 yd). In einer
+  sehr grossen Halle, deren Teilweg weit vor dem Ziel abbricht, laeuft der Charakter ein Stueck in die falsche
+  Richtung, bis er nah genug ist; eine groessere Reichweite loeste die Suche bei jedem Teilweg ueber Hanggelaende aus
+  und umginge die Contour-Suche.
 * **Die erweiterte Wegsuche kann nur finden, was das NavMesh enthaelt.** Fehlt in den mmaps die
   Verbindung zwischen zwei Etagen (eine Treppe, die der Generator nicht als begehbar erkannt hat) oder ist eine
   Kachel nicht geladen, gibt es keinen durchgehenden Weg, und das Modul meldet die Sackgasse, statt

@@ -196,7 +196,10 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
     //    erfaehrt es, wenn er unter oder ueber dem Ziel endet.
     if (out.type & PATHFIND_INCOMPLETE)
     {
-        bool const deadTail = AT::TrimDeadTail(out.points, dx, dy, dz) > 0;
+        // Ist nur der START weit neben dem NavMesh, koennen Start und Ziel im selben Polygon einer langen
+        // Rampe liegen: [Start, Ziel] ist dann ein ehrlicher Weg, kein festgenagelter.
+        bool const pinnedPossible = !(out.type & PATHFIND_FARFROMPOLY_START);
+        bool const deadTail = AT::TrimDeadTail(out.points, dx, dy, dz, pinnedPossible) > 0;
         G3D::Vector3 const end = out.points.back();
 
         bool const suspicious = deadTail || AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, end.x, end.y, end.z);
@@ -288,6 +291,9 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
     // probiert 24 Punkte, und jeder soll nicht noch einmal eine Suche kosten.
     constexpr uint32 MAX_SEARCHES_PER_CALCULATION = 3;
 
+    // Mit Sitzung zaehlt diese, ohne (".at diag" ohne je gereist zu sein) der Zaehler des Verwalters.
+    uint32& calls = s ? s->extCalls : _extCallsNoSession;
+
     if (s)
     {
         for (ATExtMemo const& m : s->extMemo)
@@ -312,8 +318,11 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
         // Von derselben Stelle zum selben Ziel: eine erfolglose Suche wird nicht in jedem Takt wiederholt.
         for (ATExtFail const& f : s->extFail)
         {
+            // Auch die Hoehe zaehlt: zwei Etagen mit denselben x/y (Stadt unter dem Gelaende) sind zwei
+            // Ziele, und ein Fehlschlag auf der einen sperrt die andere nicht.
             if (f.atMs && uint32(now - f.atMs) < f.retryMs
-                && AT::Dist2D(sx, sy, f.sx, f.sy) < 12.0f && AT::Dist2D(dx, dy, f.dx, f.dy) < 4.0f)
+                && AT::Dist2D(sx, sy, f.sx, f.sy) < 12.0f && std::fabs(sz - f.sz) < 8.0f
+                && AT::Dist2D(dx, dy, f.dx, f.dy) < 4.0f && std::fabs(dz - f.dz) < 3.0f)
             {
                 out.reason = f.reason;
                 out.note = "Erweiterte Wegsuche: pausiert; der letzte Versuch von hier zu diesem Ziel blieb ohne Weg ("
@@ -321,16 +330,16 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
                 return false;
             }
         }
-
-        if (s->extCalls >= MAX_SEARCHES_PER_CALCULATION)
-        {
-            out.reason = "Suchgrenze dieser Wegberechnung erreicht";
-            out.note = "Erweiterte Wegsuche: in dieser Wegberechnung wurden schon " +
-                       std::to_string(MAX_SEARCHES_PER_CALCULATION) + " Suchen gestartet";
-            return false;
-        }
-        ++s->extCalls;
     }
+
+    if (calls >= MAX_SEARCHES_PER_CALCULATION)
+    {
+        out.reason = "Suchgrenze dieser Wegberechnung erreicht";
+        out.note = "Erweiterte Wegsuche: in dieser Wegberechnung wurden schon " +
+                   std::to_string(MAX_SEARCHES_PER_CALCULATION) + " Suchen gestartet";
+        return false;
+    }
+    ++calls;
 
     AT::NavSearchLimits limits;
     limits.maxNodes = int(ATConf.extendedNodes);
@@ -363,8 +372,10 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
                 ? std::min<uint32>(2000, ATConf.extendedRetryMs) : ATConf.extendedRetryMs;
             f.sx = sx;
             f.sy = sy;
+            f.sz = sz;
             f.dx = dx;
             f.dy = dy;
+            f.dz = dz;
             f.reason = AT::NavSearchStatusText(r.status);
         }
         return false;
@@ -376,14 +387,13 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
 
     // Wie der PathGenerator: liegt Start oder Ziel mehr als 7 yd neben dem NavMesh, ist der Weg
     // unvollstaendig. Sonst gewaenne eine erfundene Zielhoehe ueber dem Boden gegen die echte Etage.
-    constexpr float FAR_FROM_POLY = 7.0f;
     uint32 type = PATHFIND_NORMAL;
-    if (r.startDist > FAR_FROM_POLY || r.endDist > FAR_FROM_POLY)
+    if (r.startDist > AT::NAV_FAR_FROM_POLY || r.endDist > AT::NAV_FAR_FROM_POLY)
     {
         type = PATHFIND_INCOMPLETE;
-        if (r.startDist > FAR_FROM_POLY)
+        if (r.startDist > AT::NAV_FAR_FROM_POLY)
             type |= PATHFIND_FARFROMPOLY_START;
-        if (r.endDist > FAR_FROM_POLY)
+        if (r.endDist > AT::NAV_FAR_FROM_POLY)
             type |= PATHFIND_FARFROMPOLY_END;
     }
     out.type = type;
@@ -1008,6 +1018,12 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
         // Liegt das Ziel unter dem Gelaende, ist die Oberflaeche darueber kein Ersatz.
         if (s.anchor.covered)
             Dbg(player, s, "Zielanker ohne Weg; das Gelaende darueber ist kein Ersatz (Ziel verdeckt).");
+        else if (deadEnd.stuckEnd)
+            // Der Weg zum Anker endet in einer Sackgasse. Die Hoehensuche fuehrte dann auf den Boden UNTER dem
+            // Ziel -- ein vollstaendiger Weg dorthin --, und die Reise endete mit "Ziel erreicht" auf der
+            // falschen Etage, gleich nach der Meldung, dass es dorthin keinen Weg gibt.
+            Dbg(player, s, "Zielanker endet in einer Sackgasse - kein Rueckfall auf die Hoehensuche "
+                           "(sie fuehrte auf die falsche Etage).");
         else
         {
             Dbg(player, s, "Zielanker ohne Weg - Rueckfall auf die Hoehensuche.");

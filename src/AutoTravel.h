@@ -441,7 +441,7 @@ struct ATExtFail
 {
     uint32 atMs = 0;                    // 0 = Platz frei
     uint32 retryMs = 0;
-    float  sx = 0.0f, sy = 0.0f, dx = 0.0f, dy = 0.0f;
+    float  sx = 0.0f, sy = 0.0f, sz = 0.0f, dx = 0.0f, dy = 0.0f, dz = 0.0f;
     std::string reason;                 // kurzer Grund fuer Meldung und Diagnose
 };
 
@@ -801,6 +801,9 @@ private:
     std::unordered_set<ObjectGuid> _addonPlayers;
 
     std::unordered_map<ObjectGuid, ATSession> _sessions;
+    // Suchen der erweiterten Wegsuche ohne Sitzung (".at diag" eines Spielers, der nie gereist ist):
+    // die Obergrenze je Wegberechnung braucht auch dort einen Zaehler. Diagnose setzt ihn zurueck.
+    mutable uint32 _extCallsNoSession = 0;
     std::unordered_map<ObjectGuid, uint32> _tpCooldown;
     std::unordered_map<ObjectGuid, std::vector<ATLeg>> _pendingRoutes;
     // Rate-Limit: je Spieler und Befehlsklasse der Zeitpunkt des letzten Befehls

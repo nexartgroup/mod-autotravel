@@ -1033,6 +1033,17 @@ static void TestTrimDeadTail()
         CHECK(big.size() == 2);
     }
 
+    // allowPinned = false (der Weg ist nur unvollstaendig, weil der START weit neben dem NavMesh liegt):
+    // [Start, Ziel] in einer langen Rampe ist ein ehrlicher Weg und bleibt; ein senkrechtes Stueck faellt trotzdem.
+    {
+        std::vector<TestPoint> ramp2 = { { 0, 0, 0 }, { 108, 0, 54 } };
+        CHECK(AT::TrimDeadTail(ramp2, 108, 0, 54, false) == 0);
+        CHECK(ramp2.size() == 2);
+        CHECK(AT::TrimDeadTail(ramp2, 108, 0, 54, true) == 1);          // mit dem Standard wuerde es als festgenagelt abgeschnitten
+        std::vector<TestPoint> vert = { { 0, 0, -130 }, { 0, 0, 8.8f } };
+        CHECK(AT::TrimDeadTail(vert, 0, 0, 8.8f, false) == 1);
+    }
+
     // Nur Start und Sprung: es bleibt ein Punkt, nichts zu laufen.
     std::vector<TestPoint> two = { { 0, 0, -130 }, { 0, 0, 8.8f } };
     CHECK(AT::TrimDeadTail(two, 0, 0, 8.8f) == 1);
