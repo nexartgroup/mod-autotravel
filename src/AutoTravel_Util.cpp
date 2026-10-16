@@ -641,3 +641,61 @@ std::string AT::AnchorFlagsText(uint32 flags)
         out = "-";
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Teilweg in einer Sackgasse?
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    struct PartialGeometry
+    {
+        float start2, end2, start3, end3, dzEnd;
+        bool valid;
+    };
+
+    PartialGeometry MeasurePartial(float sx, float sy, float sz, float dx, float dy, float dz,
+                                   float ex, float ey, float ez)
+    {
+        PartialGeometry g{};
+        g.valid = std::isfinite(sx + sy + sz + dx + dy + dz + ex + ey + ez);
+        if (!g.valid)
+            return g;
+        g.start2 = AT::Dist2D(sx, sy, dx, dy);
+        g.end2   = AT::Dist2D(ex, ey, dx, dy);
+        g.start3 = std::sqrt(g.start2 * g.start2 + (sz - dz) * (sz - dz));
+        g.end3   = std::sqrt(g.end2 * g.end2 + (ez - dz) * (ez - dz));
+        g.dzEnd  = std::fabs(ez - dz);
+        return g;
+    }
+
+    // Endet der Teilweg praktisch am Ziel, fehlt nur der letzte Schritt.
+    constexpr float AT_PARTIAL_AT_TARGET = 12.0f;
+}
+
+bool AT::PartialEndsUnderTarget(float sx, float sy, float sz,
+                                float dx, float dy, float dz,
+                                float ex, float ey, float ez)
+{
+    PartialGeometry const g = MeasurePartial(sx, sy, sz, dx, dy, dz, ex, ey, ez);
+    if (!g.valid || g.end3 < AT_PARTIAL_AT_TARGET)
+        return false;
+
+    return g.dzEnd >= 20.0f && g.end2 <= std::max(30.0f, std::min(60.0f, 0.25f * g.start2));
+}
+
+bool AT::PartialLooksStuck(float sx, float sy, float sz,
+                           float dx, float dy, float dz,
+                           float ex, float ey, float ez)
+{
+    PartialGeometry const g = MeasurePartial(sx, sy, sz, dx, dy, dz, ex, ey, ez);
+    if (!g.valid || g.end3 < AT_PARTIAL_AT_TARGET)
+        return false;
+
+    // (1) Das Ende liegt (fast) senkrecht unter oder ueber dem Ziel.
+    if (PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, ex, ey, ez))
+        return true;
+
+    // (2) Kaum Fortschritt: nach dem Teilweg ist das Ziel in 3D fast so weit weg wie vorher.
+    return g.start3 > 1.0f && g.end3 > 0.8f * g.start3;
+}

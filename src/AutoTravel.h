@@ -56,7 +56,7 @@ class Map;
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
 // Nur zur Anzeige ("Server 4.0.5" im Addon, damit sich ein Fehlerbericht einer Fassung
 // zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
-constexpr char const* AT_MODULE_VERSION = "4.0.6";
+constexpr char const* AT_MODULE_VERSION = "4.0.7";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
@@ -397,6 +397,12 @@ struct ATConfig
     float  contourFirstProgress    = 0.35f;
     float  contourSecondProgress   = 0.65f;
     float  contourMaxDistanceFactor = 2.5f;
+
+    // --- Erweiterte Wegsuche (AutoTravel_Search.cpp) -----------------------
+    bool   extendedSearch     = true;
+    uint32 extendedNodes      = 16384;
+    uint32 extendedMs         = 30;
+    uint32 extendedRetryMs    = 15000;
 };
 
 extern ATConfig ATConf;
@@ -407,6 +413,18 @@ extern std::string ATNodeDb;
 // ---------------------------------------------------------------------------
 // Sitzung
 // ---------------------------------------------------------------------------
+
+// Letztes Ergebnis der erweiterten Wegsuche. Je Kandidat laufen zwei Fassungen (glatt und
+// Eckpunkte) mit demselben Start und Ziel; die zweite nimmt das Ergebnis der ersten.
+struct ATExtMemo
+{
+    bool   valid = false;
+    uint32 atMs = 0;
+    float  sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    float  dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    Movement::PointsArray points;
+    int    nodes = 0;
+};
 
 struct ATSession
 {
@@ -425,6 +443,14 @@ struct ATSession
     ATAnchorInfo anchor;                // gilt fuer destX/destY/destZ (nur letzte Etappe)
     uint32  anchorZRefusals = 0;        // Teilstuecke, die am Ziel auf der falschen Etage endeten
     bool    anchorWarned = false;
+
+    // Erweiterte Wegsuche. 'mutable': TryPathBetween ist const und erreicht die Sitzung nur
+    // ueber Find() const.
+    mutable ATExtMemo extMemo;          // letztes erfolgreiches Ergebnis
+    mutable uint32 extFailAtMs = 0;     // letzter Fehlschlag (0 = keiner); drosselt Wiederholungen vom selben Ort
+    mutable float  extFailSX = 0.0f, extFailSY = 0.0f;
+    mutable std::string extFailNote;    // Grund des letzten Fehlschlags, fuer Meldung und Diagnose
+    mutable bool   extWarned = false;   // der Spieler wurde schon auf die Sackgasse hingewiesen
 
     // Aktuelles Teilstueck
     Movement::PointsArray path;
@@ -508,6 +534,11 @@ struct ATPathResult
     bool   incomplete = false;
     float  score = 0.0f;
     bool   valid = false;
+
+    // Erweiterte Wegsuche (AutoTravel_Search.cpp)
+    bool   extended = false;            // der Weg stammt aus der erweiterten Suche (vollstaendig)
+    bool   stuckEnd = false;            // Teilweg endet in einer Sackgasse, die Suche fand keinen Ausweg
+    std::string note;                   // ein Satz fuer Diagnose und Hinweis an den Spieler
 };
 
 // ---------------------------------------------------------------------------
@@ -685,6 +716,10 @@ private:
                         float sx, float sy, float sz,
                         float dx, float dy, float dz,
                         bool straight, ATPathResult& out) const;
+    bool ExtendedPath(Player* player,
+                      float sx, float sy, float sz,
+                      float dx, float dy, float dz,
+                      ATPathResult& out) const;
     float PathDistance(Movement::PointsArray const& path) const;
     float ScoreNaturalPath(Player* player, Movement::PointsArray const& path,
                            bool incomplete) const;
@@ -823,6 +858,26 @@ namespace AT
     // Die Grenzen hier liegen mit Absicht deutlich unter den harten Werten.
     constexpr float SPLINE_PACK_LIMIT_XY = 220.0f;
     constexpr float SPLINE_PACK_LIMIT_Z  = 100.0f;
+
+    // Sieht ein Teilweg nach einer Sackgasse aus? Der PathGenerator liefert bei erschoepfter
+    // Suche den Knoten mit der kleinsten LUFTLINIE zum Ziel. Liegt das Ziel eine Etage hoeher
+    // oder tiefer, ist das die Stelle direkt darunter oder darueber -- der Weg fuehrt in
+    // eine Wand. (ex, ey, ez) ist der letzte Punkt des Teilwegs.
+    //
+    // PartialEndsUnderTarget: das Ende liegt fast senkrecht unter oder ueber dem Ziel
+    // (Etagenunterschied ab 20 yd, in der Ebene hoechstens 30 yd, bei weiten Wegen ein Viertel der
+    // Startentfernung, aber nie mehr als 60 yd). Streng genug, um dem Spieler "Sackgasse" zu melden.
+    //
+    // PartialLooksStuck: das, oder das Ziel ist in 3D hoechstens 20 % naeher als vom Start. Das
+    // loest nur die erweiterte Wegsuche aus; ein langer Weg ueber freies Gelaende, den der
+    // PathGenerator wegen seiner Laengengrenze abschneidet, kann dazugehoeren, und die Suche
+    // schadet ihm nicht.
+    bool PartialEndsUnderTarget(float sx, float sy, float sz,
+                                float dx, float dy, float dz,
+                                float ex, float ey, float ez);
+    bool PartialLooksStuck(float sx, float sy, float sz,
+                           float dx, float dy, float dz,
+                           float ex, float ey, float ez);
 
     // Laengstes Wegsegment (horizontal, yd), das als EIN Stueck in einen Abschnitt
     // geht. Laengere werden vorher geteilt: ein Segment ueber den ganzen See

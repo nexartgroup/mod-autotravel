@@ -239,6 +239,11 @@ namespace
         { "contour_first",       "AutoTravel.ContourFirstProgress",    OPT_FLOAT, AT_OFF(contourFirstProgress),0.05,    0.90,      0.35,    "Lage des ersten Suchpunkts auf der Strecke" },
         { "contour_second",      "AutoTravel.ContourSecondProgress",   OPT_FLOAT, AT_OFF(contourSecondProgress),0.10,   0.95,      0.65,    "Lage des zweiten Suchpunkts" },
         { "contour_factor",      "AutoTravel.ContourMaxDistanceFactor",OPT_FLOAT, AT_OFF(contourMaxDistanceFactor),1,   10,        2.5,     "hoechster Umwegfaktor der Contour-Route" },
+
+        { "extsearch",           "AutoTravel.ExtendedSearch",          OPT_BOOL,  AT_OFF(extendedSearch),      0,       1,         1,       "bei einem Teilweg in die Sackgasse eine gruendlichere Wegsuche starten" },
+        { "extnodes",            "AutoTravel.ExtendedSearchNodes",     OPT_UINT,  AT_OFF(extendedNodes),       2048,    65535,     16384,   "Suchknoten der erweiterten Suche (der Core nimmt 1024)" },
+        { "extms",               "AutoTravel.ExtendedSearchMs",        OPT_UINT,  AT_OFF(extendedMs),          5,       500,       30,      "Zeitgrenze je erweiterter Suche (ms)" },
+        { "extretry",            "AutoTravel.ExtendedSearchRetryMs",   OPT_UINT,  AT_OFF(extendedRetryMs),     1000,    600000,    15000,   "Pause nach einer erfolglosen erweiterten Suche vom selben Ort (ms)" },
     };
 
     constexpr size_t OPTION_COUNT = sizeof(sOptions) / sizeof(sOptions[0]);

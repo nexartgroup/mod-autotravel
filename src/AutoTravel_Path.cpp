@@ -21,8 +21,12 @@
 
 #include "AutoTravel.h"
 
+#include "AutoTravel_Search.h"
+
+#include "GameTime.h"
 #include "GridDefines.h"
 #include "Map.h"
+#include "MapDefines.h"
 #include "PathGenerator.h"
 #include "Player.h"
 
@@ -49,6 +53,9 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
     out.type = PATHFIND_NOPATH;
     out.incomplete = false;
     out.score = 1.0e30f;
+    out.extended = false;
+    out.stuckEnd = false;
+    out.note.clear();
 
     if (!player)
         return false;
@@ -111,60 +118,227 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
         return false;
 
     uint32 phase = player->GetPhaseMask();
-    uint32 offSurface = 0;
-    std::vector<float> planes;
 
-    // Stichprobe statt jeden Punkt: jeder Punkt kostet bis zu vier VMap-Abfragen
-    // (bei einem Fehlschlag noch einmal rund neun). Der PathGenerator liefert
-    // hoechstens MAX_POINT_PATH_LENGTH = 74 Punkte, eine Wegsuche ohne Ergebnis
-    // prueft aber bis zu 62 Kandidaten -- das waren Zehntausende Strahlabfragen
-    // auf dem Weltserver-Thread. Die Entscheidung ("ein Viertel liegt nirgends
-    // auf") aendert sich durch gleichmaessig verteilte Stichproben nicht. Erster
-    // und letzter Punkt sind immer dabei; Pfade bis 24 Punkte werden weiterhin
-    // vollstaendig geprueft. Eine frueher hier stehende Grenze von 48 griff bei
-    // keinem einzelnen Pfad (74 / 48 = Schrittweite 1), nur der vorzeitige Abbruch
-    // unten half.
-    constexpr size_t MAX_SURFACE_SAMPLES = 24;
-    size_t const count = out.points.size();
-    size_t const stride = std::max<size_t>(1, (count + MAX_SURFACE_SAMPLES - 1) / MAX_SURFACE_SAMPLES);
-    size_t const samples = (count - 1 + stride - 1) / stride + 1;
-
-    for (size_t k = 0; k < samples; ++k)
+    auto plausible = [&](Movement::PointsArray const& pts) -> bool
     {
-        size_t const i = std::min(k * stride, count - 1);
-        G3D::Vector3 const& p = out.points[i];
-        bool onSurface = false;
+        uint32 offSurface = 0;
+        std::vector<float> planes;
 
-        FindGroundPlanes(player, p.x, p.y, p.z, planes);
-        for (float pl : planes)
+        // Stichprobe statt jeden Punkt: jeder Punkt kostet bis zu vier VMap-Abfragen
+        // (bei einem Fehlschlag noch einmal rund neun). Der PathGenerator liefert
+        // hoechstens MAX_POINT_PATH_LENGTH = 74 Punkte, eine Wegsuche ohne Ergebnis
+        // prueft aber bis zu 62 Kandidaten -- das waren Zehntausende Strahlabfragen
+        // auf dem Weltserver-Thread. Die Entscheidung ("ein Viertel liegt nirgends
+        // auf") aendert sich durch gleichmaessig verteilte Stichproben nicht. Erster
+        // und letzter Punkt sind immer dabei; Pfade bis 24 Punkte werden weiterhin
+        // vollstaendig geprueft. Eine frueher hier stehende Grenze von 48 griff bei
+        // keinem einzelnen Pfad (74 / 48 = Schrittweite 1), nur der vorzeitige Abbruch
+        // unten half. Die erweiterte Suche liefert bis zu 2048 Punkte; auch sie wird so
+        // hoechstens an 24 Stellen geprueft.
+        constexpr size_t MAX_SURFACE_SAMPLES = 24;
+        size_t const count = pts.size();
+        size_t const stride = std::max<size_t>(1, (count + MAX_SURFACE_SAMPLES - 1) / MAX_SURFACE_SAMPLES);
+        size_t const samples = (count - 1 + stride - 1) / stride + 1;
+
+        for (size_t k = 0; k < samples; ++k)
         {
-            if (p.z > pl - 5.0f && p.z < pl + 8.0f)
+            size_t const i = std::min(k * stride, count - 1);
+            G3D::Vector3 const& p = pts[i];
+            bool onSurface = false;
+
+            FindGroundPlanes(player, p.x, p.y, p.z, planes);
+            for (float pl : planes)
             {
-                onSurface = true;
-                break;
+                if (p.z > pl - 5.0f && p.z < pl + 8.0f)
+                {
+                    onSurface = true;
+                    break;
+                }
+            }
+
+            if (!onSurface)
+            {
+                float ground = map->GetHeight(phase, p.x, p.y, p.z + 5.0f, true, 200.0f);
+                if (ground <= INVALID_HEIGHT)
+                    ground = BestGroundZ(player, p.x, p.y);
+
+                if (ground > INVALID_HEIGHT && p.z > ground - 5.0f && p.z < ground + 8.0f)
+                    onSurface = true;
+            }
+
+            if (!onSurface)
+            {
+                ++offSurface;
+                if (offSurface * 4 > samples)      // schon jetzt nicht mehr zu retten
+                    return false;
             }
         }
+        return true;
+    };
 
-        if (!onSurface)
+    // --- Teilweg in die Sackgasse? -----------------------------------------
+    //
+    // Liefert der PathGenerator nur einen Teilweg, und sieht der aus, als ende er unter
+    // oder ueber dem Ziel oder komme ihm kaum naeher, laeuft die erweiterte Wegsuche. Der
+    // Core sucht mit 1024 Knoten; in einer grossen Stadt mit mehreren Etagen (Exodar)
+    // sind die im Innenraum verbraucht, bevor die Suche den Ausgang erreicht, und der Teilweg
+    // endet an der Wand unter dem Ziel. Findet die erweiterte Suche einen durchgehenden
+    // Weg, ersetzt er den Teilweg.
+    if ((out.type & PATHFIND_INCOMPLETE) && ATConf.extendedSearch)
+    {
+        G3D::Vector3 const& last = out.points.back();
+        if (AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, last.x, last.y, last.z))
         {
-            float ground = map->GetHeight(phase, p.x, p.y, p.z + 5.0f, true, 200.0f);
-            if (ground <= INVALID_HEIGHT)
-                ground = BestGroundZ(player, p.x, p.y);
+            ATPathResult ext;
+            bool const found = ExtendedPath(player, sx, sy, sz, dx, dy, dz, ext);
+            if (found && plausible(ext.points))
+            {
+                out.points = std::move(ext.points);
+                out.type = PATHFIND_NORMAL;
+                out.incomplete = false;
+                out.extended = true;
+                out.note = ext.note;
+                out.valid = true;
+                return true;
+            }
 
-            if (ground > INVALID_HEIGHT && p.z > ground - 5.0f && p.z < ground + 8.0f)
-                onSurface = true;
-        }
-
-        if (!onSurface)
-        {
-            ++offSurface;
-            if (offSurface * 4 > samples)      // schon jetzt nicht mehr zu retten
-                return false;
+            // "Sackgasse" erfaehrt der Spieler nur, wenn das Ende wirklich unter oder ueber dem Ziel
+            // liegt; bei einem blossen Verdacht (kaum Fortschritt) bleibt es bei der Debug-Zeile.
+            out.stuckEnd = AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, last.x, last.y, last.z);
+            out.note = found ? ext.note + " - der Weg liegt nicht auf begehbaren Flaechen und wurde verworfen"
+                             : ext.note;
         }
     }
 
+    if (!plausible(out.points))
+        return false;
+
     out.incomplete = (out.type & PATHFIND_INCOMPLETE) != 0;
     out.valid = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Erweiterte Wegsuche
+// ---------------------------------------------------------------------------
+//
+// Siehe AutoTravel_Search.cpp. Hier sitzt, was den Spieler und die Sitzung betrifft:
+// das NavMesh der Karte, der Filter wie beim PathGenerator, und zwei Bremsen.
+//
+//   * Zwischenspeicher: je Kandidat laufen zwei Fassungen (glatt und Eckpunkte) mit
+//     demselben Start und Ziel. Die zweite nimmt das Ergebnis der ersten.
+//   * Pause nach einem Fehlschlag: wer von einer Stelle aus keinen Weg findet, findet ihn
+//     eine Sekunde spaeter auch nicht. Die Suche ist billig (ein paar Millisekunden), aber
+//     sie soll nicht in jedem Takt und nicht fuer jeden Ersatzpunkt des Rings laufen.
+//
+// Die Punkte werden NICHT durch UpdateAllowedPositionZ gezogen wie die des PathGenerators:
+// bei bis zu 2048 Punkten wuerde das tausende Hoehenabfragen kosten, und LaunchChunk legt
+// jeden Schritt ohnehin selbst auf die Flaeche.
+
+bool AutoTravelMgr::ExtendedPath(Player* player,
+                                 float sx, float sy, float sz,
+                                 float dx, float dy, float dz,
+                                 ATPathResult& out) const
+{
+    out = ATPathResult();
+
+    if (!ATConf.extendedSearch || !player)
+        return false;
+
+    Map* map = player->GetMap();
+    if (!map)
+        return false;
+
+    dtNavMesh const* nav = map->GetMapCollisionData().GetMMapData().GetNavMesh();
+    if (!nav)
+        return false;
+
+    ATSession const* s = Find(player);          // nullptr bei ".at diag"
+    uint32 const now = std::max<uint32>(1, uint32(GameTime::GetGameTimeMS().count()));
+
+    auto dist3 = [](float ax, float ay, float az, float bx, float by, float bz)
+    {
+        float const x = ax - bx, y = ay - by, z = az - bz;
+        return std::sqrt(x * x + y * y + z * z);
+    };
+
+    if (s)
+    {
+        ATExtMemo const& m = s->extMemo;
+        if (m.valid && uint32(now - m.atMs) < 2000
+            && dist3(sx, sy, sz, m.sx, m.sy, m.sz) < 1.0f && dist3(dx, dy, dz, m.dx, m.dy, m.dz) < 1.0f)
+        {
+            out.points = m.points;
+            out.type = PATHFIND_NORMAL;
+            out.valid = true;
+            out.extended = true;
+            char b[160];
+            std::snprintf(b, sizeof(b), "Erweiterte Wegsuche: vollstaendig (vom vorigen Versuch uebernommen) | %u Punkte",
+                          uint32(out.points.size()));
+            out.note = b;
+            return true;
+        }
+
+        // Vom selben Ort, gleich zu welchem Ziel: der Ersatzring um ein unerreichbares Ziel probiert
+        // 24 Punkte, und jeder soll nicht noch einmal eine Suche kosten.
+        if (s->extFailAtMs && uint32(now - s->extFailAtMs) < ATConf.extendedRetryMs
+            && AT::Dist2D(sx, sy, s->extFailSX, s->extFailSY) < 12.0f)
+        {
+            out.note = "Erweiterte Wegsuche: pausiert; der letzte Versuch von hier aus blieb ohne Weg ("
+                     + s->extFailNote + ")";
+            return false;
+        }
+    }
+
+    AT::NavSearchLimits limits;
+    limits.maxNodes = int(ATConf.extendedNodes);
+    limits.maxMs = double(ATConf.extendedMs);
+    // Wie PathGenerator::CreateFilter fuer Spieler.
+    limits.includeFlags = uint16(NAV_GROUND | NAV_WATER | NAV_MAGMA);
+
+    AT::NavSearchResult const r = AT::NavSearch(nav, sx, sy, sz, dx, dy, dz, limits);
+
+    char b[256];
+    std::snprintf(b, sizeof(b),
+                  "Erweiterte Wegsuche: %s | %d Suchschritte (Pool %u), %d Polygone, %.1f ms (Grenze %u ms)",
+                  AT::NavSearchStatusText(r.status), r.nodes, ATConf.extendedNodes, r.polys, r.ms,
+                  ATConf.extendedMs);
+    out.note = b;
+    if (s && DebugEnabled(*s))
+        Dbg(player, *s, b);
+
+    if (r.status != AT::NavSearchStatus::Complete || r.points.size() < 6)
+    {
+        if (s)
+        {
+            s->extFailAtMs = now;
+            s->extFailSX = sx;
+            s->extFailSY = sy;
+            s->extFailNote = std::string(AT::NavSearchStatusText(r.status));
+        }
+        return false;
+    }
+
+    out.points.reserve(r.points.size() / 3);
+    for (size_t i = 0; i + 2 < r.points.size(); i += 3)
+        out.points.push_back(G3D::Vector3(r.points[i], r.points[i + 1], r.points[i + 2]));
+
+    out.type = PATHFIND_NORMAL;
+    out.incomplete = false;
+    out.extended = true;
+    out.valid = true;
+
+    if (s)
+    {
+        s->extFailAtMs = 0;
+        ATExtMemo& m = s->extMemo;
+        m.valid = true;
+        m.atMs = now;
+        m.sx = sx; m.sy = sy; m.sz = sz;
+        m.dx = dx; m.dy = dy; m.dz = dz;
+        m.points = out.points;
+        m.nodes = r.nodes;
+    }
     return true;
 }
 
@@ -708,10 +882,11 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 {
                     char b[256];
                     std::snprintf(b, sizeof(b),
-                                  "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s Punkte=%u",
+                                  "Direktkandidat %-10s Z=%8.2f Distanz=%7.1f Score=%9.1f %s%s Punkte=%u",
                                   straight ? "Eckpunkte" : "Geglaettet", zc[i],
                                   PathDistance(cand.points), cand.score,
                                   cand.incomplete ? "TEILWEG" : "vollstaendig",
+                                  cand.extended ? " (erweiterte Suche)" : (cand.stuckEnd ? " (SACKGASSE)" : ""),
                                   uint32(cand.points.size()));
                     Dbg(player, s, b);
                 }
@@ -815,11 +990,22 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 
         char b[256];
         std::snprintf(b, sizeof(b),
-                      "Bester Pfad: Score=%.1f Distanz=%.1f Type=0x%X (%s) Punkte=%u %s",
+                      "Bester Pfad: Score=%.1f Distanz=%.1f Type=0x%X (%s) Punkte=%u %s%s",
                       best.score, PathDistance(best.points), best.type,
                       AT::PathTypeName(best.type).c_str(), uint32(best.points.size()),
-                      best.incomplete ? "TEILWEG" : "vollstaendig");
+                      best.incomplete ? "TEILWEG" : "vollstaendig",
+                      best.extended ? " (erweiterte Suche)" : (best.stuckEnd ? " (SACKGASSE)" : ""));
         Dbg(player, s, b);
+
+        // Ein Teilweg, der unter oder ueber dem Ziel endet, und eine erweiterte Suche, die keinen
+        // Ausweg fand: der Charakter laeuft in die Sackgasse. Das soll der Spieler erfahren, einmal.
+        if (best.stuckEnd && !s.extWarned)
+        {
+            s.extWarned = true;
+            Msg(player, "Der Weg zum Ziel endet vermutlich in einer Sackgasse: Das Ziel liegt auf einer anderen "
+                        "Etage, und die Suche fand keinen durchgehenden Weg dorthin.");
+            Msg(player, best.note);
+        }
         return true;
     }
 

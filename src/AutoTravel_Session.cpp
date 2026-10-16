@@ -407,12 +407,15 @@ bool AutoTravelMgr::CheckGroundContact(Player* player, ATSession& s)
 
     if (!s.path.empty())
     {
+        // Der naechste Punkt im RAUM, nicht in der Ebene: eine Rampe oder Wendeltreppe liegt
+        // in X/Y uebereinander, und der Punkt der falschen Windung liefe als Bezugshoehe.
         float best = 1.0e30f;
         for (size_t i = 0; i < s.path.size(); ++i)
         {
             float dx = s.path[i].x - px;
             float dy = s.path[i].y - py;
-            float d2 = dx * dx + dy * dy;
+            float dz = s.path[i].z - pz;
+            float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 < best)
             {
                 best = d2;

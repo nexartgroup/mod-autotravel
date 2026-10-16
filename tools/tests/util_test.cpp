@@ -887,6 +887,68 @@ static void TestPickAnchorRules()
     CHECK(PickAnchor(many, 0, 0, rules, p) && p.floors == 5 && p.altCount == 2);
 }
 
+
+// ---------------------------------------------------------------------------
+// Teilweg in die Sackgasse? (AT::PartialLooksStuck)
+// ---------------------------------------------------------------------------
+
+static void TestPartialLooksStuck()
+{
+    // Der Fall aus dem Spielerbericht: Spieler in der Exodar (Z -130), Huntress Kella Nightbow an der
+    // Oberflaeche 95 yd entfernt (Z 8.8). Der Teilweg endet an der Wand unter ihr.
+    float const sx = -4203.5f, sy = -11415.1f, sz = -130.1f;
+    float const dx = -4269.0f, dy = -11484.5f, dz = 8.8f;
+
+    // endet im Innenraum, 6 yd neben der Stelle unter dem Ziel
+    CHECK(AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, dx + 4.0f, dy - 4.5f, -130.0f));
+    // endet 55 yd vom Ziel entfernt, auf derselben Etage wie der Start (Luftlinie kaum kleiner)
+    CHECK(AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, dx + 40.0f, dy - 37.0f, -129.0f));
+    // die Wand hinauf geklettert (Z -115): noch immer eine andere Etage
+    CHECK(AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, dx + 3.0f, dy + 2.0f, -115.0f));
+
+    // streng (Meldung an den Spieler): nur die Sackgasse unter dem Ziel
+    CHECK(AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, dx + 4.0f, dy - 4.5f, -130.0f));
+    CHECK(AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, dx + 3.0f, dy + 2.0f, -115.0f));
+    // 55 yd neben dem Ziel, gleiche Etage wie der Start: Verdacht ja, Meldung nein
+    CHECK(!AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, dx + 40.0f, dy - 37.0f, -129.0f));
+    // ein Ziel auf einer Anhoehe, 800 yd weit weg: der Teilweg endet 100 yd davor und 25 yd tiefer -- das ist
+    // der Weg dorthin, keine Sackgasse unter dem Ziel
+    CHECK(!AT::PartialEndsUnderTarget(0.0f, 0.0f, 0.0f, 800.0f, 0.0f, 50.0f, 700.0f, 0.0f, 25.0f));
+    // dasselbe, 25 yd vor dem Ziel: unter dem Ziel
+    CHECK(AT::PartialEndsUnderTarget(0.0f, 0.0f, 0.0f, 800.0f, 0.0f, 50.0f, 775.0f, 5.0f, 25.0f));
+    // weiter als 60 yd ist es auch bei einem Weg von 4000 yd nicht mehr "darunter"
+    CHECK(!AT::PartialEndsUnderTarget(0.0f, 0.0f, 0.0f, 4000.0f, 0.0f, 50.0f, 3900.0f, 0.0f, 20.0f));
+
+    // Ein Weg ueber freies Gelaende, vom PathGenerator wegen seiner Laengengrenze abgeschnitten:
+    // 1500 yd Luftlinie, der Teilweg kommt 450 yd weiter.
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 10.0f, 1500.0f, 0.0f, 12.0f, 450.0f, 20.0f, 11.0f));
+    // dasselbe zu Beginn der Reise, aber nur 300 yd Fortschritt: 20 % -- noch kein Verdacht
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 10.0f, 1500.0f, 0.0f, 12.0f, 300.0f, 0.0f, 11.0f));
+    // kaum Fortschritt: 5 % von 1500 yd
+    CHECK(AT::PartialLooksStuck(0.0f, 0.0f, 10.0f, 1500.0f, 0.0f, 12.0f, 75.0f, 0.0f, 10.0f));
+
+    // Ein Weg bergauf zum Ziel: Hoehenunterschied 60 yd, aber das Ende liegt weit vom Ziel
+    // (200 yd) und schon deutlich naeher als der Start (600 yd).
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 600.0f, 0.0f, 60.0f, 400.0f, 0.0f, 40.0f));
+
+    // Der Teilweg endet praktisch am Ziel: es fehlt nur der letzte Schritt.
+    CHECK(!AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, dx + 3.0f, dy, dz + 5.0f));
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 95.0f, 0.0f, 0.0f));
+
+    // Das Spiegelbild: der Spieler steht ueber der Stadt, das Ziel liegt eine Etage tiefer, der
+    // Teilweg endet auf der Oberflaeche direkt darueber.
+    CHECK(AT::PartialLooksStuck(dx, dy, dz, sx, sy, sz, sx - 5.0f, sy + 3.0f, 12.0f));
+
+    // Unsinn hinein, kein Absturz und kein Verdacht heraus
+    float const nan = std::numeric_limits<float>::quiet_NaN();
+    float const inf = std::numeric_limits<float>::infinity();
+    CHECK(!AT::PartialLooksStuck(nan, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f));
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, inf, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f));
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 1.0f, nan, 0.0f));
+    // Start gleich Ziel
+    CHECK(!AT::PartialLooksStuck(5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f));
+}
+
 int main()
 {
     TestParseUInt();
@@ -905,6 +967,7 @@ int main()
     TestPickAnchorFloors();
     TestPickAnchorQuest();
     TestPickAnchorRules();
+    TestPartialLooksStuck();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);
     return sFailures ? 1 : 0;

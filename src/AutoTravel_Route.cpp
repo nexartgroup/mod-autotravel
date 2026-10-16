@@ -654,6 +654,9 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.anchor = finalLeg ? leg.anchor : ATAnchorInfo();
         s.anchorZRefusals = 0;
         s.anchorWarned = false;
+        s.extWarned = false;
+        s.extFailAtMs = 0;
+        s.extMemo.valid = false;
 
         if (s.anchor.found)
         {
@@ -1538,11 +1541,15 @@ void AutoTravelMgr::Diagnose(Player* player, uint32 uiMapId, float nx, float ny,
                 bool ok = TryPathBetween(player,
                                          player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
                                          xc[i], yc[i], zc[i], pass == 1, r);
-                std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s",
+                std::snprintf(b, sizeof(b), "  %-10s Z %8.2f -> 0x%X (%s), %u Punkte %s%s",
                               pass == 1 ? "Eckpunkte" : "geglaettet",
                               zc[i], r.type, AT::PathTypeName(r.type).c_str(),
-                              uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen");
+                              uint32(r.points.size()), ok ? "AKZEPTIERT" : "verworfen",
+                              r.extended ? " (erweiterte Suche: durchgehender Weg)"
+                                         : (r.stuckEnd ? " (Teilweg endet in einer Sackgasse)" : ""));
                 Msg(player, b);
+                if (!r.note.empty())
+                    Msg(player, "    " + r.note);
                 if (ok)
                 {
                     done = true;
