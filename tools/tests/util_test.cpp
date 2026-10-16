@@ -931,6 +931,13 @@ static void TestPartialLooksStuck()
     // (200 yd) und schon deutlich naeher als der Start (600 yd).
     CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 600.0f, 0.0f, 60.0f, 400.0f, 0.0f, 40.0f));
 
+    // Aus der Durchsicht: eine Sackgasse hinter einer Mauer, 40 yd seitlich vom Ziel und 30 yd tiefer,
+    // 40 % Fortschritt -- weder "unter dem Ziel" noch "kaum Fortschritt", aber eine andere Hoehe in der Naehe.
+    CHECK(AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 30.0f, 60.0f, 0.0f, 0.0f));
+    CHECK(!AT::PartialEndsUnderTarget(0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 30.0f, 60.0f, 0.0f, 0.0f));
+    // dieselbe Hoehe, 10 yd Unterschied reichen aber nur in der Naehe: 300 yd entfernt kein Verdacht
+    CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 1000.0f, 0.0f, 20.0f, 700.0f, 0.0f, 5.0f));
+
     // Der Teilweg endet praktisch am Ziel: es fehlt nur der letzte Schritt.
     CHECK(!AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, dx + 3.0f, dy, dz + 5.0f));
     CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 95.0f, 0.0f, 0.0f));
@@ -947,6 +954,101 @@ static void TestPartialLooksStuck()
     CHECK(!AT::PartialLooksStuck(0.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 1.0f, nan, 0.0f));
     // Start gleich Ziel
     CHECK(!AT::PartialLooksStuck(5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f));
+}
+
+
+// ---------------------------------------------------------------------------
+// Nicht begehbares Endstueck eines Teilwegs (AT::IsVerticalJump / IsPinnedStep / TrimDeadTail)
+// ---------------------------------------------------------------------------
+
+struct TestPoint { float x, y, z; };
+
+static void TestTrimDeadTail()
+{
+    // Treppen und Rampen sind keine Spruenge: Steigung 1,2 bis 2.
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 10, 0, 12));        // Steigung 1,2
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 5, 0, 10));         // Steigung 2
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 100, 0, 5));        // flach
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 0, 0, 11.9f));      // unter der Mindesthoehe
+    // senkrecht und fast senkrecht
+    CHECK(AT::IsVerticalJump(0, 0, 0, 0, 0, 139));
+    CHECK(AT::IsVerticalJump(0, 0, 0, 3, 4, 139));         // 5 yd zur Seite, 139 hoch
+    CHECK(AT::IsVerticalJump(0, 0, 0, 0, 0, -139));        // auch abwaerts
+    CHECK(AT::IsVerticalJump(0, 0, 0, 4, 0, 12.5f));       // 12,5 > 2,5 * 4
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 5, 0, 12.5f));      // 12,5 = 2,5 * 5: gerade noch begehbar
+
+    // Auf die Zielposition festgenagelt: das letzte Stueck endet genau auf ihr und ueberwindet
+    // mindestens 20 yd. Auch eine lange Schraege zaehlt, die IsVerticalJump durchlaesst
+    // (70 yd zur Seite, 139 hoch: Steigung 2).
+    CHECK(!AT::IsVerticalJump(0, 0, 0, 70, 0, 139));
+    CHECK(AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 70, 0, 139));
+    CHECK(AT::IsPinnedStep(0, 0, 139, 70, 0, 0, 70, 0, 0));          // auch abwaerts
+    CHECK(AT::IsPinnedStep(0, 0, 0, 0, 0, 139, 0, 0, 139));          // senkrecht sowieso
+    CHECK(!AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 80, 0, 139));       // das Ziel liegt woanders
+    CHECK(AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 70.4f, 0, 139));     // Abweichung in der Ebene 0,4 yd
+    CHECK(!AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 70.6f, 0, 139));    // 0,6 yd
+    CHECK(AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 70, 0, 141.5f));     // Abweichung in der Hoehe 2,5 yd
+    CHECK(!AT::IsPinnedStep(0, 0, 0, 70, 0, 139, 70, 0, 143.5f));    // 3,5 yd
+    CHECK(!AT::IsPinnedStep(0, 0, 0, 10, 0, 15, 10, 0, 15));         // unter 20 yd Hoehe
+    CHECK(AT::IsPinnedStep(0, 0, 0, 300, 0, 100, 300, 0, 100));      // Steigung 1:3
+    CHECK(!AT::IsPinnedStep(0, 0, 0, 400, 0, 100, 400, 0, 100));     // 1:4 und flacher: eine Rampe
+
+    // Der Teilweg aus dem Spielerbericht: dem NPC entgegen, der letzte Punkt ist seine Zielposition.
+    std::vector<TestPoint> path = { { 0, 0, -130 }, { 20, 5, -130 }, { 38, 12, -130 }, { 40, 14, 8.8f } };
+    CHECK(AT::TrimDeadTail(path, 40, 14, 8.8f) == 1);
+    CHECK(path.size() == 3);
+    CHECK(path.back().z == -130.0f);
+    CHECK(AT::TrimDeadTail(path, 40, 14, 8.8f) == 0);      // das naechste Stueck ist flach: nichts mehr
+    CHECK(path.size() == 3);
+
+    // Dasselbe, wenn das Stueck senkrecht UND das Ziel ein anderes ist (der Core wurde mit einem
+    // anderen Ziel gefragt als dem, auf dem der Weg endet): die Steilheit allein genuegt.
+    {
+        std::vector<TestPoint> p = { { 0, 0, -130 }, { 38, 12, -130 }, { 40, 14, 8.8f } };
+        CHECK(AT::TrimDeadTail(p, 99, 99, 99) == 1);
+    }
+
+    // Nach dem Abschneiden sieht man die Sackgasse: das Ende liegt 5 yd neben der Stelle unter dem Ziel.
+    {
+        std::vector<TestPoint> p2 = { { 0, 0, -130 }, { 36, 10, -130 }, { 40, 14, 8.8f } };
+        AT::TrimDeadTail(p2, 40, 14, 8.8f);
+        CHECK(AT::PartialLooksStuck(0, 0, -130, 40, 14, 8.8f, p2.back().x, p2.back().y, p2.back().z));
+        CHECK(AT::PartialEndsUnderTarget(0, 0, -130, 40, 14, 8.8f, p2.back().x, p2.back().y, p2.back().z));
+    }
+    // Ohne das Abschneiden wuerde der letzte Punkt "praktisch am Ziel" liegen und nichts melden.
+    CHECK(!AT::PartialLooksStuck(0, 0, -130, 40, 14, 8.8f, 40, 14, 8.8f));
+
+    // Eine lange Schraege in einem grossen Polygon: Start und festgenageltes Ziel, 70 yd auseinander.
+    {
+        std::vector<TestPoint> big = { { 0, 0, -130 }, { 70, 10, 8.8f } };
+        CHECK(AT::TrimDeadTail(big, 70, 10, 8.8f) == 1);
+        CHECK(big.size() == 1);
+        // Der Rest ist der Start: kein Fortschritt, die Erkennung schlaegt an.
+        CHECK(AT::PartialLooksStuck(0, 0, -130, 70, 10, 8.8f, big[0].x, big[0].y, big[0].z));
+    }
+    // Endet der Weg dagegen NICHT auf der Zielposition und ist nicht senkrecht, bleibt er.
+    {
+        std::vector<TestPoint> big = { { 0, 0, -130 }, { 70, 10, 8.8f } };
+        CHECK(AT::TrimDeadTail(big, 90, 10, 8.8f) == 0);
+        CHECK(big.size() == 2);
+    }
+
+    // Nur Start und Sprung: es bleibt ein Punkt, nichts zu laufen.
+    std::vector<TestPoint> two = { { 0, 0, -130 }, { 0, 0, 8.8f } };
+    CHECK(AT::TrimDeadTail(two, 0, 0, 8.8f) == 1);
+    CHECK(two.size() == 1);
+    CHECK(AT::TrimDeadTail(two, 0, 0, 8.8f) == 0);         // ein einzelner Punkt hat kein Stueck
+
+    // leer und ein Punkt
+    std::vector<TestPoint> none;
+    CHECK(AT::TrimDeadTail(none, 0, 0, 0) == 0);
+
+    // Ein steiles, aber begehbares Ende (Rampe) bleibt.
+    std::vector<TestPoint> ramp = { { 0, 0, 0 }, { 10, 0, 6 }, { 20, 0, 18 } };
+    CHECK(AT::TrimDeadTail(ramp, 20, 0, 18) == 0);         // 12 yd: unter der Grenze fuer festgenagelte Stuecke
+    CHECK(ramp.size() == 3);
+    CHECK(AT::TrimDeadTail(ramp, 99, 99, 99) == 0);
+    CHECK(ramp.size() == 3);
 }
 
 int main()
@@ -968,6 +1070,7 @@ int main()
     TestPickAnchorQuest();
     TestPickAnchorRules();
     TestPartialLooksStuck();
+    TestTrimDeadTail();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);
     return sFailures ? 1 : 0;

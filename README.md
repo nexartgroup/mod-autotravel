@@ -174,33 +174,49 @@ hoechstens 74 Polygone. Ist der Weg laenger oder verwinkelter, als der Pool herg
 die Exodar, deren Ausgang hunderte Yards entfernt liegt --, ist die Suche erschoepft, bevor sie das
 Ziel erreicht. Detour gibt dann nicht "keinen Weg" zurueck, sondern den Knoten mit der kleinsten
 **Luftlinie** zum Ziel. Liegt das Ziel eine Etage hoeher (der NPC an der Oberflaeche, der Spieler
-in der Stadt), ist das die Stelle im Innenraum direkt darunter: eine Wand. Der Charakter lief dort
-hin, "kletterte" die letzte steile Flaeche hinauf, und die Bodenrettung setzte ihn zurueck.
+in der Stadt), ist das die Stelle im Innenraum direkt darunter: eine Wand.
+
+Dazu kommt eine Eigenheit von Detour: liegt x/y des Ziels im letzten Polygon dieses Teilwegs, setzt
+`findStraightPath` den **letzten Punkt auf die Zielposition selbst**, mit ihrer Hoehe (die Funktion
+`closestPointOnPolyBoundary` gibt die Position dann unveraendert zurueck). Der Teilweg endet scheinbar
+am NPC, 139 yd ueber dem Boden. Im geglaetteten Weg (dem ersten Kandidaten) laeuft der Weg in
+4-yd-Schritten am Boden bis unter das Ziel und haengt dann die Zielposition an: ein rein senkrechtes
+Stueck; im Eckpunkt-Weg, in einem grossen Polygon, ist es eine lange Schraege. Der Charakter lief dorthin, "kletterte" in kleinen Spruengen die Wand hinauf, und die
+Bodenrettung setzte ihn zurueck -- oder er wurde durch die Decke an die Oberflaeche versetzt.
 Spiegelbildlich trifft es ein Ziel im Innenraum, wenn der Spieler draussen steht.
 
 Mit einem Modell (`tools/tests/search_test.cpp`: Innenraum mit 2300 Polygonen, 280 yd lange Rampe,
-Ziel 140 yd hoeher senkrecht darueber) laesst sich das nachstellen: der 1024-Knoten-Wegfinder
-endet unter dem Ziel, `PARTIAL | OUT_OF_NODES`; mit grossem Pool findet dieselbe Suche den Weg ueber die
-Rampe -- in unter einer Millisekunde.
+Ziel 140 yd hoeher senkrecht darueber) und der echten Ausgabe von Detour laesst sich das nachstellen: der
+1024-Knoten-Wegfinder endet unter dem Ziel, `PARTIAL | OUT_OF_NODES`, sein letzter Punkt ist meist die
+Zielposition in 140 yd Hoehe; mit grossem Pool findet dieselbe Suche den Weg ueber die Rampe -- in
+unter einer Millisekunde.
 
-* **Ausloeser.** Liefert der PathGenerator einen Teilweg, und sieht der verdaechtig aus
-  (`AT::PartialLooksStuck`: er endet fast senkrecht unter oder ueber dem Ziel, oder er bringt das Ziel
-  in 3D kaum naeher), laeuft eine **eigene Suche** (`AutoTravel_Search.cpp`) mit `ExtendedSearchNodes`
-  Knoten (16384) und einer Zeitgrenze von `ExtendedSearchMs` (30 ms). Ein langer Weg ueber freies Gelaende,
-  den der PathGenerator nur wegen seiner Laengengrenze abschneidet, loest sie nicht aus.
+* **Endstueck abschneiden.** Bei einem Teilweg wird das letzte Wegstueck entfernt, wenn man es nicht
+  ablaufen kann (`AT::TrimDeadTail`): es steigt oder faellt um mindestens 12 yd und geht dabei weniger als
+  ein Zweieinhalbtel davon zur Seite (Treppen und Rampen sind flacher), oder es endet genau auf der
+  Zielposition und ueberwindet dabei mindestens 20 yd. Erst danach wird beurteilt, wo der Teilweg endet.
+* **Ausloeser.** Fiel ein solches Stueck weg, oder sieht das Ende verdaechtig aus
+  (`AT::PartialLooksStuck`: es liegt fast senkrecht unter oder ueber dem Ziel, auf anderer Hoehe in der
+  Naehe, oder das Ziel ist in 3D kaum naeher als vom Start), laeuft eine **eigene Suche**
+  (`AutoTravel_Search.cpp`) mit `ExtendedSearchNodes` Knoten (65535, Detours Hoechstwert), einer
+  Zeitgrenze von `ExtendedSearchMs` (30 ms) und den Kosten des PathGenerators, **Steigung eingerechnet**:
+  sonst ersetzte sie seinen Weg durch einen steileren. Ein langer Weg ueber freies Gelaende, den der
+  PathGenerator nur wegen seiner Laengengrenze abschneidet, loest sie nicht aus.
 * **Ergebnis.** Die Suche liefert nur einen **durchgehenden** Weg, der das Zielpolygon erreicht; er
   ersetzt den Teilweg. Ein erschoepfter Suchraum liefert keinen Weg (die Suche gibt den
   "naechsten Knoten" nicht als Weg aus).
-* **Keine Verbindung.** Findet auch die erweiterte Suche keinen Weg, bleibt der Teilweg gueltig (er
-  bringt den Charakter so nah wie moeglich). Endet er dabei fast senkrecht unter oder ueber dem Ziel
-  (Etagenunterschied ab 20 yd, in der Ebene hoechstens 30 yd, bei weiten Wegen bis 60 yd), erfaehrt der
-  Spieler es einmal: "endet vermutlich in einer Sackgasse ..." mit dem Grund -- *keine Verbindung im
-  NavMesh* (der Suchraum ist erschoepft; ein Datenproblem der mmaps, das das Modul nicht beheben kann),
-  oder *Suchpool erschoepft / Zeitgrenze erreicht* (Werte erhoehen: `.at set extnodes 65535`,
-  `.at set extms 100`). Bei einem blossen Verdacht (kaum Fortschritt) bleibt es bei der Debug-Zeile.
+* **Keine Verbindung.** Findet auch die erweiterte Suche keinen Weg, bleibt vom Teilweg der begehbare
+  Teil -- ohne das senkrechte oder festgenagelte Endstueck. Bleibt davon nichts uebrig, oder endet er
+  fast senkrecht unter oder ueber dem Ziel (Etagenunterschied ab 20 yd, in der Ebene hoechstens 30 yd,
+  bei weiten Wegen bis 60 yd), erfaehrt der Spieler es einmal je Etappe: "endet vermutlich in einer
+  Sackgasse ..." mit dem Grund -- *keine Verbindung im NavMesh* (der Suchraum ist erschoepft; ein
+  Datenproblem der mmaps, das das Modul nicht beheben kann), oder *Suchpool erschoepft / Zeitgrenze
+  erreicht / Weg zu lang* (Werte erhoehen: `.at set extms 100`). Bei einem blossen Verdacht
+  (kaum Fortschritt) bleibt es bei der Debug-Zeile.
 * **Bremsen.** Je Kandidat laufen zwei Fassungen (glatt, Eckpunkte); die zweite nimmt das Ergebnis der
-  ersten. Nach einem Fehlschlag pausiert die Suche `ExtendedSearchRetryMs` (15 s), solange Spieler und
-  Ziel nicht merklich woanders sind.
+  ersten (vier Zwischenspeicher). Nach einem Fehlschlag pausiert die Suche `ExtendedSearchRetryMs`
+  (15 s; nach Zeitgrenze oder Fehler 2 s) **fuer diesen Start und dieses Ziel**, und je Wegberechnung
+  laufen hoechstens drei Suchen -- der Ersatzring um ein unerreichbares Ziel probiert 24 Punkte.
 * **`.at diag`** zeigt je Kandidat, ob der Weg aus der erweiterten Suche stammt, wie viele Suchschritte
   sie brauchte und -- bei einer Sackgasse -- warum sie keinen Ausweg fand.
 * `AutoTravel.ExtendedSearch = 0` schaltet sie ab.
@@ -514,9 +530,11 @@ Ein flacher Klon von `azerothcore-wotlk` genuegt (`git clone --depth 1`), dazu
    Clients verarbeitet: Zahlenparser, Textbereinigung, Namenspruefung. Sie laufen
    als eigenes Programm und brauchen nichts von AzerothCore ausser den Headern.
 4. **Wegsuche auf einem NavMesh** (`tools/tests/search_test.cpp`): ein selbstgebautes NavMesh
-   (Innenraum, Rampe, Oberflaeche) zeigt, dass der Wegfinder mit 1024 Knoten in der Sackgasse
-   endet und die erweiterte Suche den Ausgang findet; dazu ihre Grenzen (Pool, Zeit,
-   Weglaenge, kein Start- oder Zielpolygon, getrennte Insel). Detour wird aus
+   (Innenraum, Rampe, Oberflaeche) zeigt mit der echten Ausgabe von Detour, dass der Wegfinder mit
+   1024 Knoten in der Sackgasse endet, sein letzter Punkt auf die Zielposition festgenagelt ist,
+   das Abschneiden und die Erkennung greifen und die erweiterte Suche den Ausgang findet; dazu
+   die Steigungskosten (steiler Huegel gegen laengeren flachen Umweg) und die Grenzen der Suche (Pool,
+   Zeit, Weglaenge, kein Start- oder Zielpolygon, getrennte Insel). Detour wird aus
    `deps/recastnavigation` des angegebenen Standes mitgebaut.
 
 Das ersetzt **keinen echten Bau und keinen Test im Spiel**. Es prueft Syntax und
@@ -565,7 +583,7 @@ Eine neue Option eintragen:
 | "Das Ziel liegt auf einer anderen Karte ..., und AutoTravel findet keine Verbindung dorthin" | Kontinentwechsel braucht den Knotengraphen: `.at nodes` pruefen, `AutoTravel.UseTravelNodes = 1`. Enthaelt der Graph keine Schiffs-/Zeppelinverbindung zwischen den Karten, kann das Modul keine erfinden |
 | `.at diag` meldet "Kein passender Kartenausschnitt" | Die Zonenzuordnung des Clients stimmt nicht; `/at karten` im Addon, sonst `/at karte <id>` |
 | Der Charakter laeuft aus einer Stadt, die ueber- oder untereinanderliegende Etagen hat (Exodar, Dalaran, Unterstadt), oder die Reise endet ueber dem NPC | `.at diag` (mit Ziel): die Zeile "Anker:" zeigt, ob ein Spawn erkannt wurde, und "Ohne Anker waere die Zielhoehe" die alte Wahl. Steht dort "keiner", fehlt ein NPC mit Dienst oder Namen im Radius (`AutoTravel.AnchorRadius` hochsetzen, oder das Label des Carbonite-Ziels pruefen). Mit `.at debug` zeigen die Zeilen "Direktkandidat" und "Zielanker aktiv", welche Etage den Weg geliefert hat |
-| Der Charakter laeuft in einer Stadt mit mehreren Etagen (Exodar) unten in Richtung des NPCs an der Oberflaeche, gegen eine Wand, statt die Treppe hinauf aus der Stadt zu laufen, oder umgekehrt | Das war der Teilweg in die Sackgasse (4.0.7, siehe "Erweiterte Wegsuche"). `.at diag` zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in einer Sackgasse)" und darunter die Zeile "Erweiterte Wegsuche: ...". Dort steht, ob es keine Verbindung im NavMesh gibt oder der Suchpool nicht reichte (`AutoTravel.ExtendedSearchNodes`, `ExtendedSearchMs` erhoehen) |
+| Der Charakter laeuft in einer Stadt mit mehreren Etagen (Exodar) unten in Richtung des NPCs an der Oberflaeche, gegen eine Wand, statt die Treppe hinauf aus der Stadt zu laufen, oder umgekehrt | Das war der Teilweg in die Sackgasse (4.0.7, siehe "Erweiterte Wegsuche"). `.at diag` zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in einer Sackgasse)" und darunter die Zeile "Erweiterte Wegsuche: ...". Dort steht, ob es keine Verbindung im NavMesh gibt (ein Datenproblem der mmaps) oder die Zeitgrenze nicht reichte (`AutoTravel.ExtendedSearchMs` erhoehen) |
 | Charakter gleitet schnell durch die Luft, schiesst am Ziel vorbei, "huepft", oder hat nach dem Wasser Minischritte | Bis 4.0 ein Abschnitt, der die Paketkodierung sprengte (siehe AENDERUNGEN.md, "4.0.1"). Ab 4.0.1 darf es ihn nicht mehr geben: mit Debug zeigen die Zeilen `Abschnitt gestartet` Laenge in yd (hoechstens etwa 440), Tempo, Wasser/Land und die Bewegungskennzeichen des Spielers. Tritt es trotzdem auf, diese Zeilen mitschicken |
 
 `AutoTravel.Debug = 1` (oder `.at debug` je Spieler) schaltet ausfuehrliche

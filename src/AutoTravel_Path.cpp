@@ -56,6 +56,7 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
     out.extended = false;
     out.stuckEnd = false;
     out.note.clear();
+    out.reason.clear();
 
     if (!player)
         return false;
@@ -76,12 +77,14 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
         ATSession const* s = Find(player);
         if (s && DebugEnabled(*s))
         {
-            char b[288];
+            char b[320];
+            G3D::Vector3 const tail = out.points.empty() ? G3D::Vector3(0.0f, 0.0f, 0.0f) : out.points.back();
             std::snprintf(b, sizeof(b),
                           "PathGenerator: %.1f/%.1f/%.1f -> %.1f/%.1f/%.1f | "
-                          "built=%u type=0x%X (%s) Punkte=%u",
+                          "built=%u type=0x%X (%s) Punkte=%u letzter Punkt %.1f/%.1f/%.1f",
                           sx, sy, sz, dx, dy, dz, built ? 1u : 0u, out.type,
-                          AT::PathTypeName(out.type).c_str(), uint32(out.points.size()));
+                          AT::PathTypeName(out.type).c_str(), uint32(out.points.size()),
+                          tail.x, tail.y, tail.z);
             Dbg(player, *s, b);
         }
     }
@@ -176,38 +179,56 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
         return true;
     };
 
-    // --- Teilweg in die Sackgasse? -----------------------------------------
+    // --- Teilweg: Sackgasse? -------------------------------------------------
     //
-    // Liefert der PathGenerator nur einen Teilweg, und sieht der aus, als ende er unter
-    // oder ueber dem Ziel oder komme ihm kaum naeher, laeuft die erweiterte Wegsuche. Der
-    // Core sucht mit 1024 Knoten; in einer grossen Stadt mit mehreren Etagen (Exodar)
-    // sind die im Innenraum verbraucht, bevor die Suche den Ausgang erreicht, und der Teilweg
-    // endet an der Wand unter dem Ziel. Findet die erweiterte Suche einen durchgehenden
-    // Weg, ersetzt er den Teilweg.
-    if ((out.type & PATHFIND_INCOMPLETE) && ATConf.extendedSearch)
+    // Der PathGenerator liefert bei erschoepfter Suche den Knoten mit der kleinsten Luftlinie zum
+    // Ziel. Liegt das Ziel eine Etage hoeher oder tiefer, ist das die Stelle direkt darunter oder
+    // darueber: eine Wand. Der Core sucht mit 1024 Knoten; in einer grossen Stadt mit mehreren
+    // Etagen (Exodar) sind die im Innenraum verbraucht, bevor die Suche den Ausgang erreicht.
+    //
+    // 1. Ein letztes Wegstueck, das man nicht ablaufen kann, wird abgeschnitten (AT::TrimDeadTail):
+    //    liegt x/y des Ziels im letzten Polygon, setzt Detour den letzten Punkt auf die ZIELPOSITION
+    //    mit ihrer Hoehe -- senkrecht oder, in einem grossen Polygon, als lange Schraege -- und der
+    //    Spline risse den Charakter 139 yd hoch durch die Decke.
+    // 2. Sieht das Ende nach Sackgasse aus (oder fiel ein solches Stueck weg), laeuft die erweiterte
+    //    Wegsuche und ersetzt den Teilweg durch einen durchgehenden.
+    // 3. Findet sie keinen, bleibt der gekuerzte Teilweg gueltig (so nah wie moeglich), und der Spieler
+    //    erfaehrt es, wenn er unter oder ueber dem Ziel endet.
+    if (out.type & PATHFIND_INCOMPLETE)
     {
-        G3D::Vector3 const& last = out.points.back();
-        if (AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, last.x, last.y, last.z))
+        bool const deadTail = AT::TrimDeadTail(out.points, dx, dy, dz) > 0;
+        G3D::Vector3 const end = out.points.back();
+
+        bool const suspicious = deadTail || AT::PartialLooksStuck(sx, sy, sz, dx, dy, dz, end.x, end.y, end.z);
+        if (suspicious)
         {
-            ATPathResult ext;
-            bool const found = ExtendedPath(player, sx, sy, sz, dx, dy, dz, ext);
-            if (found && plausible(ext.points))
+            if (ATConf.extendedSearch)
             {
-                out.points = std::move(ext.points);
-                out.type = PATHFIND_NORMAL;
-                out.incomplete = false;
-                out.extended = true;
+                ATPathResult ext;
+                bool const found = ExtendedPath(player, sx, sy, sz, dx, dy, dz, ext);
+                if (found && plausible(ext.points))
+                {
+                    out.points = std::move(ext.points);
+                    out.type = ext.type;
+                    out.incomplete = ext.incomplete;
+                    out.extended = true;
+                    out.note = ext.note;
+                    out.valid = true;
+                    return true;
+                }
+
+                out.reason = found ? "der gefundene Weg liegt nicht auf begehbaren Flaechen" : ext.reason;
                 out.note = ext.note;
-                out.valid = true;
-                return true;
             }
 
             // "Sackgasse" erfaehrt der Spieler nur, wenn das Ende wirklich unter oder ueber dem Ziel
             // liegt; bei einem blossen Verdacht (kaum Fortschritt) bleibt es bei der Debug-Zeile.
-            out.stuckEnd = AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, last.x, last.y, last.z);
-            out.note = found ? ext.note + " - der Weg liegt nicht auf begehbaren Flaechen und wurde verworfen"
-                             : ext.note;
+            out.stuckEnd = deadTail || AT::PartialEndsUnderTarget(sx, sy, sz, dx, dy, dz, end.x, end.y, end.z);
         }
+
+        // Vom Teilweg bleibt nichts Begehbares: nur der Start und der senkrechte Sprung zum Ziel.
+        if (out.points.size() < 2)
+            return false;
     }
 
     if (!plausible(out.points))
@@ -227,9 +248,10 @@ bool AutoTravelMgr::TryPathBetween(Player* player,
 //
 //   * Zwischenspeicher: je Kandidat laufen zwei Fassungen (glatt und Eckpunkte) mit
 //     demselben Start und Ziel. Die zweite nimmt das Ergebnis der ersten.
-//   * Pause nach einem Fehlschlag: wer von einer Stelle aus keinen Weg findet, findet ihn
-//     eine Sekunde spaeter auch nicht. Die Suche ist billig (ein paar Millisekunden), aber
-//     sie soll nicht in jedem Takt und nicht fuer jeden Ersatzpunkt des Rings laufen.
+//   * Pause nach einem Fehlschlag, je Start und Ziel: wer von einer Stelle aus keinen Weg zu einem Ziel
+//     findet, findet ihn eine Sekunde spaeter auch nicht (ausser, die Suche scheiterte an der Zeit).
+//   * Obergrenze je Wegberechnung (drei Suchen): die Suche kostet im Mittel unter einer Millisekunde,
+//     eine erschoepfte rund drei bis sechs, aber der Ersatzring probiert 24 Ziele.
 //
 // Die Punkte werden NICHT durch UpdateAllowedPositionZ gezogen wie die des PathGenerators:
 // bei bis zu 2048 Punkten wuerde das tausende Hoehenabfragen kosten, und LaunchChunk legt
@@ -262,32 +284,52 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
         return std::sqrt(x * x + y * y + z * z);
     };
 
+    // Obergrenze je Wegberechnung: die Suche ist billig, aber der Ersatzring um ein unerreichbares Ziel
+    // probiert 24 Punkte, und jeder soll nicht noch einmal eine Suche kosten.
+    constexpr uint32 MAX_SEARCHES_PER_CALCULATION = 3;
+
     if (s)
     {
-        ATExtMemo const& m = s->extMemo;
-        if (m.valid && uint32(now - m.atMs) < 2000
-            && dist3(sx, sy, sz, m.sx, m.sy, m.sz) < 1.0f && dist3(dx, dy, dz, m.dx, m.dy, m.dz) < 1.0f)
+        for (ATExtMemo const& m : s->extMemo)
         {
-            out.points = m.points;
-            out.type = PATHFIND_NORMAL;
-            out.valid = true;
-            out.extended = true;
-            char b[160];
-            std::snprintf(b, sizeof(b), "Erweiterte Wegsuche: vollstaendig (vom vorigen Versuch uebernommen) | %u Punkte",
-                          uint32(out.points.size()));
-            out.note = b;
-            return true;
+            if (m.valid && uint32(now - m.atMs) < 2000
+                && dist3(sx, sy, sz, m.sx, m.sy, m.sz) < 1.0f && dist3(dx, dy, dz, m.dx, m.dy, m.dz) < 1.0f)
+            {
+                out.points = m.points;
+                out.type = m.type;
+                out.incomplete = m.incomplete;
+                out.valid = true;
+                out.extended = true;
+                char b[160];
+                std::snprintf(b, sizeof(b),
+                              "Erweiterte Wegsuche: vollstaendig (vom vorigen Versuch uebernommen) | %u Punkte",
+                              uint32(out.points.size()));
+                out.note = b;
+                return true;
+            }
         }
 
-        // Vom selben Ort, gleich zu welchem Ziel: der Ersatzring um ein unerreichbares Ziel probiert
-        // 24 Punkte, und jeder soll nicht noch einmal eine Suche kosten.
-        if (s->extFailAtMs && uint32(now - s->extFailAtMs) < ATConf.extendedRetryMs
-            && AT::Dist2D(sx, sy, s->extFailSX, s->extFailSY) < 12.0f)
+        // Von derselben Stelle zum selben Ziel: eine erfolglose Suche wird nicht in jedem Takt wiederholt.
+        for (ATExtFail const& f : s->extFail)
         {
-            out.note = "Erweiterte Wegsuche: pausiert; der letzte Versuch von hier aus blieb ohne Weg ("
-                     + s->extFailNote + ")";
+            if (f.atMs && uint32(now - f.atMs) < f.retryMs
+                && AT::Dist2D(sx, sy, f.sx, f.sy) < 12.0f && AT::Dist2D(dx, dy, f.dx, f.dy) < 4.0f)
+            {
+                out.reason = f.reason;
+                out.note = "Erweiterte Wegsuche: pausiert; der letzte Versuch von hier zu diesem Ziel blieb ohne Weg ("
+                         + f.reason + ")";
+                return false;
+            }
+        }
+
+        if (s->extCalls >= MAX_SEARCHES_PER_CALCULATION)
+        {
+            out.reason = "Suchgrenze dieser Wegberechnung erreicht";
+            out.note = "Erweiterte Wegsuche: in dieser Wegberechnung wurden schon " +
+                       std::to_string(MAX_SEARCHES_PER_CALCULATION) + " Suchen gestartet";
             return false;
         }
+        ++s->extCalls;
     }
 
     AT::NavSearchLimits limits;
@@ -304,6 +346,7 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
                   AT::NavSearchStatusText(r.status), r.nodes, ATConf.extendedNodes, r.polys, r.ms,
                   ATConf.extendedMs);
     out.note = b;
+    out.reason = AT::NavSearchStatusText(r.status);
     if (s && DebugEnabled(*s))
         Dbg(player, *s, b);
 
@@ -311,10 +354,18 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
     {
         if (s)
         {
-            s->extFailAtMs = now;
-            s->extFailSX = sx;
-            s->extFailSY = sy;
-            s->extFailNote = std::string(AT::NavSearchStatusText(r.status));
+            ATExtFail& f = s->extFail[s->extFailNext];
+            s->extFailNext = uint8((s->extFailNext + 1) % AT_EXT_SLOTS);
+            f.atMs = now;
+            // An der Zeit gescheitert (Lastspitze) oder am Pool: der Pool aendert sich nicht von selbst, die
+            // Zeit schon.
+            f.retryMs = (r.status == AT::NavSearchStatus::TimedOut || r.status == AT::NavSearchStatus::Failed)
+                ? std::min<uint32>(2000, ATConf.extendedRetryMs) : ATConf.extendedRetryMs;
+            f.sx = sx;
+            f.sy = sy;
+            f.dx = dx;
+            f.dy = dy;
+            f.reason = AT::NavSearchStatusText(r.status);
         }
         return false;
     }
@@ -323,20 +374,35 @@ bool AutoTravelMgr::ExtendedPath(Player* player,
     for (size_t i = 0; i + 2 < r.points.size(); i += 3)
         out.points.push_back(G3D::Vector3(r.points[i], r.points[i + 1], r.points[i + 2]));
 
-    out.type = PATHFIND_NORMAL;
-    out.incomplete = false;
+    // Wie der PathGenerator: liegt Start oder Ziel mehr als 7 yd neben dem NavMesh, ist der Weg
+    // unvollstaendig. Sonst gewaenne eine erfundene Zielhoehe ueber dem Boden gegen die echte Etage.
+    constexpr float FAR_FROM_POLY = 7.0f;
+    uint32 type = PATHFIND_NORMAL;
+    if (r.startDist > FAR_FROM_POLY || r.endDist > FAR_FROM_POLY)
+    {
+        type = PATHFIND_INCOMPLETE;
+        if (r.startDist > FAR_FROM_POLY)
+            type |= PATHFIND_FARFROMPOLY_START;
+        if (r.endDist > FAR_FROM_POLY)
+            type |= PATHFIND_FARFROMPOLY_END;
+    }
+    out.type = type;
+    out.incomplete = (type & PATHFIND_INCOMPLETE) != 0;
     out.extended = true;
     out.valid = true;
+    out.reason.clear();
 
     if (s)
     {
-        s->extFailAtMs = 0;
-        ATExtMemo& m = s->extMemo;
+        ATExtMemo& m = s->extMemo[s->extMemoNext];
+        s->extMemoNext = uint8((s->extMemoNext + 1) % AT_EXT_SLOTS);
         m.valid = true;
         m.atMs = now;
         m.sx = sx; m.sy = sy; m.sz = sz;
         m.dx = dx; m.dy = dy; m.dz = dz;
         m.points = out.points;
+        m.type = out.type;
+        m.incomplete = out.incomplete;
         m.nodes = r.nodes;
     }
     return true;
@@ -773,6 +839,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     if (ShouldFly(player, s) && BuildAirPath(player, s))
         return true;
 
+    s.extCalls = 0;                  // Obergrenze der erweiterten Suchen gilt je Wegberechnung
+
     Map* map = player->GetMap();
     uint32 phase = player->GetPhaseMask();
     float pz = player->GetPositionZ();
@@ -849,6 +917,23 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     float bestDestY = s.destY;
     float bestDestZ = s.destZ;
 
+    // Ein Teilweg, von dem nach dem Abschneiden nichts Begehbares blieb, ist kein Kandidat. Der Spieler
+    // soll trotzdem erfahren, warum der Charakter nicht zum Ziel laeuft, auch wenn ein Rueckfall danach
+    // einen Weg liefert.
+    ATPathResult deadEnd;
+
+    // "Sackgasse" erfaehrt der Spieler nur einmal je Etappe.
+    auto warnDeadEnd = [&](ATPathResult const& r)
+    {
+        if (s.extWarned)
+            return;
+        s.extWarned = true;
+        Msg(player, "Der Weg zum Ziel endet vermutlich in einer Sackgasse: Das Ziel liegt auf einer anderen "
+                    "Etage" + (r.reason.empty() ? std::string(".") : " (" + r.reason + ")."));
+        if (!r.note.empty())
+            Msg(player, r.note);
+    };
+
     auto evaluateDirect = [&]()
     {
         for (uint8 pass = 0; pass < 2; ++pass)
@@ -861,7 +946,11 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
                 if (!TryPathBetween(player,
                                     player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
                                     xc[i], yc[i], zc[i], straight, cand))
+                {
+                    if (cand.stuckEnd && !deadEnd.stuckEnd)
+                        deadEnd = cand;
                     continue;
+                }
 
                 cand.score = ATConf.naturalPathing
                     ? ScoreNaturalPath(player, cand.points, cand.incomplete)
@@ -911,6 +1000,9 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 
     evaluateDirect();
 
+    if (!best.valid && deadEnd.stuckEnd)
+        warnDeadEnd(deadEnd);
+
     if (anchored && !best.valid)
     {
         // Liegt das Ziel unter dem Gelaende, ist die Oberflaeche darueber kein Ersatz.
@@ -940,7 +1032,9 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
     // aussieht. Andernfalls waeren das acht zusaetzliche Pfadsuchen ohne Grund.
     // Bei einem verdeckten Ziel (Stadt unter dem Gelaende) sind Rampen und Treppen keine
     // Berge, und die Seitenpunkte wuerden nach der Hoehe des Spielers gesucht.
-    if (ATConf.contourProbing && best.valid && !(anchored && s.anchor.covered)
+    // Ein durchgehender Weg aus der erweiterten Suche braucht keine Umgehung: er ist meist laenger als
+    // das Mehrfache der Luftlinie (Rampe, Treppe), die Proben wuerden verworfen und kosten bis zu 24 Wegberechnungen.
+    if (ATConf.contourProbing && best.valid && !best.extended && !(anchored && s.anchor.covered)
         && HasMountainClimb(best.points))
     {
         Dbg(player, s, "Berganstieg erkannt - Contour-Suche wird gestartet.");
@@ -999,13 +1093,8 @@ bool AutoTravelMgr::CalculatePath(Player* player, ATSession& s)
 
         // Ein Teilweg, der unter oder ueber dem Ziel endet, und eine erweiterte Suche, die keinen
         // Ausweg fand: der Charakter laeuft in die Sackgasse. Das soll der Spieler erfahren, einmal.
-        if (best.stuckEnd && !s.extWarned)
-        {
-            s.extWarned = true;
-            Msg(player, "Der Weg zum Ziel endet vermutlich in einer Sackgasse: Das Ziel liegt auf einer anderen "
-                        "Etage, und die Suche fand keinen durchgehenden Weg dorthin.");
-            Msg(player, best.note);
-        }
+        if (best.stuckEnd)
+            warnDeadEnd(best);
         return true;
     }
 

@@ -54,6 +54,11 @@ namespace AT
         int    polys = 0;            // Laenge des Polygonwegs
         int    nodes = 0;            // abgearbeitete Suchschritte
         double ms    = 0.0;
+        // Abstand von Start und Ziel zum gewaehlten Polygon (yd). Der PathGenerator wertet ein Ziel,
+        // das mehr als 7 yd neben dem NavMesh liegt, als unvollstaendig ("FARFROMPOLY"); wer die
+        // Suche benutzt, kann das ebenso tun.
+        float  startDist = 0.0f;
+        float  endDist   = 0.0f;
     };
 
     // Start und Ziel in WELTKOORDINATEN (x, y, z); intern wird nach Detour (y, z, x) gedreht.

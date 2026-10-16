@@ -17,11 +17,13 @@
 
 #include "AutoTravel_Search.h"
 
+#include "DetourCommon.h"
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 
 namespace AT
@@ -33,20 +35,47 @@ namespace AT
             void operator()(dtNavMeshQuery* q) const { dtFreeNavMeshQuery(q); }
         };
 
+        // Dieselben Kosten wie dtQueryFilterExt, den der PathGenerator des Cores benutzt
+        // (src/common/Navigation/DetourExtended.cpp): Strecke mal (1 + Steigung in Grad / 100) mal
+        // Flaechenkosten. Ohne die Steigung suchte die erweiterte Suche kuerzere, aber steilere Wege
+        // als der Core und ersetzte seinen Teilweg durch einen, den er nicht gewaehlt haette.
+        class SlopeFilter : public dtQueryFilter
+        {
+        public:
+            float getCost(float const* pa, float const* pb,
+                          dtPolyRef const, dtMeshTile const*, dtPoly const*,
+                          dtPolyRef const, dtMeshTile const*, dtPoly const* curPoly,
+                          dtPolyRef const, dtMeshTile const*, dtPoly const*) const override
+            {
+                // Detour-Koordinaten (y, z, x): Hoehe ist Index 1.
+                float const floorDist = std::sqrt((pa[0] - pb[0]) * (pa[0] - pb[0]) + (pa[2] - pb[2]) * (pa[2] - pb[2]));
+                float const rise = std::fabs(pb[1] - pa[1]);
+                float const degrees = std::atan(rise / std::fabs(floorDist)) * 180.0f / 3.14159265358979f;
+                float const cost = degrees > 0.0f ? 1.0f + degrees / 100.0f : 1.0f;
+                return dtVdist(pa, pb) * cost * getAreaCost(curPoly->getArea());
+            }
+        };
+
         // Wie PathGenerator::GetPolyByLocation: erst eine flache, dann eine hohe Suchbox.
-        // Die hohe Box faengt Punkte ab, die ueber oder unter der Flaeche liegen.
-        bool PickPoly(dtNavMeshQuery const& q, dtQueryFilter const& filter, float const* p, dtPolyRef& ref)
+        // Die hohe Box faengt Punkte ab, die ueber oder unter der Flaeche liegen. 'dist' ist der
+        // Abstand des Punkts zum gefundenen Polygon.
+        bool PickPoly(dtNavMeshQuery const& q, dtQueryFilter const& filter, float const* p,
+                      dtPolyRef& ref, float& dist)
         {
             float extents[3] = { 3.0f, 5.0f, 3.0f };
             float nearest[3] = { 0.0f, 0.0f, 0.0f };
 
             ref = 0;
-            if (dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref)
-                return true;
-
-            extents[1] = 50.0f;
-            ref = 0;
-            return dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref;
+            bool found = dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref;
+            if (!found)
+            {
+                extents[1] = 50.0f;
+                ref = 0;
+                found = dtStatusSucceed(q.findNearestPoly(p, extents, &filter, &ref, nearest)) && ref;
+            }
+            if (found)
+                dist = dtVdist(p, nearest);
+            return found;
         }
     }
 
@@ -99,14 +128,14 @@ namespace AT
         if (dtStatusFailed(query->init(nav, maxNodes)))
             return finish(NavSearchStatus::Failed);
 
-        dtQueryFilter filter;
+        SlopeFilter filter;
         filter.setIncludeFlags(limits.includeFlags);
         filter.setExcludeFlags(limits.excludeFlags);
 
         dtPolyRef startRef = 0, endRef = 0;
-        if (!PickPoly(*query, filter, start, startRef))
+        if (!PickPoly(*query, filter, start, startRef, res.startDist))
             return finish(NavSearchStatus::NoStartPoly);
-        if (!PickPoly(*query, filter, end, endRef))
+        if (!PickPoly(*query, filter, end, endRef, res.endDist))
             return finish(NavSearchStatus::NoEndPoly);
 
         int const maxPolys = std::max(16, limits.maxPolys);
@@ -156,8 +185,9 @@ namespace AT
             if (polys[size_t(polyCount - 1)] != endRef || (fs & DT_PARTIAL_RESULT))
             {
                 // Ohne Ziel: war der Pool zu klein, ist das Ergebnis nicht aussagekraeftig.
-                return finish((fs & DT_BUFFER_TOO_SMALL) ? NavSearchStatus::TooLong
-                              : (outOfNodes ? NavSearchStatus::OutOfNodes : NavSearchStatus::Partial));
+                return finish(outOfNodes ? NavSearchStatus::OutOfNodes
+                              : ((fs & DT_BUFFER_TOO_SMALL) ? NavSearchStatus::TooLong
+                                                            : NavSearchStatus::Partial));
             }
         }
 

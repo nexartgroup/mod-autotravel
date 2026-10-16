@@ -407,18 +407,29 @@ bool AutoTravelMgr::CheckGroundContact(Player* player, ATSession& s)
 
     if (!s.path.empty())
     {
-        // Der naechste Punkt im RAUM, nicht in der Ebene: eine Rampe oder Wendeltreppe liegt
-        // in X/Y uebereinander, und der Punkt der falschen Windung liefe als Bezugshoehe.
-        float best = 1.0e30f;
+        // Der naechste Punkt in der EBENE ist die Bezugshoehe: bei einem Charakter, der durch eine Stufe
+        // gerutscht ist, liegt der Pfadpunkt an derselben Stelle genau auf dem Boden. Eine Rampe oder
+        // Wendeltreppe liegt in X/Y aber uebereinander; unter den Punkten, die kaum weiter weg liegen
+        // als der naechste, zaehlt deshalb der mit der kleinsten Hoehenabweichung.
+        float bestD2 = 1.0e30f;
         for (size_t i = 0; i < s.path.size(); ++i)
         {
             float dx = s.path[i].x - px;
             float dy = s.path[i].y - py;
-            float dz = s.path[i].z - pz;
-            float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 < best)
+            bestD2 = std::min(bestD2, dx * dx + dy * dy);
+        }
+        float const window = std::sqrt(bestD2) + 2.0f;
+        float bestDz = 1.0e30f;
+        for (size_t i = 0; i < s.path.size(); ++i)
+        {
+            float dx = s.path[i].x - px;
+            float dy = s.path[i].y - py;
+            if (dx * dx + dy * dy > window * window)
+                continue;
+            float dz = std::fabs(s.path[i].z - pz);
+            if (dz < bestDz)
             {
-                best = d2;
+                bestDz = dz;
                 refBase = s.path[i].z;
                 haveRef = true;
             }

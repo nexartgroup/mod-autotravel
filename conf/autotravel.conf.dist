@@ -604,14 +604,14 @@ AutoTravel.ExtendedSearch = 1
 #    Suchknoten der erweiterten Suche (der Core nimmt 1024)
 #    erlaubt: 2048 bis 65535
 #    Laufzeitschluessel: extnodes
-AutoTravel.ExtendedSearchNodes = 16384
+AutoTravel.ExtendedSearchNodes = 65535
 
 #    Zeitgrenze je erweiterter Suche (ms)
 #    erlaubt: 5 bis 500
 #    Laufzeitschluessel: extms
 AutoTravel.ExtendedSearchMs = 30
 
-#    Pause nach einer erfolglosen erweiterten Suche vom selben Ort (ms)
+#    Pause nach einer erfolglosen erweiterten Suche, je Start und Ziel (ms)
 #    erlaubt: 1000 bis 600000
 #    Laufzeitschluessel: extretry
 AutoTravel.ExtendedSearchRetryMs = 15000

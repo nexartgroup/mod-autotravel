@@ -655,8 +655,10 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.anchorZRefusals = 0;
         s.anchorWarned = false;
         s.extWarned = false;
-        s.extFailAtMs = 0;
-        s.extMemo.valid = false;
+        for (ATExtFail& f : s.extFail)
+            f.atMs = 0;
+        for (ATExtMemo& m : s.extMemo)
+            m.valid = false;
 
         if (s.anchor.found)
         {
