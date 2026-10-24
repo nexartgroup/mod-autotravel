@@ -641,3 +641,87 @@ std::string AT::AnchorFlagsText(uint32 flags)
         out = "-";
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Wegpunktketten
+// ---------------------------------------------------------------------------
+
+AT::LegArt AT::ParseLegArt(uint32 art)
+{
+    LegArt out;
+    out.taxi = (art & 1u) != 0;
+    out.waypoint = (art & 2u) != 0;
+    return out;
+}
+
+size_t AT::SegmentEnd(std::vector<bool> const& waypoint, size_t from)
+{
+    if (waypoint.empty())
+        return 0;
+
+    size_t const last = waypoint.size() - 1;
+    if (from >= last)
+        return last;
+
+    for (size_t i = from; i < last; ++i)
+    {
+        if (waypoint[i])
+            return i;
+    }
+    return last;
+}
+
+AT::SegmentSpan AT::SegmentOf(std::vector<bool> const& waypoint, size_t legIdx)
+{
+    SegmentSpan out;
+    if (waypoint.empty())
+        return out;
+
+    size_t const lastIdx = waypoint.size() - 1;
+    if (legIdx > lastIdx)
+        legIdx = lastIdx;
+
+    out.last = SegmentEnd(waypoint, legIdx);
+    for (size_t i = legIdx; i > 0; --i)
+    {
+        if (waypoint[i - 1])
+        {
+            out.first = i;
+            break;
+        }
+    }
+    return out;
+}
+
+void AT::ReplaceSegment(std::vector<ATLeg>& route, size_t from, size_t segEnd,
+                        std::vector<ATLeg> const& planned, ATLeg const& end)
+{
+    if (from > segEnd || segEnd >= route.size())
+        return;
+
+    route.erase(route.begin() + std::ptrdiff_t(from), route.begin() + std::ptrdiff_t(segEnd) + 1);
+    auto pos = route.begin() + std::ptrdiff_t(from);
+    pos = route.insert(pos, planned.begin(), planned.end());
+    route.insert(pos + std::ptrdiff_t(planned.size()), end);
+}
+
+AT::ChainState AT::ChainProgress(std::vector<bool> const& waypoint, size_t legIdx)
+{
+    ChainState out;
+    if (waypoint.empty())
+        return out;
+
+    // Die letzte Etappe ist immer ein Pflichtpunkt, ob markiert oder nicht; sie wird deshalb
+    // nicht aus den Markierungen gezaehlt, sondern einmal dazugerechnet.
+    size_t const last = waypoint.size() - 1;
+    out.total = 1;
+    for (size_t i = 0; i < last; ++i)
+    {
+        if (!waypoint[i])
+            continue;
+        ++out.total;
+        if (i < legIdx)
+            ++out.done;
+    }
+    return out;
+}

@@ -164,6 +164,34 @@ void AutoTravelMgr::Finish(Player* player, ATSession& s, std::string const& text
     PushStatus(player, s);
 }
 
+// Die Route ist erschoepft (AdvanceLeg() gab false zurueck): angekommen -- oder, wenn die Planung
+// des naechsten Abschnitts einer Wegpunktkette scheiterte, mit dem Grund beendet. Ohne die
+// Unterscheidung meldete ein Wegpunkt auf einer nicht erreichbaren Karte "Ziel erreicht".
+void AutoTravelMgr::FinishRoute(Player* player, ATSession& s)
+{
+    if (!s.endError.empty())
+    {
+        std::string why = s.endError;
+        s.endError.clear();
+        Finish(player, s, why, false);
+        return;
+    }
+    Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+}
+
+// Wie die aktuelle Etappe in Meldungen heisst: "Wegpunkt 2/4" bei einem Wegpunkt einer Kette, sonst
+// "Stuetzpunkt 7" (die Nummer in der Route).
+std::string AutoTravelMgr::LegLabel(ATSession const& s) const
+{
+    AT::ChainState const chain = AT::ChainProgress(s.WaypointFlags(), s.legIdx);
+    char b[64];
+    if (chain.IsChain() && s.legIdx < s.route.size() && s.route[s.legIdx].waypoint)
+        std::snprintf(b, sizeof(b), "Wegpunkt %u/%u", uint32(chain.done + 1), uint32(chain.total));
+    else
+        std::snprintf(b, sizeof(b), "Stuetzpunkt %u", uint32(s.legIdx + 1));
+    return b;
+}
+
 // ---------------------------------------------------------------------------
 // Uebergabe an den Spieler
 // ---------------------------------------------------------------------------
@@ -569,7 +597,7 @@ bool AutoTravelMgr::CheckTransport(Player* player, ATSession& s, uint32 diff)
         {
             if (!AdvanceLeg(player, s))
             {
-                Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+                FinishRoute(player, s);
                 return true;
             }
         }
@@ -650,6 +678,11 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             {
                 Msg(player, "Neue Karte erreicht - die Reise wird fortgesetzt.");
                 PushStatus(player, s);
+                return;
+            }
+            if (!s.endError.empty())
+            {
+                FinishRoute(player, s);
                 return;
             }
         }
@@ -740,7 +773,10 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
     // --- Ankunft an der aktuellen Etappe -----------------------------------
     bool lastLeg = (s.legIdx + 1 >= s.route.size());
-    float radius = lastLeg ? ArrivalDist(s) : ATConf.legDistance;
+
+    // Ein Wegpunkt ist ein Ziel des Spielers und gilt mit dem Zielradius als erreicht; die
+    // Stuetzpunkte dazwischen sind Wegmarken und brauchen nur den groesseren Radius.
+    float radius = (lastLeg || s.route[s.legIdx].waypoint) ? ArrivalDist(s) : ATConf.legDistance;
 
     // Beim Fliegen ist der Zielradius groesser, sonst kreist der Charakter.
     if (s.flying && !lastLeg)
@@ -795,7 +831,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
             Msg(player, "Der Flug kam nicht zustande - es geht zu Fuss weiter.");
             if (!AdvanceLeg(player, s))
             {
-                Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+                FinishRoute(player, s);
                 return;
             }
             PushStatus(player, s);
@@ -830,6 +866,10 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         // --- Normale Etappe ------------------------------------------------
         HaltMovement(player, s);
 
+        // Ein Wegpunkt der Kette: sagen, wo die Reise steht. Der letzte meldet "Ziel erreicht".
+        if (cur.waypoint && !lastLeg && AT::ChainProgress(s.WaypointFlags(), s.legIdx).IsChain())
+            Msg(player, LegLabel(s) + " erreicht.");
+
         if (AdvanceLeg(player, s))
         {
             PushStatus(player, s);
@@ -841,7 +881,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
         if (player->IsMounted() && player->CanFly())
             player->Dismount();
 
-        Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+        FinishRoute(player, s);
         return;
     }
 
@@ -857,7 +897,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 Msg(player, "Gelandet - die Reise wird fortgesetzt.");
                 if (!AdvanceLeg(player, s))
                 {
-                    Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+                    FinishRoute(player, s);
                     return;
                 }
                 PushStatus(player, s);
@@ -899,7 +939,7 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                     Msg(player, "Verbindung genutzt - die Reise wird fortgesetzt.");
                     if (!AdvanceLeg(player, s))
                     {
-                        Finish(player, s, "Ziel erreicht - " + s.destName + ".", true);
+                        FinishRoute(player, s);
                         return;
                     }
                     PushStatus(player, s);
@@ -927,7 +967,10 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                 Msg(player, "Die Verbindung kam nicht zustande - der Weg wird ohne sie gesucht.");
                 if (!AdvanceLeg(player, s))
                 {
-                    Finish(player, s, "Kein weiterer Stuetzpunkt - Reise beendet.", false);
+                    if (!s.endError.empty())
+                        FinishRoute(player, s);
+                    else
+                        Finish(player, s, "Kein weiterer Stuetzpunkt - Reise beendet.", false);
                     return;
                 }
                 PushStatus(player, s);
@@ -1019,14 +1062,15 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
                     // oft von hier aus erreichbar.
                     if (s.legIdx + 1 < s.route.size())
                     {
-                        char sb[192];
-                        std::snprintf(sb, sizeof(sb),
-                                      "Stuetzpunkt %u ist nicht erreichbar - er wird uebersprungen.",
-                                      uint32(s.legIdx + 1));
-                        Msg(player, sb);
+                        Msg(player, LegLabel(s) + " ist nicht erreichbar - er wird uebersprungen.");
                         if (AdvanceLeg(player, s))
                         {
                             PushStatus(player, s);
+                            return;
+                        }
+                        if (!s.endError.empty())
+                        {
+                            FinishRoute(player, s);
                             return;
                         }
                     }
@@ -1107,6 +1151,27 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                         if (s.stuckStrikes >= ATConf.maxRepathAttempts)
                         {
+                            // Eine Etappe, an die der Charakter nicht herankommt (Felswand, Dach,
+                            // See), soll eine Wegpunktkette nicht beenden: der Rest ist von hier aus
+                            // oft erreichbar -- wie bei einer fehlgeschlagenen Wegsuche (oben). Das
+                            // Endziel dagegen gibt auf, und eine einfache Reise bleibt, wie sie war.
+                            if (s.legIdx + 1 < s.route.size()
+                                && (s.route[s.legIdx].waypoint
+                                    || AT::ChainProgress(s.WaypointFlags(), s.legIdx).IsChain()))
+                            {
+                                Msg(player, LegLabel(s) + " ist nicht erreichbar - er wird uebersprungen.");
+                                HaltMovement(player, s);
+                                if (AdvanceLeg(player, s))
+                                {
+                                    PushStatus(player, s);
+                                    return;
+                                }
+                                if (!s.endError.empty())
+                                {
+                                    FinishRoute(player, s);
+                                    return;
+                                }
+                            }
                             Finish(player, s, "Kein Fortschritt moeglich - der Autopilot gibt auf.", false);
                             return;
                         }

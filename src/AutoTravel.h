@@ -58,7 +58,7 @@ class Map;
 constexpr uint32 AT_PROTOCOL_VERSION = 4;
 // Nur zur Anzeige ("Server 4.0.5" im Addon, damit sich ein Fehlerbericht einer Fassung
 // zuordnen laesst); ueber die Vertraeglichkeit entscheidet allein AT_PROTOCOL_VERSION.
-constexpr char const* AT_MODULE_VERSION = "4.0.7";
+constexpr char const* AT_MODULE_VERSION = "4.0.8";
 
 // Was dieser Server fuer genau diesen Spieler anbietet. Das Addon blendet damit
 // Bedienelemente aus, die ohnehin abgewiesen wuerden.
@@ -69,7 +69,8 @@ enum ATCapability : uint32
     AT_CAP_TAXI      = 4,    // Flugmeister werden selbstaendig benutzt
     AT_CAP_TELEPORT  = 8,    // .at tp ist fuer diesen Spieler erlaubt
     AT_CAP_SETTINGS  = 16,   // serverweite Einstellungen mit .at set aenderbar
-    AT_CAP_TRANSPORT = 32    // Zeppelin, Schiff, Bahn werden begleitet
+    AT_CAP_TRANSPORT = 32,   // Zeppelin, Schiff, Bahn werden begleitet
+    AT_CAP_WAYPOINTS = 64    // Wegpunktketten: Stuetzpunkte der Art 2 werden einzeln angelaufen
 };
 
 // Klassen der Befehlsbremse (siehe AutoTravelMgr::AllowCommand)
@@ -184,6 +185,12 @@ struct ATLeg
     ATAnchorInfo anchor;
 
     ATLegKind kind = AT_LEG_WALK;
+
+    // Pflichtpunkt: ein Ziel, das der Spieler selbst gesetzt hat (Carbonite-Wegpunkt). Die
+    // Planung (Flugmeister, Knotengraph) darf ihn nicht durch einen eigenen Weg ersetzen,
+    // sondern plant nur den Weg ZWISCHEN zwei Pflichtpunkten. Die letzte Etappe einer Route
+    // ist immer ein Pflichtpunkt, auch wenn das Flag fehlt (siehe AT::SegmentEnd).
+    bool waypoint = false;
 
     // Nur fuer AT_LEG_TAXI belegt
     uint32 taxiFrom = 0;
@@ -457,6 +464,16 @@ struct ATSession
     // Aktive Etappe
     std::vector<ATLeg> route;
     size_t  legIdx = 0;
+
+    // Gesetzt, wenn AdvanceLeg() / SetLegTarget() die Route nicht erschoepft, sondern gescheitert
+    // sind: die Planung des naechsten Abschnitts einer Wegpunktkette fand keinen Weg, oder das
+    // Endziel liess sich nicht anlaufen. Die Aufrufer beenden die Reise dann mit diesem Text statt
+    // mit "Ziel erreicht" (FinishRoute).
+    std::string endError;
+
+    // ApplyPlannedRoute hat einen Abschnitt geplant: SetLegTarget soll danach die Ausgangsentfernung
+    // fuer die Statuszeile setzen, sobald die Zieletappe bekannt ist.
+    bool startDistancePending = false;
     uint32  mapId  = AT_NO_MAP;         // Karte, auf der die Etappe laeuft (Start/SetLegTarget setzen sie)
     float   destX = 0.0f, destY = 0.0f, destZ = 0.0f;
     ATAnchorInfo anchor;                // gilt fuer destX/destY/destZ (nur letzte Etappe)
@@ -530,6 +547,16 @@ struct ATSession
     float   arrivalOverride = 0.0f;
     uint32  graceOverride = 0;
     bool    debug = false;
+
+    // Pflichtpunkte der Route (ATLeg::waypoint), fuer AT::SegmentEnd und AT::ChainProgress.
+    std::vector<bool> WaypointFlags() const
+    {
+        std::vector<bool> f;
+        f.reserve(route.size());
+        for (ATLeg const& l : route)
+            f.push_back(l.waypoint);
+        return f;
+    }
 
     bool IsDriving() const
     {
@@ -687,6 +714,8 @@ private:
     bool ApplyPlannedRoute(Player* player, ATSession& s, std::string& err);
     void RemainingForStatus(Player* player, ATSession const& s, float& dist, uint32& progress) const;
     void Finish(Player* player, ATSession& s, std::string const& text, bool ok);
+    void FinishRoute(Player* player, ATSession& s);
+    std::string LegLabel(ATSession const& s) const;
 
     bool CheckHandover(Player* player, ATSession& s, uint32 diff);
     bool CheckGroundContact(Player* player, ATSession& s);
@@ -864,6 +893,56 @@ namespace AT
     // Chat), hoechstens maxBytes Bytes, nie mitten in einem UTF-8-Zeichen
     // abgeschnitten.
     std::string SanitizeText(std::string const& in, size_t maxBytes);
+
+    // --- Wegpunktketten (rein, ohne Core) ------------------------------------
+    //
+    // Das Art-Feld eines Stuetzpunkts im Befehl "at route" ist eine Bitmaske:
+    //
+    //   Bit 0 (1)  Flugpunkt: ab hier per Flugmeister weiter
+    //   Bit 1 (2)  Wegpunkt:  ein Ziel, das der Spieler in Carbonite selbst gesetzt hat
+    //
+    // 0 und 1 bedeuten wie bisher Laufweg und Flug. Module vor 4.0.8 lesen jeden Wert ausser
+    // 1 als Laufweg; ein Wegpunkt faellt dort auf einen gewoehnlichen Stuetzpunkt zurueck
+    // (die Reise geht dann wie frueher zum letzten Punkt).
+    struct LegArt
+    {
+        bool taxi = false;
+        bool waypoint = false;
+    };
+    LegArt ParseLegArt(uint32 art);
+
+    // Wo endet der Abschnitt, der bei Etappe 'from' beginnt? Ein Abschnitt endet am naechsten
+    // Pflichtpunkt ab 'from' (diesen eingerechnet), spaetestens an der letzten Etappe: sie
+    // schliesst die Reise immer ab, ob markiert oder nicht. Die Planung (Flugmeister,
+    // Knotengraph) ersetzt nur die Etappen DAVOR. Bei leerer Route 0; liegt 'from' hinter dem
+    // Ende, der letzte Index.
+    size_t SegmentEnd(std::vector<bool> const& waypoint, size_t from);
+
+    // In welchem Abschnitt liegt Etappe 'legIdx'? first = die Etappe nach dem vorigen Pflichtpunkt (0 am
+    // Anfang), last = SegmentEnd(). Fuer den Fortschritt innerhalb eines Abschnitts.
+    struct SegmentSpan
+    {
+        size_t first = 0;
+        size_t last = 0;
+    };
+    SegmentSpan SegmentOf(std::vector<bool> const& waypoint, size_t legIdx);
+
+    // Ersetzt die Etappen [from, segEnd] einer Route durch die Planung 'planned' und setzt 'end' (das
+    // Ende des Abschnitts, aufgeloest) dahinter. Alles vor 'from' und nach 'segEnd' bleibt, wie es ist.
+    // Ungueltige Grenzen aendern nichts.
+    void ReplaceSegment(std::vector<ATLeg>& route, size_t from, size_t segEnd,
+                        std::vector<ATLeg> const& planned, ATLeg const& end);
+
+    // Stand einer Kette: 'total' Pflichtpunkte (die letzte Etappe zaehlt immer mit), davon
+    // 'done' vor Etappe 'legIdx' bereits erledigt. Eine Kette gibt es ab zwei Pflichtpunkten;
+    // eine einfache Reise hat genau einen.
+    struct ChainState
+    {
+        size_t total = 0;
+        size_t done = 0;
+        bool IsChain() const { return total >= 2; }
+    };
+    ChainState ChainProgress(std::vector<bool> const& waypoint, size_t legIdx);
 
     // Datenbankname fuer die Knotentabellen: nur Buchstaben, Ziffern, '_' und
     // '$', hoechstens 64 Zeichen. Der Name wird in SQL eingesetzt.

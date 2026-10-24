@@ -592,7 +592,7 @@ void AutoTravelMgr::SetDebug(Player* player, bool on)
 
 uint32 AutoTravelMgr::CapabilitiesFor(Player* player) const
 {
-    uint32 caps = AT_CAP_HANDOVER | AT_CAP_ROUTE;
+    uint32 caps = AT_CAP_HANDOVER | AT_CAP_ROUTE | AT_CAP_WAYPOINTS;
     if (ATConf.useTaxi)
         caps |= AT_CAP_TAXI;
     if (ATConf.useTransports)

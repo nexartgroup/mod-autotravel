@@ -534,6 +534,9 @@ void AutoTravelMgr::Resolve(Player* player, uint32 uiMapId, float nx, float ny,
 // ---------------------------------------------------------------------------
 //
 // Format eines Stuetzpunkts vom Addon:  <kartenId>:<nx>:<ny>:<art>
+//
+// <art> ist eine Bitmaske (AT::ParseLegArt): 1 = Flugpunkt, 2 = Wegpunkt. Ein Wegpunkt ist ein
+// Ziel, das der Spieler in Carbonite selbst gesetzt hat; die Reise laeuft sie der Reihe nach ab.
 
 void AutoTravelMgr::RouteAdd(Player* player, bool clearFirst, std::string const& packed)
 {
@@ -564,7 +567,9 @@ void AutoTravelMgr::RouteAdd(Player* player, bool clearFirst, std::string const&
         if (!AT::ParseUInt(tok.substr(c + 1), kind))
             kind = 0;
 
-        leg.kind = (kind == 1) ? AT_LEG_TAXI : AT_LEG_WALK;
+        AT::LegArt const art = AT::ParseLegArt(kind);
+        leg.kind = art.taxi ? AT_LEG_TAXI : AT_LEG_WALK;
+        leg.waypoint = art.waypoint;
 
         if (r.size() >= 32)
             break;
@@ -573,9 +578,45 @@ void AutoTravelMgr::RouteAdd(Player* player, bool clearFirst, std::string const&
 }
 
 // Aktuelle Etappe in Weltkoordinaten aufloesen. Nicht aufloesbare Etappen
-// werden uebersprungen statt die ganze Reise zu kippen.
+// werden uebersprungen statt die ganze Reise zu kippen -- ausser dem Endziel: laesst sich das
+// nicht anlaufen, ist die Reise gescheitert, nicht angekommen (s.endError).
 bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
 {
+    // Die aktuelle Etappe uebergehen. true = weiter mit der naechsten, false = die Reise ist zu
+    // Ende (s.endError sagt warum). Faellt ein Wegpunkt weg, sagt es die Meldung -- er ist ein
+    // Ziel des Spielers, ein Debug-Eintrag genuegt nicht --, und der Abschnitt danach beginnt
+    // hier: er wird jetzt von hier aus geplant. Sonst liefe er ueber die rohen Stuetzpunkte,
+    // ein Ziel auf einer anderen Karte wuerde stillschweigend mit uebersprungen.
+    auto skipLeg = [&](std::string const& why) -> bool
+    {
+        bool const finalLeg = (s.legIdx + 1 == s.route.size());
+        bool const wasWaypoint = s.route[s.legIdx].waypoint;
+
+        if (finalLeg)
+        {
+            s.endError = "Das Ziel laesst sich nicht anlaufen: " + why;
+            ++s.legIdx;
+            return false;
+        }
+
+        if (wasWaypoint)
+            Msg(player, LegLabel(s) + " uebersprungen: " + why);
+        else
+            Dbg(player, s, "Stuetzpunkt " + std::to_string(s.legIdx + 1) + " uebersprungen: " + why);
+
+        ++s.legIdx;
+        if (wasWaypoint)
+        {
+            std::string planErr;
+            if (!ApplyPlannedRoute(player, s, planErr))
+            {
+                s.endError = planErr;
+                return false;
+            }
+        }
+        return true;
+    };
+
     while (s.legIdx < s.route.size())
     {
         ATLeg& leg = s.route[s.legIdx];
@@ -594,12 +635,9 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
                               leg.wx, leg.wy, leg.wz, mapId, err, false,
                               finalLeg ? &anchor : nullptr, finalLeg ? &label : nullptr))
             {
-                char b[256];
-                std::snprintf(b, sizeof(b), "Stuetzpunkt %u uebersprungen: %s",
-                              uint32(s.legIdx + 1), err.c_str());
-                Dbg(player, s, b);
-                ++s.legIdx;
-                continue;
+                if (!skipLeg(err))
+                    return false;
+                continue;             // 'leg' ist ungueltig: die Route kann sich geaendert haben
             }
             leg.mapId = mapId;
             leg.resolved = true;
@@ -642,8 +680,8 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         // gehoeren zu einem Transport oder Portal und werden dort behandelt.
         if (leg.mapId != AT_NO_MAP && leg.mapId != player->GetMapId() && leg.kind == AT_LEG_WALK)
         {
-            Dbg(player, s, "Stuetzpunkt liegt auf einer anderen Karte - uebersprungen.");
-            ++s.legIdx;
+            if (!skipLeg("es liegt auf einer anderen Karte, und AutoTravel kennt keine Verbindung dorthin"))
+                return false;
             continue;
         }
 
@@ -651,6 +689,22 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
         s.destX = leg.wx;
         s.destY = leg.wy;
         s.destZ = leg.wz;
+
+        // Ausgangsentfernung fuer die Statuszeile. Bei einem Kartenwechsel gibt es keine vergleichbare
+        // Luftlinie; der Fortschritt kommt dann aus der Etappenzahl (RemainingForStatus). Endpunkt einer
+        // Carbonite-Route nicht aufloesbar: der Fortschritt bezieht sich dann auf die erste Etappe
+        // (und nicht auf den Weltursprung).
+        if (s.startDistancePending)
+        {
+            s.startDistancePending = false;
+            if (s.startDistance <= 0.0f)
+            {
+                if (s.finalMapId == s.startMapId)
+                    s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
+                else if (s.finalMapId == AT_NO_MAP && s.mapId == s.startMapId)
+                    s.startDistance = player->GetExactDist2d(s.destX, s.destY);
+            }
+        }
         s.anchor = finalLeg ? leg.anchor : ATAnchorInfo();
         s.anchorZRefusals = 0;
         s.anchorWarned = false;
@@ -694,22 +748,51 @@ bool AutoTravelMgr::SetLegTarget(Player* player, ATSession& s)
 //   2. Playerbot-Knoten -- kennt Portale, Schiffe und Zeppeline
 //   3. Carbonite        -- die vom Addon gelieferten Stuetzpunkte
 //
-// Das eigentliche Ziel bleibt in jedem Fall der letzte Carbonite-Punkt.
+// Geplant wird ein ABSCHNITT: von der aktuellen Etappe bis zum naechsten Pflichtpunkt
+// (ATLeg::waypoint), bei einer einfachen Reise bis zur letzten Etappe. Die Planung ersetzt nur
+// die Etappen dazwischen, nie den Pflichtpunkt selbst. Der erste Abschnitt wird beim Start
+// geplant (BeginTravel), jeder weitere, sobald der Charakter einen Pflichtpunkt erreicht hat
+// (AdvanceLeg) -- dann von seiner tatsaechlichen Position aus.
+//
+// Das Ziel eines Abschnitts bleibt in jedem Fall sein letzter Punkt. Bei einer einfachen
+// Reise ist das der letzte Carbonite-Punkt; bei einer Wegpunktkette wuerde die Planung nach dem
+// letzten Punkt allein sonst jeden Wegpunkt davor wegwerfen.
+//
+// Zustandsfelder (finalMapId/X/Y/Z, startDistance, startMapId) beschreiben dabei den Abschnitt,
+// nicht die ganze Reise: die Statuszeile zeigt die Entfernung zum naechsten Wegpunkt.
 
 bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string& err)
 {
-    if (s.route.empty())
+    if (s.legIdx >= s.route.size())
         return true;
 
-    ATLeg last = s.route.back();
+    size_t const segEnd = AT::SegmentEnd(s.WaypointFlags(), s.legIdx);
+    bool const finalSeg = (segEnd + 1 == s.route.size());
+
+    // Was der Spieler sehen soll, wenn es um das Ende des Abschnitts geht.
+    char const* const what = finalSeg ? "Das Ziel" : "Der naechste Wegpunkt";
+
+    s.startMapId = player->GetMapId();
+    s.startDistancePending = true;
+
+    // Diese Felder beschreiben den Abschnitt. Laesst sich sein Ende unten nicht aufloesen, soll nichts
+    // vom vorigen Abschnitt stehen bleiben: die Statuszeile fiele sonst auf dessen Wegpunkt zurueck
+    // ("0 yd verbleibend", erstarrter Fortschritt), solange die Reise dauert.
+    s.finalMapId = AT_NO_MAP;
+    s.finalX = s.finalY = s.finalZ = 0.0f;
+    s.startDistance = 0.0f;
+
+    ATLeg last = s.route[segEnd];
     if (!last.resolved)
     {
         uint32 m = 0;
         std::string resolveErr;
         ATAnchor anchor;
-        std::string const label = last.name.empty() ? s.destName : last.name;
+        // Nur das Endziel wird verankert (siehe SetLegTarget).
+        std::string const label = finalSeg ? (last.name.empty() ? s.destName : last.name) : std::string();
         if (!ResolveWorld(player, last.uiMapId, last.nx, last.ny, false, 0.0f, 0.0f,
-                          last.wx, last.wy, last.wz, m, resolveErr, true, &anchor, &label))
+                          last.wx, last.wy, last.wz, m, resolveErr, true,
+                          finalSeg ? &anchor : nullptr, finalSeg ? &label : nullptr))
             return true;                   // die Etappen laufen einzeln weiter
         last.mapId = m;
         last.resolved = true;
@@ -730,6 +813,12 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
     float direct = crossMap ? 0.0f : player->GetExactDist2d(last.wx, last.wy);
     s.startDistance = direct;
 
+    // Die Etappen des Abschnitts durch die Planung ersetzen; 'last' (aufgeloest) schliesst sie ab.
+    auto replaceSegment = [&](std::vector<ATLeg> const& planned)
+    {
+        AT::ReplaceSegment(s.route, s.legIdx, segEnd, planned, last);
+    };
+
     // --- 1. Flugmeister ----------------------------------------------------
     // Der Knotengraph kennt Flugverbindungen ebenfalls; ein direkter Flugplan
     // gibt es nur innerhalb einer Karte.
@@ -739,9 +828,7 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
         std::string note;
         if (BuildTaxiPlan(player, last.mapId, last.wx, last.wy, last.wz, plan, note))
         {
-            plan.push_back(last);
-            s.route = plan;
-            s.legIdx = 0;
+            replaceSegment(plan);
             Msg(player, "Flugroute geplant: " + note);
             return true;
         }
@@ -759,12 +846,10 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
         std::vector<ATLeg> nodeLegs;
         if (BuildNodeRoute(player, last.mapId, last.wx, last.wy, last.wz, nodeLegs, nodeNote))
         {
-            nodeLegs.push_back(last);
-            s.route = nodeLegs;
-            s.legIdx = 0;
+            replaceSegment(nodeLegs);
 
             uint32 special = 0;
-            for (ATLeg const& l : s.route)
+            for (ATLeg const& l : nodeLegs)
                 if (l.kind != AT_LEG_WALK)
                     ++special;
 
@@ -776,9 +861,9 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
             if (crossMap)
             {
                 std::snprintf(b, sizeof(b),
-                              "Das Ziel liegt auf einer anderen Karte (Map %u). AutoTravel plant den "
+                              "%s liegt auf einer anderen Karte (Map %u). AutoTravel plant den "
                               "Weg ueber %u Sonderverbindung(en) -- Schiff, Zeppelin oder Portal "
-                              "musst du am Anleger selbst betreten.", last.mapId, special);
+                              "musst du am Anleger selbst betreten.", what, last.mapId, special);
                 Msg(player, b);
             }
             else if (special)
@@ -799,7 +884,7 @@ bool AutoTravelMgr::ApplyPlannedRoute(Player* player, ATSession& s, std::string&
     // dort gibt es ohne Knotenroute keinen Weg.
     if (crossMap)
     {
-        err = "Das Ziel liegt auf einer anderen Karte (Map " + std::to_string(last.mapId) +
+        err = std::string(what) + " liegt auf einer anderen Karte (Map " + std::to_string(last.mapId) +
               "), und AutoTravel findet keine Verbindung dorthin: " + nodeNote + ". Ein Kontinent "
               "ist nur ueber Schiff, Zeppelin oder Portal erreichbar; dafuer braucht das Modul die "
               "Reiseknoten von mod-playerbots (siehe '.at nodes').";
@@ -824,7 +909,7 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
 
     if (!SetLegTarget(player, s))
     {
-        Msg(player, "Kein brauchbarer Stuetzpunkt in der Route.");
+        Msg(player, s.endError.empty() ? std::string("Kein brauchbarer Stuetzpunkt in der Route.") : s.endError);
         _sessions.erase(player->GetGUID());
         SyncStatus(player);
         return false;
@@ -836,26 +921,26 @@ bool AutoTravelMgr::BeginTravel(Player* player, ATSession& s)
     s.lastZ = player->GetPositionZ();
     ++_statTravelsStarted;
 
-    // Bei einem Kartenwechsel gibt es keine vergleichbare Luftlinie; der
-    // Fortschritt kommt dann aus der Etappenzahl (RemainingForStatus).
-    if (s.startDistance <= 0.0f)
+    AT::ChainState const chain = AT::ChainProgress(s.WaypointFlags(), s.legIdx);
+    if (chain.IsChain())
     {
-        if (s.finalMapId == s.startMapId)
-            s.startDistance = player->GetExactDist2d(s.finalX, s.finalY);
-        else if (s.finalMapId == AT_NO_MAP && s.mapId == s.startMapId)
-            // Endpunkt einer Carbonite-Route nicht aufloesbar: der Fortschritt
-            // bezieht sich dann auf die erste Etappe (und nicht auf den Weltursprung).
-            s.startDistance = player->GetExactDist2d(s.destX, s.destY);
+        char cb[160];
+        std::snprintf(cb, sizeof(cb), " (%u Wegpunkte)", uint32(chain.total));
+        Msg(player, "Reise gestartet: " + s.destName + cb);
     }
-
-    Msg(player, "Reise gestartet: " + s.destName);
+    else
+        Msg(player, "Reise gestartet: " + s.destName);
     PushStatus(player, s);
     return true;
 }
 
-// Naechste Etappe aktivieren. false = Route zu Ende.
+// Naechste Etappe aktivieren. false = Route zu Ende -- oder gescheitert: dann steht der Grund in
+// s.endError, und die Reise endet mit ihm statt mit "Ziel erreicht" (FinishRoute).
 bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
 {
+    // War die verlassene Etappe ein Pflichtpunkt, beginnt jetzt ein neuer Abschnitt der Kette.
+    bool const passedWaypoint = s.legIdx < s.route.size() && s.route[s.legIdx].waypoint;
+
     ++s.legIdx;
     s.repathAttempts = 0;
     s.stuckStrikes = 0;
@@ -866,6 +951,19 @@ bool AutoTravelMgr::AdvanceLeg(Player* player, ATSession& s)
 
     if (s.legIdx >= s.route.size())
         return false;
+
+    // Den Abschnitt bis zum naechsten Pflichtpunkt von hier aus planen: der Charakter steht am
+    // Wegpunkt, nicht dort, wo die Reise begann. Scheitert das (der naechste Wegpunkt liegt auf
+    // einer anderen Karte, und es gibt keine Verbindung), ist die Reise hier zu Ende.
+    if (passedWaypoint)
+    {
+        std::string planErr;
+        if (!ApplyPlannedRoute(player, s, planErr))
+        {
+            s.endError = planErr;
+            return false;
+        }
+    }
 
     if (!SetLegTarget(player, s))
         return false;
@@ -1032,8 +1130,13 @@ bool AutoTravelMgr::RouteStart(Player* player, std::string const& name)
         s.route.back().name = s.destName;
 
     char buf[160];
-    std::snprintf(buf, sizeof(buf), "Route mit %u Stuetzpunkten uebernommen.",
-                  uint32(s.route.size()));
+    AT::ChainState const chain = AT::ChainProgress(s.WaypointFlags(), 0);
+    if (chain.IsChain())
+        std::snprintf(buf, sizeof(buf), "Route mit %u Stuetzpunkten uebernommen, davon %u Wegpunkte.",
+                      uint32(s.route.size()), uint32(chain.total));
+    else
+        std::snprintf(buf, sizeof(buf), "Route mit %u Stuetzpunkten uebernommen.",
+                      uint32(s.route.size()));
     Dbg(player, s, buf);
 
     return BeginTravel(player, s);
@@ -1183,6 +1286,18 @@ void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
     dist = 0.0f;
     progress = 0;
 
+    // Bei einer Wegpunktkette beschreiben Entfernung und Fortschritt den Abschnitt zum naechsten
+    // Wegpunkt (siehe ApplyPlannedRoute); der Fortschritt der ganzen Kette setzt sich aus den
+    // erledigten Wegpunkten und dem Anteil des laufenden Abschnitts zusammen.
+    std::vector<bool> const flags = s.WaypointFlags();
+    AT::ChainState const chain = AT::ChainProgress(flags, s.legIdx);
+    auto const overall = [&](uint32 segment) -> uint32
+    {
+        if (!chain.IsChain())
+            return segment;
+        return uint32(std::min<size_t>(99, (chain.done * 100 + segment) / chain.total));
+    };
+
     // Auch eine Route zwischen zwei Punkten derselben Karte kann ueber eine andere
     // fuehren (Tiefenbahn): solange der Spieler nicht auf der Zielkarte steht, sind
     // die Koordinaten des Ziels fuer ihn bedeutungslos.
@@ -1199,6 +1314,7 @@ void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
             float frac = 1.0f - (dist / s.startDistance);
             progress = uint32(std::max(0.0f, std::min(1.0f, frac)) * 100.0f);
         }
+        progress = overall(progress);
         return;
     }
 
@@ -1207,7 +1323,15 @@ void AutoTravelMgr::RemainingForStatus(Player* player, ATSession const& s,
     else if (s.mapId == player->GetMapId() && (s.destX != 0.0f || s.destY != 0.0f))
         dist = player->GetExactDist2d(s.destX, s.destY);
 
-    if (!s.route.empty())
+    if (chain.IsChain())
+    {
+        // Ueber eine Kartengrenze gibt es keine Luftlinie: innerhalb des Abschnitts zaehlen die Etappen
+        // (Anleger, Fahrt, Landung), damit der Balken bei einer langen Schiffsfahrt nicht erstarrt.
+        AT::SegmentSpan const seg = AT::SegmentOf(flags, s.legIdx);
+        size_t const inSeg = (s.legIdx >= seg.first) ? (s.legIdx - seg.first) : 0;
+        progress = overall(uint32(std::min<size_t>(99, (inSeg * 100) / (seg.last - seg.first + 1))));
+    }
+    else if (!s.route.empty())
         progress = uint32(std::min<size_t>(99, (s.legIdx * 100) / s.route.size()));
 }
 
@@ -1227,6 +1351,18 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
     if (s.controlTaken)       flags |= 8;
     if (s.pausedByPlayer)     flags |= 16;
 
+    // Etappe n von m: bei einer Wegpunktkette zaehlen die Wegpunkte, nicht die Etappen, die
+    // die Planung dazwischen einfuegt -- sonst wuchse m mit jedem geplanten Abschnitt. Das
+    // Addon schickt die Kette selbst und weiss, dass es Wegpunkte sind.
+    uint32 leg = uint32(s.legIdx + 1);
+    uint32 legs = uint32(s.route.size());
+    AT::ChainState const chain = AT::ChainProgress(s.WaypointFlags(), s.legIdx);
+    if (chain.IsChain())
+    {
+        leg = uint32(chain.done + 1);
+        legs = uint32(chain.total);
+    }
+
     char buf[512];
     std::snprintf(buf, sizeof(buf), "[AT]S|%s|%.0f|%s|%u|%u|%u|%u|%u|%u",
                   ATStateName(s.state),
@@ -1235,8 +1371,8 @@ void AutoTravelMgr::PushStatus(Player* player, ATSession& s)
                   flags,
                   uint32(s.path.size()),
                   std::max(s.repathAttempts, s.stuckStrikes),
-                  uint32(s.legIdx + 1),
-                  uint32(s.route.size()),
+                  leg,
+                  legs,
                   progress);
 
     Raw(player, buf);
@@ -1262,12 +1398,22 @@ void AutoTravelMgr::PrintStatus(Player* player)
     }
 
     char buf[288];
-    std::snprintf(buf, sizeof(buf),
-                  "Status: %s | Ziel: %s | Etappe %u/%u | Pfadpunkte %u/%u | Versuche %u",
-                  ATStateName(s->state), s->destName.c_str(),
-                  uint32(s->legIdx + 1), uint32(s->route.size()),
-                  uint32(s->idx), uint32(s->path.size()),
-                  std::max(s->repathAttempts, s->stuckStrikes));
+    AT::ChainState const chain = AT::ChainProgress(s->WaypointFlags(), s->legIdx);
+    if (chain.IsChain())
+        std::snprintf(buf, sizeof(buf),
+                      "Status: %s | Ziel: %s | Wegpunkt %u/%u (Etappe %u/%u) | Pfadpunkte %u/%u | Versuche %u",
+                      ATStateName(s->state), s->destName.c_str(),
+                      uint32(chain.done + 1), uint32(chain.total),
+                      uint32(s->legIdx + 1), uint32(s->route.size()),
+                      uint32(s->idx), uint32(s->path.size()),
+                      std::max(s->repathAttempts, s->stuckStrikes));
+    else
+        std::snprintf(buf, sizeof(buf),
+                      "Status: %s | Ziel: %s | Etappe %u/%u | Pfadpunkte %u/%u | Versuche %u",
+                      ATStateName(s->state), s->destName.c_str(),
+                      uint32(s->legIdx + 1), uint32(s->route.size()),
+                      uint32(s->idx), uint32(s->path.size()),
+                      std::max(s->repathAttempts, s->stuckStrikes));
     Msg(player, buf);
     PushStatus(player, *s);
 }

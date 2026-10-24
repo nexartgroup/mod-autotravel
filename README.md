@@ -257,6 +257,31 @@ unter einer Millisekunde.
   fuehrt.
 * **Portale**: ueber den Knotengraphen von mod-playerbots als Sonderverbindung.
 
+### Wegpunktketten
+
+Verkettet der Spieler in Carbonite mehrere Ziele (Strg + Umschalt + Linksklick auf die Karte), laeuft
+AutoTravel sie **der Reihe nach** ab. (Bis 4.0.7 zaehlte nur der letzte Punkt: die Planung durch Flugmeister
+oder Knotengraph ersetzte ab `AutoTravel.NodeMinDistance` die ganze Route und warf alles dazwischen weg.)
+
+* Das Addon markiert die gesetzten Ziele im Befehl `.at route` mit der Art `2` (Bitmaske: `1` Flugpunkt,
+  `2` Wegpunkt). Was Carbonite selbst dazwischen berechnet (Zonenuebergaenge, Torbogen, Flugpunkte), bleibt
+  gewoehnlicher Stuetzpunkt.
+* Die Planung arbeitet **abschnittsweise**: vom aktuellen Punkt bis zum naechsten Wegpunkt. Sie ersetzt nur die
+  Stuetzpunkte dazwischen, nie den Wegpunkt. Der erste Abschnitt wird beim Start geplant, jeder weitere, sobald
+  der Charakter einen Wegpunkt erreicht hat -- von seiner tatsaechlichen Position aus. Eine Kette kann deshalb
+  je Abschnitt einen Flug, ein Schiff oder ein Portal enthalten.
+* Ein Wegpunkt gilt mit dem Zielradius (`AutoTravel.ArrivalDistance`, 8 yd) als erreicht, die Stuetzpunkte
+  dazwischen mit `AutoTravel.LegDistance` (15 yd). Das Modul meldet "Wegpunkt 2/4 erreicht."
+* **Nicht erreichbar**: findet der Pfad zu einem Zwischen-Wegpunkt keinen Weg oder kommt der Charakter dort nicht
+  voran, wird er mit Meldung uebersprungen und die Kette geht weiter. Das Endziel gibt dagegen auf. Liegt ein
+  spaeterer Wegpunkt auf einer anderen Karte und gibt es keine Verbindung, endet die Reise mit dieser
+  Begruendung.
+* Statuszeile: bei einer Kette zaehlen `<etappe>` und `<etappen>` die **Wegpunkte** (2 von 4), nicht die Etappen,
+  die die Planung dazwischen einfuegt; Restentfernung und Fortschritt gelten dem Weg zum naechsten Wegpunkt.
+* Aeltere Module lesen die Art `2` als gewoehnlichen Laufpunkt: ein neues Addon mit einem Modul vor 4.0.8 faehrt
+  wie frueher nur zum letzten Punkt (das Addon warnt, wenn die Faehigkeit `64` fehlt).
+* Das Addon begrenzt Ketten auf 30 Punkte; der Server nimmt 32 Stuetzpunkte je Route.
+
 ### Uebergabe an den Spieler
 
 Der Autopilot haelt die Clientkontrolle **nur, solange er faehrt**. Sie geht
@@ -314,7 +339,9 @@ Ausnahmen:
 | `.at set <schluessel> <wert>` | Einstellung im laufenden Betrieb aendern |
 
 Die Befehle `start`, `route`, `rstart`, `resolve` und `tp` erwarten Parameter,
-die das Addon erzeugt; von Hand sind sie unpraktisch.
+die das Addon erzeugt; von Hand sind sie unpraktisch. `route` nimmt Punkte der Form
+`<karte>:<nx>:<ny>:<art>`; `art` ist eine Bitmaske (`1` Flugpunkt, `2` Wegpunkt, siehe
+"Wegpunktketten"), hoechstens 32 Punkte je Route.
 
 Alle Befehle, die Wegfindung oder viele Antwortzeilen ausloesen (`start`,
 `rstart`, `tp`, `resolve`, `diag`, `repath`, `nodes`, `taxi`, `options`), laufen
@@ -358,7 +385,8 @@ auch, welches Protokoll und welche Faehigkeiten der Server anbietet.
 
 Faehigkeiten: `1` Uebergabe (`pause`/`resume`), `2` Route (`route`/`rstart`),
 `4` Flugmeister, `8` Teleport erlaubt (`allowTeleport` und Rechtestufe),
-`16` serverweite Einstellungen aenderbar (Spielleiter), `32` Transporte.
+`16` serverweite Einstellungen aenderbar (Spielleiter), `32` Transporte,
+`64` Wegpunktketten (ab 4.0.8: Stuetzpunkte der Art 2 werden einzeln angelaufen).
 Das Addon blendet damit Knoepfe aus, die ohnehin abgewiesen wuerden, statt den
 Spieler mit Absagen zu bedienen. **Die Pruefung bleibt trotzdem beim Server**: ein
 Client kann jede Faehigkeit behaupten.
@@ -586,6 +614,7 @@ Eine neue Option eintragen:
 | Reisen starten spuerbar verzoegert, wenn viele gleichzeitig beginnen | Das Wegberechnungs-Budget. `.at stats` zeigt, wie oft es gegriffen hat; `AutoTravel.MaxPathsPerTick` erhoehen |
 | Spieler bleibt nach `.at set enable 0` stehen | Ab 4.0 gibt das Abschalten die Steuerung zurueck. In aelteren Staenden: `.at stop` bzw. Neuanmeldung |
 | "Das Ziel liegt auf einer anderen Karte ..., und AutoTravel findet keine Verbindung dorthin" | Kontinentwechsel braucht den Knotengraphen: `.at nodes` pruefen, `AutoTravel.UseTravelNodes = 1`. Enthaelt der Graph keine Schiffs-/Zeppelinverbindung zwischen den Karten, kann das Modul keine erfinden |
+| Verkettete Carbonite-Ziele: AutoTravel faehrt nur zum letzten | Wegpunktketten gibt es ab Modul 4.0.8 **und** Addon 11.9 (`/at info` zeigt beide Versionen; die Faehigkeit `64` fehlt bei einem alten Modul). Mit `.at debug` steht beim Start "Route mit N Stuetzpunkten uebernommen, davon M Wegpunkte"; fehlt der Zusatz, hat das Addon die Ziele nicht als Wegpunkte erkannt: `/at route` im Addon zeigt `[Wegpunkt]` an den Punkten, `/at route roh` die Rohdaten von Carbonite, `/at wegpunkte alle` laeuft jeden Punkt der Route ab |
 | `.at diag` meldet "Kein passender Kartenausschnitt" | Die Zonenzuordnung des Clients stimmt nicht; `/at karten` im Addon, sonst `/at karte <id>` |
 | Der Charakter laeuft aus einer Stadt, die ueber- oder untereinanderliegende Etagen hat (Exodar, Dalaran, Unterstadt), oder die Reise endet ueber dem NPC | `.at diag` (mit Ziel): die Zeile "Anker:" zeigt, ob ein Spawn erkannt wurde, und "Ohne Anker waere die Zielhoehe" die alte Wahl. Steht dort "keiner", fehlt ein NPC mit Dienst oder Namen im Radius (`AutoTravel.AnchorRadius` hochsetzen, oder das Label des Carbonite-Ziels pruefen). Mit `.at debug` zeigen die Zeilen "Direktkandidat" und "Zielanker aktiv", welche Etage den Weg geliefert hat |
 | Der Charakter laeuft in einer Stadt mit mehreren Etagen (Exodar) unten in Richtung des NPCs an der Oberflaeche, gegen eine Wand, statt die Treppe hinauf aus der Stadt zu laufen, oder umgekehrt | Das war der Teilweg in die Sackgasse (4.0.7, siehe "Erweiterte Wegsuche"). `.at diag` zeigt je Kandidat "(erweiterte Suche: durchgehender Weg)" oder "(Teilweg endet in einer Sackgasse)" und darunter die Zeile "Erweiterte Wegsuche: ...". Dort steht, ob es keine Verbindung im NavMesh gibt (ein Datenproblem der mmaps) oder die Zeitgrenze nicht reichte (`AutoTravel.ExtendedSearchMs` erhoehen) |
