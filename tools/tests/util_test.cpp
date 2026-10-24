@@ -1062,6 +1062,240 @@ static void TestTrimDeadTail()
     CHECK(ramp.size() == 3);
 }
 
+// Wegpunktketten: das Art-Feld, die Abschnittsgrenzen und der Stand der Kette.
+static void TestWaypointChain()
+{
+    // --- Art-Feld: Bitmaske, 0 und 1 wie bisher ---------------------------------
+    {
+        AT::LegArt a = AT::ParseLegArt(0);
+        CHECK(!a.taxi && !a.waypoint);
+        a = AT::ParseLegArt(1);
+        CHECK(a.taxi && !a.waypoint);
+        a = AT::ParseLegArt(2);
+        CHECK(!a.taxi && a.waypoint);
+        a = AT::ParseLegArt(3);
+        CHECK(a.taxi && a.waypoint);
+        a = AT::ParseLegArt(4);                                // unbekanntes Bit: weder noch
+        CHECK(!a.taxi && !a.waypoint);
+        a = AT::ParseLegArt(0xFFFFFFFEu);                      // alles ausser Bit 0: Wegpunkt, kein Flug
+        CHECK(!a.taxi && a.waypoint);
+    }
+
+    // --- SegmentEnd -------------------------------------------------------------
+    {
+        std::vector<bool> none;
+        CHECK(AT::SegmentEnd(none, 0) == 0);                   // leere Route
+        CHECK(AT::SegmentEnd(none, 5) == 0);
+
+        // einfache Reise: keine Markierung, der Abschnitt reicht bis zur letzten Etappe
+        std::vector<bool> plain = { false, false, false, false };
+        CHECK(AT::SegmentEnd(plain, 0) == 3);
+        CHECK(AT::SegmentEnd(plain, 2) == 3);
+        CHECK(AT::SegmentEnd(plain, 3) == 3);
+        CHECK(AT::SegmentEnd(plain, 9) == 3);                  // hinter dem Ende: der letzte Index
+
+        // Kette: Etappe 2 und 5 sind Wegpunkte, die letzte (7) schliesst ab
+        std::vector<bool> chain = { false, false, true, false, false, true, false, false };
+        CHECK(AT::SegmentEnd(chain, 0) == 2);
+        CHECK(AT::SegmentEnd(chain, 1) == 2);
+        CHECK(AT::SegmentEnd(chain, 2) == 2);                  // ein Wegpunkt beendet seinen eigenen Abschnitt
+        CHECK(AT::SegmentEnd(chain, 3) == 5);
+        CHECK(AT::SegmentEnd(chain, 5) == 5);
+        CHECK(AT::SegmentEnd(chain, 6) == 7);
+        CHECK(AT::SegmentEnd(chain, 7) == 7);
+
+        // ist die letzte Etappe markiert, aendert das nichts
+        std::vector<bool> marked = { true, false, true };
+        CHECK(AT::SegmentEnd(marked, 0) == 0);
+        CHECK(AT::SegmentEnd(marked, 1) == 2);
+        CHECK(AT::SegmentEnd(marked, 2) == 2);
+
+        // eine einzelne Etappe
+        std::vector<bool> one = { false };
+        CHECK(AT::SegmentEnd(one, 0) == 0);
+        std::vector<bool> oneMarked = { true };
+        CHECK(AT::SegmentEnd(oneMarked, 0) == 0);
+    }
+
+    // --- ChainProgress ----------------------------------------------------------
+    {
+        AT::ChainState c = AT::ChainProgress({}, 0);
+        CHECK(c.total == 0 && c.done == 0 && !c.IsChain());
+
+        // einfache Reise: genau ein Pflichtpunkt (das Ende), keine Kette
+        std::vector<bool> plain = { false, false, false };
+        c = AT::ChainProgress(plain, 0);
+        CHECK(c.total == 1 && c.done == 0 && !c.IsChain());
+        c = AT::ChainProgress(plain, 2);
+        CHECK(c.total == 1 && c.done == 0 && !c.IsChain());
+
+        // eine Markierung auf der letzten Etappe ist kein zweiter Pflichtpunkt
+        std::vector<bool> lastMarked = { false, false, true };
+        c = AT::ChainProgress(lastMarked, 0);
+        CHECK(c.total == 1 && !c.IsChain());
+
+        // Kette mit zwei Wegpunkten und dem Endziel: drei Pflichtpunkte
+        std::vector<bool> chain = { false, true, false, false, true, false };
+        c = AT::ChainProgress(chain, 0);
+        CHECK(c.total == 3 && c.done == 0 && c.IsChain());
+        c = AT::ChainProgress(chain, 1);                       // AUF dem ersten Wegpunkt: noch nicht erledigt
+        CHECK(c.total == 3 && c.done == 0);
+        c = AT::ChainProgress(chain, 2);
+        CHECK(c.total == 3 && c.done == 1);
+        c = AT::ChainProgress(chain, 4);
+        CHECK(c.total == 3 && c.done == 1);
+        c = AT::ChainProgress(chain, 5);                       // auf dem Endziel: zwei erledigt
+        CHECK(c.total == 3 && c.done == 2);
+
+        // zwei Pflichtpunkte: der erste Wegpunkt plus das Ende
+        std::vector<bool> pair = { true, false };
+        c = AT::ChainProgress(pair, 0);
+        CHECK(c.total == 2 && c.done == 0 && c.IsChain());
+        c = AT::ChainProgress(pair, 1);
+        CHECK(c.total == 2 && c.done == 1);
+
+        // dieselben Zahlen, wenn die Planung Etappen zwischen die Wegpunkte schiebt: die Kette
+        // zaehlt Wegpunkte, nicht Etappen
+        std::vector<bool> planned = { false, false, false, true, false, false, false, false, true, false };
+        c = AT::ChainProgress(planned, 0);
+        CHECK(c.total == 3 && c.done == 0);
+        c = AT::ChainProgress(planned, 4);
+        CHECK(c.total == 3 && c.done == 1);
+        c = AT::ChainProgress(planned, 9);
+        CHECK(c.total == 3 && c.done == 2);
+    }
+
+    // --- ReplaceSegment ---------------------------------------------------------
+    {
+        auto mk = [](char const* name, bool waypoint, ATLegKind kind = AT_LEG_WALK)
+        {
+            ATLeg l;
+            l.name = name;
+            l.waypoint = waypoint;
+            l.kind = kind;
+            return l;
+        };
+        auto names = [](std::vector<ATLeg> const& r)
+        {
+            std::string out;
+            for (ATLeg const& l : r)
+            {
+                if (!out.empty())
+                    out += ",";
+                out += l.name;
+                if (l.waypoint)
+                    out += "*";
+            }
+            return out;
+        };
+
+        // Eine Kette: Stuetzpunkte s0 s1, Wegpunkt W1, Stuetzpunkt s2, Wegpunkt W2, Stuetzpunkt s3, Ziel Z
+        std::vector<ATLeg> route = { mk("s0", false), mk("s1", false), mk("W1", true), mk("s2", false),
+                                     mk("W2", true), mk("s3", false), mk("Z", false) };
+        CHECK(names(route) == "s0,s1,W1*,s2,W2*,s3,Z");
+
+        std::vector<ATLeg> planned = { mk("n0", false), mk("n1", false, AT_LEG_TAXI), mk("n2", false) };
+
+        // erster Abschnitt [0, 2]: Planung ersetzt s0 s1 W1, W1 bleibt als Abschluss
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 0, 2, planned, mk("W1", true));
+            CHECK(names(r) == "n0,n1,n2,W1*,s2,W2*,s3,Z");
+            CHECK(r[1].kind == AT_LEG_TAXI);                     // die Arten der Planung bleiben
+            CHECK(r[3].waypoint);                                // der Abschluss behaelt sein Flag
+        }
+
+        // spaeterer Abschnitt [3, 4]: nur s2 und W2 werden ersetzt, davor und danach bleibt alles
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 3, 4, planned, mk("W2", true));
+            CHECK(names(r) == "s0,s1,W1*,n0,n1,n2,W2*,s3,Z");
+        }
+
+        // letzter Abschnitt [5, 6]: das Ziel schliesst die Route wieder ab
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 5, 6, planned, mk("Z", false));
+            CHECK(names(r) == "s0,s1,W1*,s2,W2*,n0,n1,n2,Z");
+        }
+
+        // eine einfache Reise: die ganze Route wird durch die Planung ersetzt
+        {
+            std::vector<ATLeg> r = { mk("s0", false), mk("s1", false), mk("Z", false) };
+            AT::ReplaceSegment(r, 0, 2, planned, mk("Z", false));
+            CHECK(names(r) == "n0,n1,n2,Z");
+        }
+
+        // leere Planung: der Abschnitt schrumpft auf seinen Abschluss
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 0, 2, {}, mk("W1", true));
+            CHECK(names(r) == "W1*,s2,W2*,s3,Z");
+        }
+
+        // ein Abschnitt aus einer einzigen Etappe (der Wegpunkt selbst)
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 2, 2, planned, mk("W1", true));
+            CHECK(names(r) == "s0,s1,n0,n1,n2,W1*,s2,W2*,s3,Z");
+        }
+
+        // ungueltige Grenzen aendern nichts
+        {
+            std::vector<ATLeg> r = route;
+            AT::ReplaceSegment(r, 4, 2, planned, mk("W1", true));        // from > segEnd
+            CHECK(names(r) == names(route));
+            AT::ReplaceSegment(r, 0, 7, planned, mk("W1", true));        // segEnd hinter dem Ende
+            CHECK(names(r) == names(route));
+            std::vector<ATLeg> empty;
+            AT::ReplaceSegment(empty, 0, 0, planned, mk("W1", true));
+            CHECK(empty.empty());
+        }
+
+        // Zusammenspiel mit SegmentEnd/ChainProgress: nach dem Ersetzen stimmen die Zahlen noch
+        {
+            std::vector<ATLeg> r = route;
+            std::vector<bool> flags;
+            for (ATLeg const& l : r)
+                flags.push_back(l.waypoint);
+            size_t end = AT::SegmentEnd(flags, 0);
+            CHECK(end == 2);
+            AT::ReplaceSegment(r, 0, end, planned, mk("W1", true));
+            flags.clear();
+            for (ATLeg const& l : r)
+                flags.push_back(l.waypoint);
+            AT::ChainState c = AT::ChainProgress(flags, 3);                // auf W1
+            CHECK(c.total == 3 && c.done == 0);
+            c = AT::ChainProgress(flags, 4);                               // auf s2: W1 ist erledigt
+            CHECK(c.total == 3 && c.done == 1);
+            CHECK(AT::SegmentEnd(flags, 4) == 5);                          // bis W2
+        }
+    }
+
+    // --- SegmentEnd und ChainProgress passen zusammen ----------------------------
+    // Ein Abschnitt nach dem anderen: nach jedem Wegpunkt steigt 'done' um eins, und das
+    // Segmentende ist von jedem Punkt des Abschnitts aus derselbe.
+    {
+        std::vector<bool> r = { false, true, false, false, true, false, false };
+        size_t from = 0;
+        size_t doneBefore = 0;
+        int segments = 0;
+        while (true)
+        {
+            size_t end = AT::SegmentEnd(r, from);
+            for (size_t i = from; i <= end; ++i)
+                CHECK(AT::SegmentEnd(r, i) == end);
+            CHECK(AT::ChainProgress(r, from).done == doneBefore);
+            ++segments;
+            if (end + 1 >= r.size())
+                break;
+            from = end + 1;
+            ++doneBefore;
+        }
+        CHECK(segments == 3);
+    }
+}
+
 int main()
 {
     TestParseUInt();
@@ -1082,6 +1316,7 @@ int main()
     TestPickAnchorRules();
     TestPartialLooksStuck();
     TestTrimDeadTail();
+    TestWaypointChain();
 
     std::printf("%d Pruefungen, %d Fehler\n", sChecks, sFailures);
     return sFailures ? 1 : 0;
