@@ -671,6 +671,28 @@ size_t AT::SegmentEnd(std::vector<bool> const& waypoint, size_t from)
     return last;
 }
 
+AT::SegmentSpan AT::SegmentOf(std::vector<bool> const& waypoint, size_t legIdx)
+{
+    SegmentSpan out;
+    if (waypoint.empty())
+        return out;
+
+    size_t const lastIdx = waypoint.size() - 1;
+    if (legIdx > lastIdx)
+        legIdx = lastIdx;
+
+    out.last = SegmentEnd(waypoint, legIdx);
+    for (size_t i = legIdx; i > 0; --i)
+    {
+        if (waypoint[i - 1])
+        {
+            out.first = i;
+            break;
+        }
+    }
+    return out;
+}
+
 void AT::ReplaceSegment(std::vector<ATLeg>& route, size_t from, size_t segEnd,
                         std::vector<ATLeg> const& planned, ATLeg const& end)
 {

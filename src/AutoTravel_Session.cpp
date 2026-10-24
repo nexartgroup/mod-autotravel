@@ -1151,10 +1151,13 @@ void AutoTravelMgr::UpdateSession(Player* player, ATSession& s, uint32 diff)
 
                         if (s.stuckStrikes >= ATConf.maxRepathAttempts)
                         {
-                            // Ein Wegpunkt, an den der Charakter nicht herankommt (Felswand, Dach,
-                            // See), soll die Kette nicht beenden: der Rest der Wegpunkte ist
-                            // von hier aus oft erreichbar. Das Endziel dagegen gibt auf.
-                            if (s.route[s.legIdx].waypoint && s.legIdx + 1 < s.route.size())
+                            // Eine Etappe, an die der Charakter nicht herankommt (Felswand, Dach,
+                            // See), soll eine Wegpunktkette nicht beenden: der Rest ist von hier aus
+                            // oft erreichbar -- wie bei einer fehlgeschlagenen Wegsuche (oben). Das
+                            // Endziel dagegen gibt auf, und eine einfache Reise bleibt, wie sie war.
+                            if (s.legIdx + 1 < s.route.size()
+                                && (s.route[s.legIdx].waypoint
+                                    || AT::ChainProgress(s.WaypointFlags(), s.legIdx).IsChain()))
                             {
                                 Msg(player, LegLabel(s) + " ist nicht erreichbar - er wird uebersprungen.");
                                 HaltMovement(player, s);

@@ -465,10 +465,15 @@ struct ATSession
     std::vector<ATLeg> route;
     size_t  legIdx = 0;
 
-    // Gesetzt, wenn AdvanceLeg() die Route nicht erschoepft, sondern gescheitert ist: die
-    // Planung des naechsten Abschnitts einer Wegpunktkette fand keinen Weg. Die Aufrufer
-    // beenden die Reise dann mit diesem Text statt mit "Ziel erreicht" (FinishRoute).
+    // Gesetzt, wenn AdvanceLeg() / SetLegTarget() die Route nicht erschoepft, sondern gescheitert
+    // sind: die Planung des naechsten Abschnitts einer Wegpunktkette fand keinen Weg, oder das
+    // Endziel liess sich nicht anlaufen. Die Aufrufer beenden die Reise dann mit diesem Text statt
+    // mit "Ziel erreicht" (FinishRoute).
     std::string endError;
+
+    // ApplyPlannedRoute hat einen Abschnitt geplant: SetLegTarget soll danach die Ausgangsentfernung
+    // fuer die Statuszeile setzen, sobald die Zieletappe bekannt ist.
+    bool startDistancePending = false;
     uint32  mapId  = AT_NO_MAP;         // Karte, auf der die Etappe laeuft (Start/SetLegTarget setzen sie)
     float   destX = 0.0f, destY = 0.0f, destZ = 0.0f;
     ATAnchorInfo anchor;                // gilt fuer destX/destY/destZ (nur letzte Etappe)
@@ -912,6 +917,15 @@ namespace AT
     // Knotengraph) ersetzt nur die Etappen DAVOR. Bei leerer Route 0; liegt 'from' hinter dem
     // Ende, der letzte Index.
     size_t SegmentEnd(std::vector<bool> const& waypoint, size_t from);
+
+    // In welchem Abschnitt liegt Etappe 'legIdx'? first = die Etappe nach dem vorigen Pflichtpunkt (0 am
+    // Anfang), last = SegmentEnd(). Fuer den Fortschritt innerhalb eines Abschnitts.
+    struct SegmentSpan
+    {
+        size_t first = 0;
+        size_t last = 0;
+    };
+    SegmentSpan SegmentOf(std::vector<bool> const& waypoint, size_t legIdx);
 
     // Ersetzt die Etappen [from, segEnd] einer Route durch die Planung 'planned' und setzt 'end' (das
     // Ende des Abschnitts, aufgeloest) dahinter. Alles vor 'from' und nach 'segEnd' bleibt, wie es ist.

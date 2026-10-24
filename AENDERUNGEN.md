@@ -26,14 +26,25 @@ ohne Meldung.
 * **Zielradius.** Ein Wegpunkt gilt mit `AutoTravel.ArrivalDistance` (8 yd) als erreicht, die Stuetzpunkte
   dazwischen mit `AutoTravel.LegDistance` (15 yd). Das Modul meldet "Wegpunkt 2/4 erreicht."
 * **Nicht erreichbare Wegpunkte beenden die Kette nicht.** Findet die Wegsuche zu einem Zwischen-Wegpunkt keinen
-  Weg (das gab es schon fuer Stuetzpunkte) oder kommt der Charakter dort nicht voran (neu: er wurde bisher mit
-  "Kein Fortschritt moeglich" abgebrochen), wird er mit Meldung uebersprungen und der naechste Abschnitt von dort
-  aus geplant. Das Endziel gibt weiterhin auf.
+  Weg (das gab es schon fuer Stuetzpunkte), kommt der Charakter dort nicht voran (neu: er wurde bisher mit
+  "Kein Fortschritt moeglich" abgebrochen -- in einer Kette gilt das fuer jede Etappe ausser dem Endziel, eine
+  einfache Reise bleibt, wie sie war) oder laesst sich der Wegpunkt gar nicht aufloesen (`SetLegTarget`), wird er
+  mit Meldung uebersprungen und der naechste Abschnitt **von dort aus geplant**. Das Endziel gibt weiterhin auf.
 * **Ehrliches Ende.** Liegt ein spaeterer Wegpunkt auf einer anderen Karte und gibt es keine Verbindung,
   scheiterte die Planung mitten in der Reise -- und `AdvanceLeg` lieferte "Route zu Ende", was als "Ziel erreicht"
   gemeldet worden waere. Jetzt steht der Grund in `ATSession::endError`, und `FinishRoute` beendet die Reise damit
-  (die fuenf Stellen, die nach `AdvanceLeg` "Ziel erreicht" meldeten; die drei mit eigener Absage lesen den
-  Grund ebenfalls).
+  (die fuenf Stellen, die nach `AdvanceLeg` "Ziel erreicht" meldeten; die vier mit eigener Absage lesen den
+  Grund ebenfalls). Dasselbe gilt, wenn sich das **Endziel** nicht anlaufen laesst (nicht aufloesbar, oder auf
+  einer anderen Karte ohne Planung): `SetLegTarget` ueberging es bisher still, und die Reise endete mit "Ziel
+  erreicht", ohne dort gewesen zu sein -- ein Loch, das es schon vor den Ketten gab. Ein Modell der
+  Buchfuehrung (`AdvanceLeg`, `ApplyPlannedRoute`, `SetLegTarget` wortgleich, die Planer als Attrappen) zeigte es
+  in 18691 von 200000 zufaelligen Reisen; nach der Korrektur in keiner.
+* **Veraltete Statusfelder.** Liess sich das Ende eines spaeteren Abschnitts nicht aufloesen, blieben
+  `finalX/finalY/startDistance` beim vorigen Wegpunkt stehen (Statuszeile: "0 yd verbleibend", erstarrter
+  Fortschritt, bis zum Ende der Reise). `ApplyPlannedRoute` setzt sie jetzt zuerst zurueck, und `SetLegTarget`
+  setzt die Ausgangsentfernung, sobald die Zieletappe bekannt ist (vorher stand das inline in `BeginTravel`).
+* **Fortschritt ueber eine Kartengrenze.** Innerhalb eines Abschnitts ohne Luftlinie (Schiff, Zeppelin) zaehlen
+  die Etappen (`AT::SegmentOf`), damit der Balken nicht bis zur Landung erstarrt.
 * **Statuszeile.** Bei einer Kette zaehlen `<etappe>` und `<etappen>` die Wegpunkte (2 von 4), nicht die
   Etappen, die die Planung einfuegt -- sonst wuchse die Gesamtzahl mit jedem geplanten Abschnitt. Restentfernung
   und Fortschritt gelten dem Weg zum naechsten Wegpunkt; der Fortschritt der Kette setzt sich aus erledigten
@@ -45,20 +56,25 @@ ohne Meldung.
 ## Was nicht geaendert wurde
 
 * Wegpunkte werden nicht an NPCs verankert (nur das Endziel). Ein Wegpunkt ist eine Stelle auf der Karte.
-* Ein unaufloesbarer Wegpunkt (unbekannte Karte, Koordinaten ausserhalb) wird in `SetLegTarget` wie jeder
-  Stuetzpunkt uebersprungen; der Abschnitt danach wird dann nicht neu geplant und laeuft ueber die rohen
-  Stuetzpunkte.
 * Die Obergrenze von 32 Stuetzpunkten je Route (`RouteAdd`) bleibt; das Addon begrenzt Ketten auf 30.
 
 ## Was getestet wurde -- und was nicht
 
-`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; 386 Pruefungen der reinen Funktionen
-(neu: `ParseLegArt`, `SegmentEnd`, `ChainProgress` und `ReplaceSegment` -- Abschnittsgrenzen bei einfacher Reise,
-Kette, markiertem Ende, leerer Route und ungueltigen Grenzen; dass nach dem Ersetzen die Zaehler stimmen).
+`tools/check.sh`: uebersetzt gegen die Header von AzerothCore `master`; 403 Pruefungen der reinen Funktionen
+(neu: `ParseLegArt`, `SegmentEnd`, `SegmentOf`, `ChainProgress` und `ReplaceSegment` -- Abschnittsgrenzen bei
+einfacher Reise, Kette, markiertem Ende, leerer Route und ungueltigen Grenzen; dass nach dem Ersetzen die Zaehler
+stimmen).
 
-**Nicht getestet:** der Ablauf im Zustandsautomaten (Planen beim Start, Neuplanen am Wegpunkt, Ueberspringen,
-`FinishRoute`) -- dafuer fehlt ein laufender Weltserver; er ist gegen die Core-Header uebersetzt und Zeile fuer
-Zeile durchgesehen, aber nicht ausgefuehrt. Ebenfalls nicht im Spiel geprueft ist, wie Carbonite verkettete Ziele
+Eine **unabhaengige Durchsicht** verglich Alt und Neu fuer Reisen ohne Wegpunkte in einem Modell (300000 zufaellige
+Reisen: keine Abweichung in Routeninhalt, `legIdx`, Statusfeldern und Ausgang), liess die Buchfuehrung unter
+ASan/UBSan laufen (sauber) und fand die Luecke beim Ueberspringen eines Wegpunkts in `SetLegTarget`, die
+uneinheitliche Feststeck-Regel, die veralteten Statusfelder und den erstarrten Fortschritt bei Kartenwechseln --
+alles behoben (siehe oben).
+
+**Nicht getestet:** der Ablauf im echten Zustandsautomaten (Planen beim Start, Neuplanen am Wegpunkt,
+Ueberspringen, `FinishRoute`) -- dafuer fehlt ein laufender Weltserver; er ist gegen die Core-Header
+uebersetzt, Zeile fuer Zeile durchgesehen und als Modell mit Attrappen fuer Spieler und Planer ausgefuehrt, aber
+nicht in AzerothCore. Ebenfalls nicht im Spiel geprueft ist, wie Carbonite verkettete Ziele
 ablegt (die Erkennung im Addon beruht auf `.Tar`/`.Tra1` und ist tolerant gebaut; `/at route roh` zeigt die
 Rohdaten).
 

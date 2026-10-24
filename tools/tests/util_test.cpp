@@ -1165,6 +1165,56 @@ static void TestWaypointChain()
         CHECK(c.total == 3 && c.done == 2);
     }
 
+    // --- SegmentOf --------------------------------------------------------------
+    {
+        AT::SegmentSpan sp = AT::SegmentOf({}, 3);
+        CHECK(sp.first == 0 && sp.last == 0);                  // leere Route
+
+        // einfache Reise: ein einziger Abschnitt
+        std::vector<bool> plain = { false, false, false, false };
+        for (size_t i = 0; i < 4; ++i)
+        {
+            sp = AT::SegmentOf(plain, i);
+            CHECK(sp.first == 0 && sp.last == 3);
+        }
+
+        // Kette: Wegpunkte bei 2 und 4, Ende bei 6
+        std::vector<bool> chain = { false, false, true, false, true, false, false };
+        sp = AT::SegmentOf(chain, 0);
+        CHECK(sp.first == 0 && sp.last == 2);
+        sp = AT::SegmentOf(chain, 2);                          // auf dem Wegpunkt: er beendet SEINEN Abschnitt
+        CHECK(sp.first == 0 && sp.last == 2);
+        sp = AT::SegmentOf(chain, 3);                          // nach dem Wegpunkt beginnt der naechste
+        CHECK(sp.first == 3 && sp.last == 4);
+        sp = AT::SegmentOf(chain, 4);
+        CHECK(sp.first == 3 && sp.last == 4);
+        sp = AT::SegmentOf(chain, 5);
+        CHECK(sp.first == 5 && sp.last == 6);
+        sp = AT::SegmentOf(chain, 6);
+        CHECK(sp.first == 5 && sp.last == 6);
+        sp = AT::SegmentOf(chain, 99);                         // hinter dem Ende: der letzte Abschnitt
+        CHECK(sp.first == 5 && sp.last == 6);
+
+        // zwei Wegpunkte hintereinander: der Abschnitt dazwischen besteht aus dem zweiten allein
+        std::vector<bool> adjacent = { false, true, true, false };
+        sp = AT::SegmentOf(adjacent, 2);
+        CHECK(sp.first == 2 && sp.last == 2);
+
+        // ein markiertes Ende bleibt das Ende seines eigenen Abschnitts
+        std::vector<bool> marked = { false, true };
+        sp = AT::SegmentOf(marked, 1);
+        CHECK(sp.first == 0 && sp.last == 1);
+        sp = AT::SegmentOf(marked, 0);
+        CHECK(sp.first == 0 && sp.last == 1);
+
+        // ein Wegpunkt an erster Stelle: danach beginnt der Abschnitt zum Ende
+        std::vector<bool> head = { true, false };
+        sp = AT::SegmentOf(head, 0);
+        CHECK(sp.first == 0 && sp.last == 0);
+        sp = AT::SegmentOf(head, 1);
+        CHECK(sp.first == 1 && sp.last == 1);
+    }
+
     // --- ReplaceSegment ---------------------------------------------------------
     {
         auto mk = [](char const* name, bool waypoint, ATLegKind kind = AT_LEG_WALK)
